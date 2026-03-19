@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using SeapowerMultiplayer.Launcher.Services;
@@ -43,8 +44,32 @@ namespace SeapowerMultiplayer.Launcher
 
             UpdateInstallStatus();
 
+            // After a self-update, automatically reinstall the mod DLLs
+            // so the game gets the new plugin without a manual "Repair" click.
+            if (Environment.GetCommandLineArgs().Contains("--post-update"))
+                _ = PostUpdateRepairAsync();
+
             // Check for updates in the background (don't block startup)
             _ = CheckForUpdateAsync();
+        }
+
+        private async Task PostUpdateRepairAsync()
+        {
+            var gameDir = _config.Settings.GameDirectory;
+            if (string.IsNullOrEmpty(gameDir) || !GameDetector.IsValidGameDir(gameDir))
+                return;
+
+            var progress = new Progress<string>(msg => TxtStatus.Text = msg);
+            try
+            {
+                await Installer.RepairAsync(gameDir, progress);
+                TxtStatus.Text = "Update applied — mod reinstalled!";
+                UpdateInstallStatus();
+            }
+            catch (Exception ex)
+            {
+                TxtStatus.Text = $"Post-update repair failed: {ex.Message}";
+            }
         }
 
         private async Task CheckForUpdateAsync()

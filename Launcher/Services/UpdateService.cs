@@ -148,7 +148,7 @@ namespace SeapowerMultiplayer.Launcher.Services
                 @echo off
                 timeout /t 2 /nobreak >nul
                 move /y "{tempExe}" "{currentExe}"
-                start "" "{currentExe}"
+                start "" "{currentExe}" --post-update
                 del "%~f0"
                 """;
             await File.WriteAllTextAsync(tempBat, script);
