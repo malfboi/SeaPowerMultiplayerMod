@@ -1,0 +1,101 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>SeapowerMultiplayer</AssemblyName>
+    <RootNamespace>SeapowerMultiplayer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Copy output DLL to BepInEx plugins folder after build -->
+    <!-- Adjust GameDir to match your Seapower install path -->
+    <GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Sea Power</GameDir>
+  </PropertyGroup>
+
+  <!-- BepInEx and Harmony — reference game-installed DLLs -->
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(GameDir)\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Game code lives in Seapower-Scripts.dll, not Assembly-CSharp.dll -->
+    <Reference Include="Seapower-Scripts">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\Seapower-Scripts.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UniRx">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\UniRx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ParadoxNotion">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\ParadoxNotion.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- LiteNetLib — UDP networking -->
+  <ItemGroup>
+    <PackageReference Include="LiteNetLib" Version="1.1.0" />
+  </ItemGroup>
+
+
+  <PropertyGroup>
+    <GameDir2>C:\Users\hughe\Desktop\Sea Power</GameDir2>
+  </PropertyGroup>
+
+  <Target Name="CopyToPlugins" AfterTargets="Build">
+    <!-- Copy our plugin DLL -->
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(GameDir)\BepInEx\plugins\" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll"
+          DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
+    <!-- Copy NuGet dependency DLLs (e.g. LiteNetLib) that BepInEx needs at runtime -->
+    <ItemGroup>
+      <PluginDeps Include="$(OutputPath)*.dll"
+                  Exclude="$(OutputPath)$(AssemblyName).dll;$(OutputPath)System.*.dll;$(OutputPath)mscorlib.dll;$(OutputPath)netstandard.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PluginDeps)"
+          DestinationFolder="$(GameDir)\BepInEx\plugins\" />
+    <Copy SourceFiles="@(PluginDeps)"
+          DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
+    <Message Text="Copied plugin + dependencies to $(GameDir)\BepInEx\plugins\" Importance="high" />
+    <Message Text="Copied plugin + dependencies to $(GameDir2)\BepInEx\plugins\" Importance="high" />
+  </Target>
+
+</Project>

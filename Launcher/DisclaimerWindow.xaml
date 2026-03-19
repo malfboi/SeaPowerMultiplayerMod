@@ -1,0 +1,104 @@
+<Window x:Class="SeapowerMultiplayer.Launcher.DisclaimerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Seapower Multiplayer — Release Notes"
+        Width="520" Height="520"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource PrimaryBg}">
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0"
+                   Text="v0.1.0 Release Notes"
+                   Foreground="{StaticResource TextPrimary}"
+                   FontSize="18"
+                   FontWeight="Bold"
+                   Margin="0,0,0,12"/>
+
+        <!-- Scrollable content -->
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="0,0,0,12">
+            <StackPanel>
+                <!-- Known Issues -->
+                <TextBlock Text="KNOWN ISSUES"
+                           Foreground="{StaticResource WarningOrange}"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,6"/>
+
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,4"
+                           Text="&#x2022; When giving a unit its first order it may snap back to the original position - dragging or deleting the order should resolve this."/>
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,4"
+                           Text="&#x2022; Carrier ops can desync at 10x time compression and above."/>
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,4"
+                           Text="&#x2022; Defensive missiles can desync in high missile scenarios but should not affect combat outcomes."/>
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="&#x2022; Weapons fired at a position rather than a target do not sync (e.g., torpedoes or Tomahawks fired at a location instead of a unit)."/>
+
+                <!-- Fixed Since Last Update -->
+                <TextBlock Text="FIXED SINCE LAST UPDATE"
+                           Foreground="{StaticResource SuccessGreen}"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,6"/>
+
+                <TextBlock Foreground="{StaticResource TextSecondary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="First release - nothing to report yet!"/>
+
+                <!-- Disclaimer -->
+                <Rectangle Height="1"
+                           Fill="{StaticResource BorderColor}"
+                           Margin="0,4,0,12"/>
+
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           FontStyle="Italic"
+                           Text="I acknowledge that this is an early access multiplayer mod for a single player game. It is not an esports-ready experience and I will not complain when bugs and errors inevitably cause an outcome to not go my way. Instead, I will provide useful feedback."/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Checkbox -->
+        <CheckBox Grid.Row="2"
+                  x:Name="ChkAcknowledge"
+                  Content="I understand and acknowledge the above"
+                  Foreground="{StaticResource TextPrimary}"
+                  FontSize="13"
+                  Margin="0,0,0,12"
+                  Checked="ChkAcknowledge_Changed"
+                  Unchecked="ChkAcknowledge_Changed"/>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="BtnAccept"
+                    Content="Continue"
+                    Padding="24,10"
+                    IsEnabled="False"
+                    Click="BtnAccept_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+
+# Local files
+docs/
+TODO.md
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Rider
+.idea/
+

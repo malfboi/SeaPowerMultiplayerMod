@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <AssemblyName>SeapowerMultiplayerLauncher</AssemblyName>
+    <RootNamespace>SeapowerMultiplayer.Launcher</RootNamespace>
+    <ApplicationIcon>SPM.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- Embed mod DLLs from the plugin build output -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\src\bin\Debug\net472\SeapowerMultiplayer.dll"
+                      LogicalName="SeapowerMultiplayer.dll"
+                      Condition="Exists('..\src\bin\Debug\net472\SeapowerMultiplayer.dll')" />
+    <EmbeddedResource Include="..\src\bin\Debug\net472\LiteNetLib.dll"
+                      LogicalName="LiteNetLib.dll"
+                      Condition="Exists('..\src\bin\Debug\net472\LiteNetLib.dll')" />
+  </ItemGroup>
+
+  <!-- BepInEx zip — user places this in Resources/ manually -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\BepInEx_win_x64_5.4.23.5.zip"
+                      LogicalName="BepInEx.zip"
+                      Condition="Exists('Resources\BepInEx_win_x64_5.4.23.5.zip')" />
+  </ItemGroup>
+
+</Project>

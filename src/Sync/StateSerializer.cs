@@ -1,0 +1,1010 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using SeaPower;
+using SeapowerMultiplayer.Messages;
+using UnityEngine;
+
+namespace SeapowerMultiplayer
+{
+    public static class StateSerializer
+    {
+        public static int GetUniqueId(ObjectBase obj) => obj.UniqueID;
+
+        // Cached reflection for protected field (avoids Traverse per-unit in hot path)
+        private static readonly FieldInfo _setRudderAngleField =
+            AccessTools.Field(typeof(Vessel), "_setRudderAngle");
+
+        /// <summary>
+        /// Find any ObjectBase by UniqueID. Uses SceneCreator's fast dictionary first,
+        /// falls back to global search for dynamically spawned objects (missiles, torpedoes)
+        /// that aren't in the mission-file dictionary.
+        /// </summary>
+        public static ObjectBase FindById(int id)
+        {
+            var obj = Singleton<SceneCreator>.Instance.FindObjectById(id);
+            if (obj != null) return obj;
+            return SceneCreator.FindGlobalObjectById(id);
+        }
+
+        public static StateUpdateMessage Capture(Taskforce filterTaskforce = null)
+        {
+            var msg = new StateUpdateMessage
+            {
+                Timestamp   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                GameSeconds = Singleton<SeaPower.Environment>.Instance.Hour * 3600f
+                            + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
+                            + Singleton<SeaPower.Environment>.Instance.Seconds,
+            };
+
+            AddUnits<Vessel>    (msg, UnitType.Vessel,     filterTaskforce);
+            AddUnits<Submarine> (msg, UnitType.Submarine,  filterTaskforce);
+            AddUnits<Aircraft>  (msg, UnitType.Aircraft,   filterTaskforce);
+            AddUnits<Helicopter>(msg, UnitType.Helicopter, filterTaskforce);
+            AddUnits<LandUnit>  (msg, UnitType.LandUnit,   filterTaskforce);
+            // Biologics excluded — ambient sonar contacts, not gameplay units
+
+            if (filterTaskforce == null)
+            {
+                // Co-op: all projectiles (host-authoritative)
+                AddProjectiles<Missile>(msg, 0);
+                AddProjectiles<Torpedo>(msg, 1);
+            }
+            else
+            {
+                // PvP: owned projectiles only (owner-authoritative)
+                AddOwnedProjectiles<Missile>(msg, 0, filterTaskforce);
+                AddOwnedProjectiles<Torpedo>(msg, 1, filterTaskforce);
+            }
+
+            Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
+            return msg;
+        }
+
+        private static void AddUnits<T>(StateUpdateMessage msg, UnitType kind, Taskforce filterTf = null)
+            where T : ObjectBase
+        {
+            foreach (var unit in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            {
+                if (filterTf != null && unit._taskforce != filterTf) continue;
+
+                // Encode as absolute GeoPosition (longitude/latitude/height) so
+                // positions are independent of each machine's floating origin.
+                // In PvP each side centers on its own fleet, so transform.position
+                // is relative to different origins on each machine.
+                var geo = Utils.worldPositionFromUnityToLongLat(
+                    unit.transform.position, Globals._currentCenterTile);
+                float rudder = _setRudderAngleField != null && unit is Vessel
+                    ? (float)_setRudderAngleField.GetValue(unit) : 0f;
+
+                float desiredAlt = 0f;
+                if (unit is Aircraft || unit is Helicopter)
+                    desiredAlt = (float)unit.DesiredAltitude.Value;
+
+                msg.Units.Add(new UnitState
+                {
+                    EntityId         = GetUniqueId(unit),
+                    Kind             = kind,
+                    X                = (float)geo._longitude,
+                    Y                = (float)geo._height,
+                    Z                = (float)geo._latitude,
+                    Heading          = unit.transform.eulerAngles.y,
+                    Speed            = unit._velocityInKnots,
+                    IsDestroyed      = unit.IsDestroyed,
+                    IsSinking        = unit.Compartments != null && unit.Compartments._isSinking,
+                    RudderAngle      = rudder,
+                    Telegraph        = unit.getTelegraph(),
+                    DesiredAltitude  = desiredAlt,
+                    Pitch            = unit.transform.eulerAngles.x,
+                    Roll             = unit.transform.eulerAngles.z,
+                    IntegrityPercent = unit.Compartments?.IntegrityPercentage ?? 100f,
+                });
+            }
+        }
+
+        private static void AddProjectiles<T>(StateUpdateMessage msg, byte kind)
+            where T : ObjectBase
+        {
+            foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            {
+                if (p.IsDestroyed) continue;
+                var pos = p.transform.position;
+                msg.Projectiles.Add(new ProjectileState
+                {
+                    EntityId = GetUniqueId(p),
+                    Kind     = kind,
+                    X        = pos.x,
+                    Y        = pos.y,
+                    Z        = pos.z,
+                    Heading  = p.transform.eulerAngles.y,
+                });
+            }
+        }
+
+        private static readonly FieldInfo _launchPlatformField =
+            AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
+
+        private static void AddOwnedProjectiles<T>(StateUpdateMessage msg, byte kind, Taskforce ownerTf)
+            where T : ObjectBase
+        {
+            foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            {
+                if (p.IsDestroyed) continue;
+                var launcher = _launchPlatformField?.GetValue(p) as ObjectBase;
+                if (launcher == null || launcher._taskforce != ownerTf) continue;
+
+                // Encode as GeoPosition (floating-origin safe)
+                var geo = Utils.worldPositionFromUnityToLongLat(
+                    p.transform.position, Globals._currentCenterTile);
+
+                msg.Projectiles.Add(new ProjectileState
+                {
+                    EntityId = GetUniqueId(p),
+                    Kind     = kind,
+                    X        = (float)geo._longitude,
+                    Y        = (float)geo._height,
+                    Z        = (float)geo._latitude,
+                    Heading  = p.transform.eulerAngles.y,
+                    Speed    = (p is WeaponBase wb) ? wb._velocityInKnots : 0f,
+                    Pitch    = p.transform.eulerAngles.x,
+                });
+            }
+        }
+    }
+
+    public static class StateApplier
+    {
+        /// <summary>
+        /// Decompose total-seconds-since-midnight into Hour/Minutes/Seconds
+        /// and assign all three to the Environment, avoiding minute/hour
+        /// boundary bugs from setting Seconds alone.
+        /// </summary>
+        internal static void SetGameTime(SeaPower.Environment env, float totalSeconds)
+        {
+            if (totalSeconds < 0f) totalSeconds = 0f;
+            int total = (int)totalSeconds;
+            env.Hour    = (total / 3600) % 24;
+            env.Minutes = (total % 3600) / 60;
+            env.Seconds = totalSeconds - (total / 60) * 60f; // preserve fractional seconds
+        }
+
+        private const float SnapThreshold  = 500f;  // teleport if drift exceeds this (co-op)
+
+        // ── PvP hybrid correction constants ────────────────────────────────
+        // Fixed strong corrections — owner is definitively authoritative.
+        // Ship/Submarine
+        private const float PvpShipSnapThreshold = 150f;
+        private const float PvpShipPosLerp       = 0.5f;
+        private const float PvpShipHeadingLerp   = 0.6f;
+        private const float PvpShipSpeedLerp     = 0.5f;
+        // Aircraft/Helicopter
+        private const float PvpAirSnapThreshold  = 300f;
+        private const float PvpAirPosLerp        = 0.6f;
+        private const float PvpAirHeadingLerp    = 0.7f;
+        private const float PvpAirSpeedLerp      = 0.5f;
+        // Projectiles (missiles/torpedoes)
+        private const float PvpProjSnapThreshold = 100f;
+        private const float PvpProjPosLerp       = 0.7f;
+        private const float PvpProjHeadingLerp   = 0.8f;
+        private const float PvpProjSpeedLerp     = 0.6f;
+
+        // Track projectile IDs across state updates for disappearance detection.
+        // If host's state update no longer includes a projectile, it was destroyed.
+        private static HashSet<int> _prevProjectileIds = new HashSet<int>();
+        private static HashSet<int> _currProjectileIds = new HashSet<int>();
+
+        // ── Stats (read by UI) ──────────────────────────────────────────────
+
+        public static int LastRemoteUnitCount => _lastSeenRemoteUnitIds.Count;
+        public static int OrphanCandidateCount => _missedUpdateCount.Count;
+        public static int ProjectilesDestroyedByTimeout { get; private set; }
+
+        // PvP per-category drift (computed each Apply cycle)
+        public static float PvpShipDriftAvg { get; private set; }
+        public static float PvpShipDriftMax { get; private set; }
+        public static float PvpAirDriftAvg { get; private set; }
+        public static float PvpAirDriftMax { get; private set; }
+
+        // Per-frame PvP drift accumulators
+        private static float _pvpShipDriftSum, _pvpShipDriftMaxAcc;
+        private static int _pvpShipCount;
+        private static float _pvpAirDriftSum, _pvpAirDriftMaxAcc;
+        private static int _pvpAirCount;
+
+        // ── PvP missile disappearance tracking ──────────────────────────────
+        private static readonly Dictionary<int, int> _missedProjectileCount = new();
+        private const int MissedProjectileUpdatesBeforeDestroy = 5; // ~500ms at 10Hz
+
+        // ── PvP orphan cleanup ────────────────────────────────────────────────
+        // Track which remote unit IDs appear in incoming state updates.
+        // Units missing from multiple cleanup cycles get destroyed.
+        private static readonly HashSet<int> _lastSeenRemoteUnitIds = new();
+        private static readonly Dictionary<int, int> _missedUpdateCount = new(); // unitId → consecutive misses
+        private const int MissedCyclesBeforeDestroy = 6; // ~30s (6 cleanup cycles × 5s)
+
+        // ── Per-frame projectile smoothing ──────────────────────────────────
+        // Instead of snapping missiles to host positions every 500ms (visible jumps),
+        // store the target and interpolate toward it each frame. The client's own
+        // missile simulation provides the baseline movement; we only nudge for drift.
+        private struct ProjectileTarget
+        {
+            public int    LocalId;
+            public Vector3 Position;
+            public float   Heading;
+        }
+        private static readonly Dictionary<int, ProjectileTarget> _projectileTargets = new();
+        private static readonly List<int> _staleTargets = new();
+
+        // Projectile smoothing constants
+        private const float ProjDriftIgnore = 2f;     // ignore drift under this
+        private const float ProjSnapThreshold = 500f;  // teleport above this
+        private const float ProjSmoothSpeed = 8f;      // base lerp speed (multiplied by deltaTime)
+
+        // Proximity-based correction: ramp up correction as projectile approaches target
+        private const float ProxStartDist = 500f;  // start ramping correction at this distance to target
+        private const float ProxMaxDist = 50f;      // full snap correction at this distance to target
+        private const float ProxMaxLerp = 1f;        // lerp multiplier at closest range (instant snap)
+
+        public static void Apply(StateUpdateMessage msg)
+        {
+            bool isHost = Plugin.Instance.CfgIsHost.Value;
+            bool isPvP  = Plugin.Instance.CfgPvP.Value;
+
+            // Co-op: only client applies (unchanged)
+            if (!isPvP && isHost) return;
+
+            // Don't process state updates until scene has loaded
+            if (SimSyncManager.CurrentState != SimState.Synchronized) return;
+
+            // PvP: need a valid _playerTaskforce to filter — bail if not set yet
+            if (isPvP && Globals._playerTaskforce == null) return;
+
+            // Co-op: drift detection (PvP puppets have no drift)
+            float lerpFactor = 0f, driftThreshold = 0f;
+            bool correctSpeed = false;
+            if (!isPvP)
+            {
+                DriftDetector.BeginFrame();
+                lerpFactor = DriftDetector.EffectiveLerpFactor;
+                driftThreshold = DriftDetector.EffectiveDriftThreshold;
+                correctSpeed = DriftDetector.ShouldCorrectSpeed;
+            }
+
+            // PvP: rebuild remote unit ID set for orphan cleanup (populated in loop below)
+            if (isPvP)
+            {
+                _lastSeenRemoteUnitIds.Clear();
+                _pvpShipDriftSum = _pvpShipDriftMaxAcc = 0f; _pvpShipCount = 0;
+                _pvpAirDriftSum = _pvpAirDriftMaxAcc = 0f; _pvpAirCount = 0;
+            }
+
+            foreach (var state in msg.Units)
+            {
+                if (isPvP) _lastSeenRemoteUnitIds.Add(state.EntityId);
+                var unit = StateSerializer.FindById(state.EntityId);
+                if (unit == null) continue;
+
+                // Skip projectiles found by coincidental ID collision with a unit ID
+                if (unit is WeaponBase) continue;
+
+                // PvP: skip own units — we are authoritative for them
+                if (isPvP && unit._taskforce == Globals._playerTaskforce) continue;
+
+                // PvP: skip aircraft still in the flight deck pipeline
+                // (prevents state updates from fighting with elevator/taxi/takeoff positioning)
+                if (isPvP && FlightOpsHandler.ShouldSkipStateUpdate(state.EntityId, unit)) continue;
+
+                // Sinking sync: if remote is sinking, trigger sinking locally
+                var comps = unit.Compartments;
+                if (state.IsSinking && comps != null && !comps._isSinking)
+                {
+                    Plugin.Log.LogInfo($"[StateApplier] Unit {state.EntityId} sinking on remote — triggering local sink");
+                    comps.Sink(Compartments.SinkFocus.All, false);
+                    continue;
+                }
+
+                // If already sinking locally, let the animation play — don't hard-destroy
+                if (comps != null && comps._isSinking) continue;
+
+                // Instant destruction (explosion, no sinking phase)
+                if (state.IsDestroyed && !unit.IsDestroyed)
+                {
+                    Plugin.Log.LogInfo($"[StateApplier] Unit {state.EntityId} destroyed on remote — destroying locally");
+                    CombatEventHandler.DestroyFromNetwork(unit);
+                    continue;
+                }
+
+                // Convert absolute GeoPosition back to local transform coordinates
+                var geo = new GeoPosition
+                {
+                    _longitude = state.X,
+                    _latitude  = state.Z,
+                    _height    = state.Y,
+                };
+                Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                Vector3 hostPos = new Vector3(local.x, state.Y, local.y);
+                if (isPvP)
+                {
+                    // PvP hybrid: local physics simulates, owner's state provides corrections
+                    bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
+                    float snapThresh = isAir ? PvpAirSnapThreshold : PvpShipSnapThreshold;
+                    float posLerp    = isAir ? PvpAirPosLerp       : PvpShipPosLerp;
+                    float hdgLerp    = isAir ? PvpAirHeadingLerp   : PvpShipHeadingLerp;
+                    float spdLerp    = isAir ? PvpAirSpeedLerp     : PvpShipSpeedLerp;
+
+                    float drift = Vector3.Distance(unit.transform.position, hostPos);
+
+                    // Record per-category drift for UI
+                    if (isAir)
+                    {
+                        _pvpAirDriftSum += drift;
+                        if (drift > _pvpAirDriftMaxAcc) _pvpAirDriftMaxAcc = drift;
+                        _pvpAirCount++;
+                    }
+                    else
+                    {
+                        _pvpShipDriftSum += drift;
+                        if (drift > _pvpShipDriftMaxAcc) _pvpShipDriftMaxAcc = drift;
+                        _pvpShipCount++;
+                    }
+
+                    if (drift > snapThresh)
+                    {
+                        unit.transform.position = hostPos;
+                        unit.transform.eulerAngles = new Vector3(state.Pitch, state.Heading, state.Roll);
+                        unit._velocityInKnots = state.Speed;
+                    }
+                    else
+                    {
+                        unit.transform.position = Vector3.Lerp(unit.transform.position, hostPos, posLerp);
+                        float heading = Mathf.LerpAngle(unit.transform.eulerAngles.y, state.Heading, hdgLerp);
+                        float pitch = isAir
+                            ? Mathf.LerpAngle(unit.transform.eulerAngles.x, state.Pitch, hdgLerp)
+                            : unit.transform.eulerAngles.x;
+                        float roll = isAir
+                            ? Mathf.LerpAngle(unit.transform.eulerAngles.z, state.Roll, hdgLerp)
+                            : unit.transform.eulerAngles.z;
+                        unit.transform.eulerAngles = new Vector3(pitch, heading, roll);
+                        unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, state.Speed, spdLerp);
+                    }
+                }
+                else
+                {
+                    // Co-op: drift-based correction (unchanged)
+                    float drift = Vector3.Distance(unit.transform.position, hostPos);
+                    float speedDrift = Mathf.Abs(unit._velocityInKnots - state.Speed);
+                    float headingDrift = Mathf.Abs(Mathf.DeltaAngle(unit.transform.eulerAngles.y, state.Heading));
+                    DriftDetector.RecordUnit(drift, speedDrift, headingDrift);
+
+                    if (drift < driftThreshold) continue;
+
+                    DriftDetector.RecordCorrection();
+
+                    if (drift > SnapThreshold)
+                    {
+                        unit.transform.position = hostPos;
+                        unit.transform.eulerAngles = new Vector3(
+                            unit.transform.eulerAngles.x, state.Heading, unit.transform.eulerAngles.z);
+                    }
+                    else
+                    {
+                        unit.transform.position = Vector3.Lerp(unit.transform.position, hostPos, lerpFactor);
+                        float correctedHeading = Mathf.LerpAngle(
+                            unit.transform.eulerAngles.y, state.Heading, lerpFactor);
+                        unit.transform.eulerAngles = new Vector3(
+                            unit.transform.eulerAngles.x, correctedHeading, unit.transform.eulerAngles.z);
+                    }
+
+                    if (correctSpeed)
+                        unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, state.Speed, Mathf.Min(lerpFactor, 0.3f));
+                }
+            }
+
+            // Finalize per-category drift stats for PvP
+            if (isPvP)
+            {
+                PvpShipDriftAvg = _pvpShipCount > 0 ? _pvpShipDriftSum / _pvpShipCount : 0f;
+                PvpShipDriftMax = _pvpShipDriftMaxAcc;
+                PvpAirDriftAvg = _pvpAirCount > 0 ? _pvpAirDriftSum / _pvpAirCount : 0f;
+                PvpAirDriftMax = _pvpAirDriftMaxAcc;
+            }
+
+            // DriftDetector: skip for PvP (puppets have no drift)
+            if (!isPvP)
+                DriftDetector.EndFrame(CountLocalUnits(), msg.Units.Count);
+
+            // ── Game time drift correction (host is time authority) ──────────
+            if (!isHost && msg.GameSeconds > 0f)
+            {
+                float rttSec = NetworkManager.Instance.LastRttMs / 2000f; // one-way delay
+                float tc = GameTime.IsPaused() ? 0f : GameTime.TimeCompression;
+                float estimatedHostTime = msg.GameSeconds + rttSec * tc;
+
+                var env = Singleton<SeaPower.Environment>.Instance;
+                float localTime = env.Hour * 3600f + env.Minutes * 60f + env.Seconds;
+                float drift = estimatedHostTime - localTime;
+
+                if (Mathf.Abs(drift) > 10f)
+                {
+                    // Hard snap: decompose total seconds into hour/min/sec
+                    SetGameTime(env, estimatedHostTime);
+                    Plugin.Log.LogWarning($"[TimeSync] Hard snap: drift={drift:F2}s");
+                }
+                else if (Mathf.Abs(drift) > 0.1f)
+                {
+                    // Soft correction: add fraction of drift to seconds.
+                    // Environment.OnUpdate() handles rollover on next tick.
+                    float correction = drift * 0.2f;
+                    env.Seconds += correction;
+                }
+            }
+
+            // ── Projectile sync ──────────────────────────────────────────────────
+            if (isPvP)
+            {
+                // PvP: correct enemy missile/torpedo positions with authoritative lerp
+                _currProjectileIds.Clear();
+                foreach (var proj in msg.Projectiles)
+                {
+                    _currProjectileIds.Add(proj.EntityId);
+
+                    var projObj = StateSerializer.FindById(proj.EntityId);
+                    if (projObj == null || projObj.IsDestroyed) continue;
+
+                    // Skip Bombs (sonobuoys) found by coincidental ID collision
+                    // with a remote missile/torpedo — sonobuoys are stationary and
+                    // not included in projectile state sync
+                    if (projObj is Bomb) continue;
+
+                    // Convert GeoPosition to local coords
+                    var projGeo = new GeoPosition
+                    {
+                        _longitude = proj.X,
+                        _latitude  = proj.Z,
+                        _height    = proj.Y,
+                    };
+                    Vector2 projLocal = Utils.longLatToLocal(projGeo, Globals._currentCenterTile);
+                    Vector3 projPos = new Vector3(projLocal.x, proj.Y, projLocal.y);
+
+                    float projDrift = Vector3.Distance(projObj.transform.position, projPos);
+
+                    if (projDrift > PvpProjSnapThreshold)
+                    {
+                        projObj.transform.position = projPos;
+                        projObj.transform.eulerAngles = new Vector3(
+                            proj.Pitch, proj.Heading, projObj.transform.eulerAngles.z);
+                        if (projObj is WeaponBase wb)
+                            wb._velocityInKnots = proj.Speed;
+                    }
+                    else if (projDrift > 2f)
+                    {
+                        projObj.transform.position = Vector3.Lerp(
+                            projObj.transform.position, projPos, PvpProjPosLerp);
+                        float heading = Mathf.LerpAngle(
+                            projObj.transform.eulerAngles.y, proj.Heading, PvpProjHeadingLerp);
+                        float pitch = Mathf.LerpAngle(
+                            projObj.transform.eulerAngles.x, proj.Pitch, PvpProjHeadingLerp);
+                        projObj.transform.eulerAngles = new Vector3(
+                            pitch, heading, projObj.transform.eulerAngles.z);
+                        if (projObj is WeaponBase wb)
+                            wb._velocityInKnots = Mathf.Lerp(
+                                wb._velocityInKnots, proj.Speed, PvpProjSpeedLerp);
+                    }
+                }
+
+                // Disappearance tracking: grace period for missed projectiles
+                foreach (int id in _prevProjectileIds)
+                {
+                    if (_currProjectileIds.Contains(id))
+                    {
+                        _missedProjectileCount.Remove(id);
+                        continue;
+                    }
+
+                    _missedProjectileCount.TryGetValue(id, out int misses);
+                    misses++;
+                    _missedProjectileCount[id] = misses;
+
+                    if (misses >= MissedProjectileUpdatesBeforeDestroy)
+                    {
+                        var obj = StateSerializer.FindById(id);
+                        if (obj != null && !obj.IsDestroyed)
+                        {
+                            CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
+                            ProjectilesDestroyedByTimeout++;
+                            Plugin.Log.LogInfo($"[StateApplier] PvP: Missile {id} disappeared from owner's updates — destroyed");
+                        }
+                        _missedProjectileCount.Remove(id);
+                    }
+                }
+
+                var temp = _prevProjectileIds;
+                _prevProjectileIds = _currProjectileIds;
+                _currProjectileIds = temp;
+            }
+            else
+            {
+                // Co-op: client-only projectile sync (unchanged)
+                if (isHost) return;
+
+                _currProjectileIds.Clear();
+                foreach (var proj in msg.Projectiles)
+                {
+                    _currProjectileIds.Add(proj.EntityId);
+
+                    var projWorldPos = new Vector3(proj.X, proj.Y, proj.Z);
+                    ProjectileIdMapper.UpdateMapping(proj.EntityId, projWorldPos);
+
+                    var p = ProjectileIdMapper.FindByHostId(proj.EntityId);
+                    if (p == null) continue;
+
+                    _projectileTargets[proj.EntityId] = new ProjectileTarget
+                    {
+                        LocalId  = p.UniqueID,
+                        Position = projWorldPos,
+                        Heading  = proj.Heading,
+                    };
+                }
+
+                foreach (int id in _prevProjectileIds)
+                {
+                    if (_currProjectileIds.Contains(id)) continue;
+                    _projectileTargets.Remove(id);
+                    var obj = ProjectileIdMapper.FindByHostId(id);
+                    if (obj == null || obj.IsDestroyed) continue;
+
+                    CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
+                    ProjectileIdMapper.OnProjectileDestroyed(obj.UniqueID);
+                    ProjectilesDestroyedByTimeout++;
+                    Plugin.Log.LogInfo($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
+                }
+
+                var temp = _prevProjectileIds;
+                _prevProjectileIds = _currProjectileIds;
+                _currProjectileIds = temp;
+            }
+        }
+
+        /// <summary>
+        /// Called every frame (from StateBroadcaster.Update) to smoothly interpolate
+        /// projectile positions toward host targets instead of snapping at 2 Hz.
+        /// Correction strength ramps up as the projectile approaches its target
+        /// to ensure accurate impact location.
+        /// </summary>
+        public static void SmoothProjectiles()
+        {
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (_projectileTargets.Count == 0) return;
+
+            float baseT = Mathf.Clamp01(Time.deltaTime * ProjSmoothSpeed);
+
+            _staleTargets.Clear();
+            foreach (var kvp in _projectileTargets)
+            {
+                var target = kvp.Value;
+                var p = StateSerializer.FindById(target.LocalId);
+                if (p == null || p.IsDestroyed)
+                {
+                    _staleTargets.Add(kvp.Key);
+                    continue;
+                }
+
+                float drift = Vector3.Distance(p.transform.position, target.Position);
+                if (drift < ProjDriftIgnore) continue;
+
+                // Calculate proximity multiplier: ramp correction as projectile nears its target.
+                // At >500 units from target: use base lerp.
+                // At <50 units from target: snap to host position (lerp=1).
+                float proxMul = 1f;
+                if (p is SeaPower.WeaponBase wb && wb.CurrentIntendedTargetObject != null)
+                {
+                    float distToTarget = Vector3.Distance(p.transform.position,
+                        wb.CurrentIntendedTargetObject.transform.position);
+                    if (distToTarget < ProxStartDist)
+                    {
+                        // InverseLerp: 500→0 maps to 0→1, then lerp base→max
+                        float proxT = 1f - Mathf.Clamp01((distToTarget - ProxMaxDist) / (ProxStartDist - ProxMaxDist));
+                        proxMul = Mathf.Lerp(1f, ProxMaxLerp / Mathf.Max(baseT, 0.01f), proxT);
+                    }
+                }
+
+                float t = Mathf.Clamp01(baseT * proxMul);
+
+                if (drift > ProjSnapThreshold || t >= 0.99f)
+                {
+                    p.transform.position = target.Position;
+                    p.transform.eulerAngles = new Vector3(
+                        p.transform.eulerAngles.x, target.Heading, p.transform.eulerAngles.z);
+                }
+                else
+                {
+                    p.transform.position = Vector3.Lerp(p.transform.position, target.Position, t);
+                    float heading = Mathf.LerpAngle(p.transform.eulerAngles.y, target.Heading, t);
+                    p.transform.eulerAngles = new Vector3(
+                        p.transform.eulerAngles.x, heading, p.transform.eulerAngles.z);
+                }
+            }
+
+            foreach (int id in _staleTargets)
+                _projectileTargets.Remove(id);
+        }
+
+        private static int CountLocalUnits(Taskforce filterTf = null)
+        {
+            int count = 0;
+            CountType<Vessel>(filterTf, ref count);
+            CountType<Submarine>(filterTf, ref count);
+            CountType<Aircraft>(filterTf, ref count);
+            CountType<Helicopter>(filterTf, ref count);
+            CountType<LandUnit>(filterTf, ref count);
+            return count;
+        }
+
+        private static void CountType<T>(Taskforce filterTf, ref int count) where T : ObjectBase
+        {
+            foreach (var u in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+                if (filterTf == null || u._taskforce == filterTf) count++;
+        }
+
+        /// <summary>
+        /// PvP orphan cleanup: destroy local enemy units that the remote side is
+        /// no longer reporting. Uses a grace period to handle packet loss.
+        /// Called periodically from StateBroadcaster.
+        /// Note: only checks units, NOT projectiles — projectile disappearance
+        /// is tracked separately in the Apply() PvP projectile processing path.
+        /// </summary>
+        public static void CleanupOrphans()
+        {
+            if (!Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (SimSyncManager.CurrentState != SimState.Synchronized) return;
+            if (_lastSeenRemoteUnitIds.Count == 0) return;
+
+            var enemyTf = Globals._enemyTaskforce;
+            if (enemyTf == null) return;
+
+            CheckOrphans<Vessel>(enemyTf);
+            CheckOrphans<Submarine>(enemyTf);
+            CheckOrphans<Aircraft>(enemyTf);
+            CheckOrphans<Helicopter>(enemyTf);
+            CheckOrphans<LandUnit>(enemyTf);
+        }
+
+        private static void CheckOrphans<T>(Taskforce enemyTf) where T : ObjectBase
+        {
+            foreach (var unit in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            {
+                if (unit.IsDestroyed) continue;
+                if (unit._taskforce != enemyTf) continue;
+
+                // Skip aircraft managed by the flight ops pipeline (awaiting ID remap
+                // or still in pipeline after remap). Their local IDs won't appear in
+                // state updates until remap completes and they become airborne.
+                if ((unit is Aircraft || unit is Helicopter) &&
+                    FlightOpsHandler.IsProtectedFromOrphanCleanup(unit))
+                    continue;
+
+                int id = StateSerializer.GetUniqueId(unit);
+                if (_lastSeenRemoteUnitIds.Contains(id))
+                {
+                    _missedUpdateCount.Remove(id);
+                    continue;
+                }
+
+                _missedUpdateCount.TryGetValue(id, out int misses);
+                misses++;
+                _missedUpdateCount[id] = misses;
+
+                if (misses >= MissedCyclesBeforeDestroy)
+                {
+                    Plugin.Log.LogWarning($"[OrphanCleanup] Destroying {typeof(T).Name} {id} — missing from {misses} cleanup cycles");
+                    CombatEventHandler.DestroyFromNetwork(unit);
+                    _missedUpdateCount.Remove(id);
+                }
+            }
+        }
+
+        /// <summary>Clear orphan tracking state (call on disconnect/scene change).</summary>
+        public static void ResetOrphanTracking()
+        {
+            _lastSeenRemoteUnitIds.Clear();
+            _missedUpdateCount.Clear();
+            ProjectilesDestroyedByTimeout = 0;
+            PvpShipDriftAvg = PvpShipDriftMax = 0f;
+            PvpAirDriftAvg = PvpAirDriftMax = 0f;
+        }
+    }
+
+    public static class OrderHandler
+    {
+        /// <summary>
+        /// True while applying an order received from the network.
+        /// Checked by Harmony Prefixes to avoid re-sending orders back.
+        /// </summary>
+        internal static bool ApplyingFromNetwork;
+
+        public static void Apply(PlayerOrderMessage msg)
+        {
+            if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
+
+            Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order}");
+
+            var unit = StateSerializer.FindById(msg.SourceEntityId);
+            if (unit == null)
+            {
+                Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found");
+                return;
+            }
+
+            ApplyingFromNetwork = true;
+            try
+            {
+                switch (msg.Order)
+                {
+                    case Messages.OrderType.SetSpeed:
+                        if (unit is Vessel v) v.setTelegraph((int)msg.Speed);
+                        break;
+
+                    // SetHeading removed — setRudderAngle patch was semantically wrong
+                    // (sent rudder angle as heading). Heading syncs via waypoints + state corrections.
+
+                    case Messages.OrderType.MoveTo:
+                        unit.setWaypointTask(new GeoPosition
+                        {
+                            _longitude = msg.DestX,
+                            _latitude  = msg.DestZ,
+                            _height    = msg.DestY,
+                        });
+                        break;
+
+                    case Messages.OrderType.FireWeapon:
+                    {
+                        // PvP: authorize enemy ship to spawn weapons from this order
+                        if (Plugin.Instance.CfgPvP.Value
+                            && unit._taskforce != Globals._playerTaskforce)
+                            PvPFireAuth.Authorize(unit.UniqueID, msg.ShotsToFire);
+
+                        ObjectBase? target = null;
+                        if (msg.TargetEntityId > 0)
+                        {
+                            // Try direct ID first (works for units with stable IDs),
+                            // then IdMapper (for projectiles with divergent IDs)
+                            target = StateSerializer.FindById(msg.TargetEntityId)
+                                  ?? ProjectileIdMapper.FindByHostId(msg.TargetEntityId);
+                        }
+                        var targetPos = new Vector3(msg.TargetX, msg.TargetY, msg.TargetZ);
+                        // PvP: coordinates are always GeoPosition — always convert back.
+                        // This is needed even when target is found, because the game falls
+                        // back to targetPosition if the target is destroyed mid-flight.
+                        if (Plugin.Instance.CfgPvP.Value)
+                        {
+                            var geo = new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY };
+                            Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                            targetPos = new Vector3(local.x, msg.TargetY, local.y);
+                        }
+                        if (target != null)
+                            unit.AddEngageTask(new EngageTask(msg.AmmoId, target,       unit, msg.ShotsToFire));
+                        else
+                            unit.AddEngageTask(new EngageTask(msg.AmmoId, targetPos, unit, msg.ShotsToFire));
+                        break;
+                    }
+
+                    case Messages.OrderType.AutoFireWeapon:
+                    {
+                        long recvMs = AIAutoFireState.DiagMs;
+
+                        // PvP: authorize enemy ship to spawn weapons from this order
+                        if (Plugin.Instance.CfgPvP.Value
+                            && unit._taskforce != Globals._playerTaskforce)
+                            PvPFireAuth.Authorize(unit.UniqueID, msg.ShotsToFire);
+
+                        ObjectBase? target = null;
+                        if (msg.TargetEntityId > 0)
+                        {
+                            target = StateSerializer.FindById(msg.TargetEntityId)
+                                  ?? ProjectileIdMapper.FindByHostId(msg.TargetEntityId);
+                        }
+                        var targetPos = new Vector3(msg.TargetX, msg.TargetY, msg.TargetZ);
+                        // PvP: coordinates are always GeoPosition — always convert back.
+                        // This is needed even when target is found, because the game falls
+                        // back to targetPosition if the target is destroyed mid-flight.
+                        if (Plugin.Instance.CfgPvP.Value)
+                        {
+                            var geo = new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY };
+                            Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                            targetPos = new Vector3(local.x, msg.TargetY, local.y);
+                        }
+                        int priority = (int)msg.Heading;
+
+                        // Log weapon system state BEFORE inserting the engage task
+                        string wsState = "";
+                        if (unit._obp != null)
+                        {
+                            foreach (var ws in unit._obp._weaponSystems)
+                            {
+                                wsState += $"\n    executing={ws._executingEngageTask} " +
+                                    $"autoEngaging={ws._isAutoEngaging} delay={ws._engageDelay:F3}s";
+                            }
+                        }
+                        Plugin.Log.LogInfo($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
+                            $"unit={unit.UniqueID} name={unit.name} ammo={msg.AmmoId} " +
+                            $"target={msg.TargetEntityId} targetFound={target != null} " +
+                            $"targetName={target?.name ?? "pos"} shots={msg.ShotsToFire} " +
+                            $"priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}" +
+                            $"{wsState}");
+
+                        unit.InsertEngageTask(msg.AmmoId, target, targetPos, msg.ShotsToFire,
+                                              priority, true, false, false);
+
+                        // Log weapon system state AFTER inserting
+                        string wsStateAfter = "";
+                        if (unit._obp != null)
+                        {
+                            foreach (var ws in unit._obp._weaponSystems)
+                            {
+                                if (ws._executingEngageTask)
+                                {
+                                    wsStateAfter += $"\n    delay={ws._engageDelay:F3}s " +
+                                        $"autoEngaging={ws._isAutoEngaging}";
+                                }
+                            }
+                        }
+                        if (wsStateAfter.Length > 0)
+                            Plugin.Log.LogInfo($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms POST_INSERT " +
+                                $"unit={unit.UniqueID}{wsStateAfter}");
+                        break;
+                    }
+
+                    case Messages.OrderType.SetDepth:
+                        if (unit is Submarine sub) sub.setDepth(msg.Speed);
+                        break;
+
+                    case Messages.OrderType.CeaseFire:
+                    {
+                        // PvP: suppress radio report for enemy units so players
+                        // don't hear the other side's comms
+                        bool report = !(Plugin.Instance.CfgPvP.Value
+                                     && unit._taskforce != Globals._playerTaskforce);
+                        unit.CeaseFire(report, true, true, false, true, true);
+                        break;
+                    }
+
+                    case Messages.OrderType.SetWeaponStatus:
+                        unit.SetWeaponStatus((ObjectBase.WeaponStatus)(int)msg.Speed, false);
+                        break;
+
+                    case Messages.OrderType.SetEMCON:
+                        unit.setEMCON(msg.Speed > 0f, false);
+                        break;
+
+                    case Messages.OrderType.SensorToggle:
+                    {
+                        int group = (int)msg.Heading;
+                        bool enable = msg.Speed > 0f;
+                        switch (group)
+                        {
+                            case 0: if (enable) unit.EnableAirSearchRadars(); else unit.DisableAirSearchRadars(); break;
+                            case 1: if (enable) unit.EnableSurfaceSearchRadars(); else unit.DisableSurfaceSearchRadars(); break;
+                            case 2: if (enable) unit.EnableActiveSonars(); else unit.DisableActiveSonars(); break;
+                        
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.SubmarineMast:
+                    {
+                        if (unit is Submarine mastSub)
+                        {
+                            switch ((int)msg.Heading)
+                            {
+                                case 0: mastSub.toggleSnorkelMast(); break;
+                                case 1: mastSub.togglePeriscopeMast(); break;
+                                case 2: mastSub.toggleRadarMast(); break;
+                                case 3: mastSub.toggleESMMast(); break;
+                            }
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.RemoveWaypoints:
+                        unit.RemoveWaypoints();
+                        break;
+
+                    case Messages.OrderType.DeleteWaypoint:
+                    {
+                        int wpIndex = (int)msg.Speed;
+                        var root = unit._userRoot;
+                        if (root != null && wpIndex >= 0 && wpIndex < root.TaskViewModels.Count)
+                            root.DeleteTask(root.TaskViewModels[wpIndex].Task);
+                        break;
+                    }
+
+                    case Messages.OrderType.EditWaypoint:
+                    {
+                        int wpIdx = (int)msg.Speed;
+                        var root = unit._userRoot;
+                        if (root != null && wpIdx >= 0 && wpIdx < root.TaskViewModels.Count)
+                        {
+                            if (root.TaskViewModels[wpIdx].Task is GoToWaypointTask wp)
+                                wp._waypointGeoPos.value = new GeoPosition
+                                {
+                                    _longitude = msg.DestX,
+                                    _latitude  = msg.DestZ,
+                                    _height    = msg.DestY,
+                                };
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.DropSonobuoy:
+                    {
+                        // PvP: authorize the enemy helicopter to spawn a weapon (sonobuoy Bomb)
+                        if (Plugin.Instance.CfgPvP.Value
+                            && unit._taskforce != Globals._playerTaskforce)
+                            PvPFireAuth.Authorize(unit.UniqueID, 1);
+
+                        var geo = new GeoPosition { _longitude = msg.DestX, _latitude = msg.DestZ, _height = msg.DestY };
+                        Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                        Vector3 localPos = new Vector3(local.x, msg.DestY, local.y);
+                        unit.AddEngageTask(new EngageTask(msg.AmmoId, localPos, unit, 1));
+                        break;
+                    }
+
+                    default:
+                        Plugin.Log.LogWarning($"[Order] unhandled: {msg.Order}");
+                        break;
+                }
+            }
+            finally
+            {
+                ApplyingFromNetwork = false;
+            }
+        }
+    }
+
+    public static class GameEventHandler
+    {
+        public static void Apply(GameEventMessage msg)
+        {
+            Plugin.Log.LogInfo($"[Event] {msg.EventType}  src={msg.SourceEntityId}  tgt={msg.TargetEntityId}  param={msg.Param}");
+
+            switch (msg.EventType)
+            {
+                case GameEventType.TimeChanged:
+                    if (Plugin.Instance.CfgIsHost.Value)
+                    {
+                        TimeSyncManager.OnHostReceivedRequest(msg.Param);
+                    }
+                    else
+                    {
+                        float hostSeconds = System.BitConverter.ToSingle(
+                            System.BitConverter.GetBytes(msg.SourceEntityId), 0);
+                        TimeSyncManager.OnClientReceivedConfirm(msg.Param, hostSeconds);
+                    }
+                    break;
+
+                case GameEventType.TaskforceAssigned:
+                    if (!Plugin.Instance.CfgIsHost.Value)
+                        TaskforceAssignmentManager.OnAssignmentReceived(msg.Param);
+                    break;
+
+                case GameEventType.HardSyncRequest:
+                    if (Plugin.Instance.CfgIsHost.Value)
+                    {
+                        Plugin.Log.LogWarning("[DriftDetector] Client requested hard sync");
+                        SessionManager.CaptureAndSend();
+                    }
+                    break;
+
+                case GameEventType.TimeProposal:
+                    TimeSyncManager.OnProposalReceived(msg.Param, fromHost: !Plugin.Instance.CfgIsHost.Value);
+                    break;
+
+                case GameEventType.TimeProposalResponse:
+                    TimeSyncManager.OnProposalResponseReceived(msg.Param);
+                    break;
+            }
+        }
+    }
+}
