@@ -116,6 +116,8 @@ The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on f
 - Carrier ops can desync at 10x time compression and above.
 - Defensive missiles can desync in high missile scenarios but should not affect combat outcomes.
 - Weapons fired at a position rather than a target do not sync (e.g., torpedoes or Tomahawks fired at a location instead of a unit).
+- Sometimes launching via launcher launches without the mod, simple way to know is the multiplayer menu should appear in top right before you hit the main menu, if it hasn't try: and launch again
+
 
 ---
 
