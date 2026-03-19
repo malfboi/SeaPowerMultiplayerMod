@@ -97,7 +97,7 @@ namespace SeapowerMultiplayer
                     int localId = localList[0].Id;
                     localList.RemoveAt(0);
                     Register(hostProjectileId, localId);
-                    Plugin.Log.LogInfo($"[IdMapper] Spawn-matched (host msg arrived second): host {hostProjectileId} → local {localId} (source unit {sourceUnitId}, ammo={ammoName})");
+                    Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (host msg arrived second): host {hostProjectileId} → local {localId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
                 }
             }
@@ -139,7 +139,7 @@ namespace SeapowerMultiplayer
                     var entry = hostList[0];
                     hostList.RemoveAt(0);
                     Register(entry.Id, localProjectileId);
-                    Plugin.Log.LogInfo($"[IdMapper] Spawn-matched (local spawned second): host {entry.Id} → local {localProjectileId} (source unit {sourceUnitId}, ammo={ammoName})");
+                    Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (local spawned second): host {entry.Id} → local {localProjectileId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
                 }
             }
@@ -179,7 +179,7 @@ namespace SeapowerMultiplayer
                 StalePurgedCount++;
                 if (revokeAuth && Plugin.Instance.CfgPvP.Value)
                     PvPFireAuth.Revoke(stale.SourceUnitId, 1);
-                Plugin.Log.LogInfo($"[IdMapper] Purged stale pending entry: id={stale.Id} source={stale.SourceUnitId} age={now - stale.EnqueueTime:F1}s");
+                Plugin.Log.LogDebug($"[IdMapper] Purged stale pending entry: id={stale.Id} source={stale.SourceUnitId} age={now - stale.EnqueueTime:F1}s");
             }
 
             // Batch remove for O(n) instead of O(n^2)
@@ -263,7 +263,7 @@ namespace SeapowerMultiplayer
             if (bestMatch != null && bestDist < 2000f)
             {
                 Register(hostId, bestMatch.UniqueID);
-                Plugin.Log.LogInfo($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                Plugin.Log.LogDebug($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
             }
             else
             {
@@ -297,7 +297,7 @@ namespace SeapowerMultiplayer
                 if (obj != null)
                 {
                     obj.SetUniqueId(hostId);
-                    Plugin.Log.LogInfo($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
+                    Plugin.Log.LogDebug($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
                     return;  // No mapping needed — IDs now match
                 }
             }

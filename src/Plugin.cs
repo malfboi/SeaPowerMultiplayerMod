@@ -112,6 +112,7 @@ namespace SeapowerMultiplayer
 
             // Drain any PvP delayed combat actions whose timer has expired
             OrderDelayQueue.Tick();
+            CombatEventHandler.Tick();
 
             // Process deferred flight ops spawns (elevators were busy)
             FlightOpsHandler.Tick();

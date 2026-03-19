@@ -1,6 +1,8 @@
+using System.Collections.Generic;
 using BepInEx.Logging;
 using SeaPower;
 using SeapowerMultiplayer.Messages;
+using UnityEngine;
 
 namespace SeapowerMultiplayer
 {
@@ -19,6 +21,33 @@ namespace SeapowerMultiplayer
         public static int EventsReceived { get; private set; }
         public static int EventsNotFound { get; private set; }
         public static void ResetCounters() { EventsReceived = 0; EventsNotFound = 0; }
+
+        // ── PvP: delayed projectile destruction ─────────────────────────────
+        // The attacker's "missile died" arrives before the missile reaches us.
+        // Delay destruction so the local sim has time to resolve impact/damage.
+        private const float PvpDestroyDelay = 3f;
+        private static readonly List<(int id, float destroyAt)> _delayedDestroys = new();
+
+        /// <summary>Called from Plugin.Update() each frame.</summary>
+        internal static void Tick()
+        {
+            if (_delayedDestroys.Count == 0) return;
+            float now = Time.unscaledTime;
+            for (int i = _delayedDestroys.Count - 1; i >= 0; i--)
+            {
+                var (id, destroyAt) = _delayedDestroys[i];
+                if (now < destroyAt) continue;
+
+                _delayedDestroys.RemoveAt(i);
+                var obj = StateSerializer.FindById(id);
+                if (obj == null || obj.IsDestroyed) continue;
+
+                RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
+                Log.LogDebug($"[Combat] PvP delayed destroy fired for {id}");
+            }
+        }
+
+        internal static void ClearDelayed() => _delayedDestroys.Clear();
 
         /// <summary>Run an action with ApplyingFromNetwork set (for external callers like StateApplier).</summary>
         internal static void RunAsNetworkEvent(System.Action action)
@@ -66,32 +95,47 @@ namespace SeapowerMultiplayer
                 return;
             }
 
-            Log.LogInfo($"[Combat] Found target {msg.TargetEntityId}: type={target.GetType().Name} name={target.Name?.Value ?? "?"} IsDestroyed={target.IsDestroyed}");
+            Log.LogDebug($"[Combat] Found target {msg.TargetEntityId}: type={target.GetType().Name} name={target.Name?.Value ?? "?"} IsDestroyed={target.IsDestroyed}");
 
             if (target.IsDestroyed)
             {
-                Log.LogInfo($"[Combat] Target {msg.TargetEntityId} already destroyed locally — no action needed");
+                Log.LogDebug($"[Combat] Target {msg.TargetEntityId} already destroyed locally — no action needed");
                 return;
             }
 
-            Log.LogInfo($"[Combat] Applying {msg.EventType} to {msg.TargetEntityId} — calling notifyOfExternalDestruction");
+            Log.LogDebug($"[Combat] Applying {msg.EventType} to {msg.TargetEntityId}");
 
             ApplyingFromNetwork = true;
             try
             {
                 switch (msg.EventType)
                 {
-                    case CombatEventType.ProjectileIntercepted:
                     case CombatEventType.ProjectileDestroyed:
+                        // PvP: the attacker is slightly ahead — the missile may not
+                        // have reached us yet. Delay destruction so local sim can
+                        // resolve impact and damage first. If the missile hits our
+                        // ship in the meantime, the game destroys it naturally and
+                        // the delayed action becomes a no-op (IsDestroyed check).
+                        if (Plugin.Instance.CfgPvP.Value)
+                        {
+                            _delayedDestroys.Add((msg.TargetEntityId, Time.unscaledTime + PvpDestroyDelay));
+                            Log.LogDebug($"[Combat] PvP: Delaying ProjectileDestroyed for {msg.TargetEntityId} by {PvpDestroyDelay}s");
+                            return;
+                        }
+                        DestroyFromNetwork(target);
+                        Log.LogDebug($"[Combat] DestroyFromNetwork called — IsDestroyed={target.IsDestroyed}");
+                        break;
+
+                    case CombatEventType.ProjectileIntercepted:
                     case CombatEventType.UnitDestroyed:
                         DestroyFromNetwork(target);
-                        Log.LogInfo($"[Combat] DestroyFromNetwork called — IsDestroyed={target.IsDestroyed}");
+                        Log.LogDebug($"[Combat] DestroyFromNetwork called — IsDestroyed={target.IsDestroyed}");
                         break;
 
                     case CombatEventType.MissileImpact:
                         // Defender says "your missile X hit my unit, I resolved damage, destroy it"
                         DestroyFromNetwork(target);
-                        Log.LogInfo($"[Combat] MissileImpact — destroyed our missile {msg.TargetEntityId}");
+                        Log.LogDebug($"[Combat] MissileImpact — destroyed our missile {msg.TargetEntityId}");
                         break;
                 }
             }

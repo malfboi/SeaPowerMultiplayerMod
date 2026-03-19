@@ -72,6 +72,7 @@ namespace SeapowerMultiplayer
         {
             if (!_running) return;
             OrderDelayQueue.Clear();
+            CombatEventHandler.ClearDelayed();
             PvPDeathNotifications.Clear();
             PvPFireAuth.Clear();
             _transport?.Stop();
@@ -178,7 +179,7 @@ namespace SeapowerMultiplayer
             var type = (MessageType)reader.GetByte();
 
             if (type != MessageType.StateUpdate && type != MessageType.MissileStateSync)
-                Log.LogInfo($"[Net] Received {type}");
+                Log.LogDebug($"[Net] Received {type}");
 
             switch (type)
             {
@@ -195,7 +196,7 @@ namespace SeapowerMultiplayer
                     long enqueueMs = AIAutoFireState.DiagMs;
                     if (msg.Order == Messages.OrderType.AutoFireWeapon)
                     {
-                        Log.LogInfo($"[AutoFire DIAG] t={enqueueMs}ms ENQUEUE (bg thread) " +
+                        Log.LogDebug($"[AutoFire DIAG] t={enqueueMs}ms ENQUEUE (bg thread) " +
                             $"unit={msg.SourceEntityId} ammo={msg.AmmoId} target={msg.TargetEntityId} " +
                             $"shots={msg.ShotsToFire}");
                     }
@@ -204,7 +205,7 @@ namespace SeapowerMultiplayer
                         if (msg.Order == Messages.OrderType.AutoFireWeapon)
                         {
                             long applyMs = AIAutoFireState.DiagMs;
-                            Log.LogInfo($"[AutoFire DIAG] t={applyMs}ms DEQUEUE (main thread, " +
+                            Log.LogDebug($"[AutoFire DIAG] t={applyMs}ms DEQUEUE (main thread, " +
                                 $"waited {applyMs - enqueueMs}ms) unit={msg.SourceEntityId} ammo={msg.AmmoId}");
                         }
                         OrderHandler.Apply(msg);
@@ -236,7 +237,7 @@ namespace SeapowerMultiplayer
                 case MessageType.CombatEvent:
                 {
                     var msg = CombatEventMessage.Deserialize(reader);
-                    Log.LogInfo($"[Net] Deserialized CombatEvent: {msg.EventType} target={msg.TargetEntityId} source={msg.SourceEntityId}");
+                    Log.LogDebug($"[Net] Deserialized CombatEvent: {msg.EventType} target={msg.TargetEntityId} source={msg.SourceEntityId}");
                     _mainThreadQueue.Enqueue(() => CombatEventHandler.Apply(msg));
                     break;
                 }

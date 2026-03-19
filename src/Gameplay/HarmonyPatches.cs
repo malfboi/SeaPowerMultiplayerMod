@@ -674,7 +674,7 @@ namespace SeapowerMultiplayer
             {
                 if (ws._executingEngageTask && ws._isAutoEngaging && ws._engageDelay > 0f)
                 {
-                    Plugin.Log.LogInfo($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
+                    Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
                         $"unit={__instance.UniqueID} name={__instance.name} " +
                         $"wasDelay={ws._engageDelay:F3}s");
                     ws._engageDelay = 0f;
@@ -816,7 +816,7 @@ namespace SeapowerMultiplayer
 
                 NetworkManager.Instance.SendToOther(order);
 
-                Plugin.Log.LogInfo($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms SEND seq={diagSeq} " +
+                Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms SEND seq={diagSeq} " +
                     $"unit={__instance.UniqueID} name={__instance.name} ammo={ammoId} " +
                     $"targetLocal={targetObject?.UniqueID ?? 0} targetSent={targetId} targetName={targetObject?.name ?? "pos"} " +
                     $"shots={shotsToFire} priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}");
@@ -1704,7 +1704,7 @@ namespace SeapowerMultiplayer
             var launcher = _launchPlatformField.GetValue(__instance) as ObjectBase;
             int sourceUnitId = launcher?.UniqueID ?? 0;
 
-            Plugin.Log.LogInfo($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms PROJECTILE_SPAWN " +
+            Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms PROJECTILE_SPAWN " +
                 $"projId={projectileId} projName={__instance.name} " +
                 $"launcherId={sourceUnitId} launcherName={launcher?.name ?? "?"} " +
                 $"isHost={Plugin.Instance.CfgIsHost.Value} " +
@@ -2048,7 +2048,7 @@ namespace SeapowerMultiplayer
                 TargetEntityId = id,
                 SourceEntityId = 0,
             });
-            Plugin.Log.LogInfo($"[Combat] PvP missile death notification: id={id}");
+            Plugin.Log.LogDebug($"[Combat] PvP missile death notification: id={id}");
         }
     }
 
@@ -2077,7 +2077,7 @@ namespace SeapowerMultiplayer
                 TargetEntityId = id,
                 SourceEntityId = 0,
             });
-            Plugin.Log.LogInfo($"[Combat] PvP torpedo death notification: id={id}");
+            Plugin.Log.LogDebug($"[Combat] PvP torpedo death notification: id={id}");
         }
     }
 }

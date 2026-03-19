@@ -214,7 +214,7 @@ namespace SeapowerMultiplayer
 
         // ── PvP missile disappearance tracking ──────────────────────────────
         private static readonly Dictionary<int, int> _missedProjectileCount = new();
-        private const int MissedProjectileUpdatesBeforeDestroy = 5; // ~500ms at 10Hz
+        private const int MissedProjectileUpdatesBeforeDestroy = 30; // ~3s at 10Hz — generous grace for timing desync
 
         // ── PvP orphan cleanup ────────────────────────────────────────────────
         // Track which remote unit IDs appear in incoming state updates.
@@ -299,7 +299,7 @@ namespace SeapowerMultiplayer
                 var comps = unit.Compartments;
                 if (state.IsSinking && comps != null && !comps._isSinking)
                 {
-                    Plugin.Log.LogInfo($"[StateApplier] Unit {state.EntityId} sinking on remote — triggering local sink");
+                    Plugin.Log.LogDebug($"[StateApplier] Unit {state.EntityId} sinking on remote — triggering local sink");
                     comps.Sink(Compartments.SinkFocus.All, false);
                     continue;
                 }
@@ -310,7 +310,7 @@ namespace SeapowerMultiplayer
                 // Instant destruction (explosion, no sinking phase)
                 if (state.IsDestroyed && !unit.IsDestroyed)
                 {
-                    Plugin.Log.LogInfo($"[StateApplier] Unit {state.EntityId} destroyed on remote — destroying locally");
+                    Plugin.Log.LogDebug($"[StateApplier] Unit {state.EntityId} destroyed on remote — destroying locally");
                     CombatEventHandler.DestroyFromNetwork(unit);
                     continue;
                 }
@@ -519,7 +519,7 @@ namespace SeapowerMultiplayer
                         {
                             CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
                             ProjectilesDestroyedByTimeout++;
-                            Plugin.Log.LogInfo($"[StateApplier] PvP: Missile {id} disappeared from owner's updates — destroyed");
+                            Plugin.Log.LogDebug($"[StateApplier] PvP: Missile {id} disappeared from owner's updates — destroyed");
                         }
                         _missedProjectileCount.Remove(id);
                     }
@@ -563,7 +563,7 @@ namespace SeapowerMultiplayer
                     CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
                     ProjectileIdMapper.OnProjectileDestroyed(obj.UniqueID);
                     ProjectilesDestroyedByTimeout++;
-                    Plugin.Log.LogInfo($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
+                    Plugin.Log.LogDebug($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
                 }
 
                 var temp = _prevProjectileIds;
@@ -734,7 +734,7 @@ namespace SeapowerMultiplayer
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
 
-            Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order}");
+            Plugin.Log.LogDebug($"[Order] entity={msg.SourceEntityId} order={msg.Order}");
 
             var unit = StateSerializer.FindById(msg.SourceEntityId);
             if (unit == null)
@@ -833,7 +833,7 @@ namespace SeapowerMultiplayer
                                     $"autoEngaging={ws._isAutoEngaging} delay={ws._engageDelay:F3}s";
                             }
                         }
-                        Plugin.Log.LogInfo($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
+                        Plugin.Log.LogDebug($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
                             $"unit={unit.UniqueID} name={unit.name} ammo={msg.AmmoId} " +
                             $"target={msg.TargetEntityId} targetFound={target != null} " +
                             $"targetName={target?.name ?? "pos"} shots={msg.ShotsToFire} " +
@@ -857,7 +857,7 @@ namespace SeapowerMultiplayer
                             }
                         }
                         if (wsStateAfter.Length > 0)
-                            Plugin.Log.LogInfo($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms POST_INSERT " +
+                            Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms POST_INSERT " +
                                 $"unit={unit.UniqueID}{wsStateAfter}");
                         break;
                     }
