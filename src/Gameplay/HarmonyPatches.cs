@@ -983,6 +983,18 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.setDepth))]
     public static class Patch_Submarine_SetDepth
     {
+        // The game internally calls setDepth() every update for depth-keeping.
+        // Without guards, the Harmony patch broadcasts every one of these calls,
+        // flooding the network with stale depth values that override player commands.
+        //
+        // Fix: after a player/network depth command, lock to that depth briefly.
+        // Internal calls that try to revert to the old depth during the lock are
+        // suppressed. Calls arriving after the grace period are treated as new
+        // player commands.
+        private static readonly Dictionary<int, float> _lockedDepth = new();
+        private static readonly Dictionary<int, float> _lockTime = new();
+        private const float GracePeriod = 1f; // seconds to suppress internal reverts
+
         static PlayerOrderMessage Msg(Submarine s, float depth) => new PlayerOrderMessage
         {
             SourceEntityId = s.UniqueID,
@@ -990,11 +1002,67 @@ namespace SeapowerMultiplayer
             Speed          = depth,
         };
 
-        static bool Prefix(Submarine __instance, float depth) =>
-            OrderSyncHelper.Prefix(__instance, Msg(__instance, depth));
+        /// <summary>Clear locks on disconnect / scene load.</summary>
+        internal static void Reset()
+        {
+            _lockedDepth.Clear();
+            _lockTime.Clear();
+        }
 
-        static void Postfix(Submarine __instance, float depth) =>
-            OrderSyncHelper.Postfix(__instance, Msg(__instance, depth));
+        static bool Prefix(Submarine __instance, float depth, out bool __state)
+        {
+            __state = false; // Postfix broadcast flag
+
+            // Network-applied order: always allow, set lock
+            if (OrderHandler.ApplyingFromNetwork)
+            {
+                _lockedDepth[__instance.UniqueID] = depth;
+                _lockTime[__instance.UniqueID] = Time.unscaledTime;
+                return true;
+            }
+
+            if (SessionManager.SceneLoading) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+
+            int id = __instance.UniqueID;
+            float now = Time.unscaledTime;
+
+            // Check if we have an active lock
+            if (_lockTime.TryGetValue(id, out float setAt) && _lockedDepth.TryGetValue(id, out float locked))
+            {
+                bool sameDepth = Mathf.Abs(depth - locked) < 1f;
+                bool inGrace = (now - setAt) < GracePeriod;
+
+                if (sameDepth)
+                    return true; // Maintenance of current depth — execute locally, don't send
+
+                if (inGrace)
+                    return false; // Internal call trying to revert during grace — suppress entirely
+            }
+
+            // Genuine depth change (player command or AI after grace period)
+            _lockedDepth[id] = depth;
+            _lockTime[id] = now;
+            __state = true; // Signal Postfix to broadcast
+
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+
+            // PvP: don't sync weapon internals
+            if (Plugin.Instance.CfgPvP.Value && __instance is WeaponBase) return true;
+
+            if (!TaskforceAssignmentManager.ClientMayControl(__instance)) return false;
+            NetworkManager.Instance.SendToServer(Msg(__instance, depth));
+            return true;
+        }
+
+        static void Postfix(Submarine __instance, float depth, bool __state)
+        {
+            if (!__state) return; // Prefix didn't flag this as a genuine change
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (SessionManager.SceneLoading) return;
+            NetworkManager.Instance.BroadcastToClients(Msg(__instance, depth));
+        }
     }
 
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.CeaseFire))]

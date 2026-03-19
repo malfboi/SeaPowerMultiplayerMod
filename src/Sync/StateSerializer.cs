@@ -324,6 +324,12 @@ namespace SeapowerMultiplayer
                 };
                 Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
                 Vector3 hostPos = new Vector3(local.x, state.Y, local.y);
+
+                // Submarines: depth is order-synced via setDepth(), don't let
+                // state updates fight the local depth-change physics.
+                if (state.Kind == UnitType.Submarine)
+                    hostPos.y = unit.transform.position.y;
+
                 if (isPvP)
                 {
                     // PvP hybrid: local physics simulates, owner's state provides corrections

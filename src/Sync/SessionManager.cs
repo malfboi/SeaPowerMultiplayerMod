@@ -58,6 +58,7 @@ namespace SeapowerMultiplayer
             StateApplier.ResetOrphanTracking();
             PvPFireAuth.Clear();
             ProjectileIdMapper.Clear();
+            Patch_Submarine_SetDepth.Reset();
 
             // SaveGame does not check IsSavingAllowed, but set it true to be safe
             bool wasAllowed = SaveLoadManager.IsSavingAllowed;
@@ -166,6 +167,7 @@ namespace SeapowerMultiplayer
                 ProjectileIdMapper.Clear();
                 PvPDeathNotifications.Clear();
                 PvPFireAuth.Clear();
+                Patch_Submarine_SetDepth.Reset();
 
                 _pendingRngSeed = msg.RngSeed;
                 _pendingGameSeconds = msg.GameSeconds;
