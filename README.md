@@ -1,6 +1,6 @@
 # Seapower Multiplayer
 
-[![Discord](https://img.shields.io/badge/discord-alfred-5865F2?logo=discord&logoColor=white)](https://discord.gg/rMMnwJHc8w)
+[![Discord](https://img.shields.io/badge/discord-Sea%20Power%20Multiplayer-5865F2?logo=discord&logoColor=white)](https://discord.gg/rMMnwJHc8w)
 
 Real-time 2-player multiplayer (PvP) for **Sea Power: Naval Combat in the Missile Age**.
 
