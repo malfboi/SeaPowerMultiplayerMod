@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -11,6 +12,7 @@ namespace SeapowerMultiplayer.Launcher
         private readonly ConfigManager _config = new();
         private bool _gameRunning;
         private UpdateInfo? _pendingUpdate;
+        private string _lastIP = "0.0.0.0";
 
         public MainWindow()
         {
@@ -180,7 +182,71 @@ namespace SeapowerMultiplayer.Launcher
         private void Role_Changed(object sender, RoutedEventArgs e)
         {
             if (TxtHostIP != null)
+            {
+                //If the user has changed the IP, and the new one is valid. Remember it if they flip back over to client mode
+                if (TxtHostIP.Text != "0.0.0.0" && IsValidIP(TxtHostIP.Text))
+                {
+                    _lastIP = TxtHostIP.Text;
+                }
+
                 TxtHostIP.IsEnabled = RbClient.IsChecked == true;
+
+                //Set the host IP box to show 0.0.0.0 when it's reselected
+                if (RbHost.IsChecked == true)
+                {
+                    TxtHostIP.Text = "0.0.0.0";
+                }
+                else
+                {
+                    TxtHostIP.Text = _lastIP;
+                }
+            }
+                
+        }
+        private bool IsValidIP(string IP)
+        {
+            //Just return true if it's set to all IPs still
+            if (IP == "0.0.0.0") return true;
+            //Check if .Net thinks it's a valid IP and it has all 4 octets like it should
+            if(System.Net.IPAddress.TryParse(IP, out var Address))
+            {
+                return IP.Count(c => c == '.') == 3;
+            }
+            return false;
+        }
+        //Make sure someone doesn't enter something ridiculous for the port
+        private bool IsValidPort(string EnteredPort)
+        {
+            if (int.TryParse(EnteredPort, out var Port))
+            {
+                //Ports must be between this range. Really users shouldn't use anything below 1024
+                return Port >= 1 && Port <= 65535;
+            }
+            return false;
+        }
+        //Update the boarder of the host IP box to indicate that something is invalid to the user
+        private void TxtHostIP_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(TxtHostIP.Text) || !IsValidIP(TxtHostIP.Text))
+            {
+                TxtHostIP.BorderBrush = System.Windows.Media.Brushes.Red;
+            }
+            else
+            {
+                TxtHostIP.BorderBrush = System.Windows.Media.Brushes.Green;
+            }
+        }
+        //Update the boarder of the Port box to indicate that something is invalid to the user
+        private void TxtPort_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            if (!IsValidPort(TxtPort.Text))
+            {
+                TxtPort.BorderBrush = System.Windows.Media.Brushes.Red;
+            }
+            else
+            {
+                TxtPort.BorderBrush = System.Windows.Media.Brushes.Green;
+            }
         }
 
         private void BtnFeedback_Click(object sender, RoutedEventArgs e)
@@ -243,12 +309,21 @@ namespace SeapowerMultiplayer.Launcher
             }
         }
 
-        private const string CurrentVersion = "0.1.0";
+        private const string CurrentVersion = "0.1.1";
 
         private async void BtnLaunch_Click(object sender, RoutedEventArgs e)
         {
+            //Doublecheck that everything is where it should be
             var gameDir = TxtGamePath.Text;
-            if (string.IsNullOrEmpty(gameDir)) return;
+            bool bepinex = GameDetector.IsBepInExInstalled(gameDir);
+            bool mod = GameDetector.IsModInstalled(gameDir);
+            bool proxy = GameDetector.IsProxyStored(gameDir);
+            if (string.IsNullOrEmpty(gameDir) || !bepinex || !mod || !proxy)
+            {
+                UpdateInstallStatus();
+                return;
+            }
+            
 
             // Show disclaimer once per version
             if (_config.Settings.AcknowledgedVersion != CurrentVersion)
@@ -304,5 +379,7 @@ namespace SeapowerMultiplayer.Launcher
             ChkAutoConnect.IsEnabled = enabled;
             ChkTimeVote.IsEnabled = enabled;
         }
+
+        
     }
 }

@@ -75,6 +75,8 @@ namespace SeapowerMultiplayer
             CombatEventHandler.ClearDelayed();
             PvPDeathNotifications.Clear();
             PvPFireAuth.Clear();
+            Patch_ObjectBase_HandleEngageTasks.Reset();
+            Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
             _transport?.Stop();
             _transport = null;
             _running = false;
@@ -166,6 +168,8 @@ namespace SeapowerMultiplayer
                 StateApplier.ResetOrphanTracking();
                 PvPDeathNotifications.Clear();
                 PvPFireAuth.Clear();
+                Patch_ObjectBase_HandleEngageTasks.Reset();
+                Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
                 FlightOpsHandler.Clear();
                 Patch_Compartments_CalculateWantedVelocityInKnots.ClearLogCache();
                 Patch_Vessel_ApplyRudderThrust.ClearLogCache();

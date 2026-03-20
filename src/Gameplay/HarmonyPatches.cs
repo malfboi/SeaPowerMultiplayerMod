@@ -650,15 +650,50 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>
-    /// After HandleEngageTasks assigns weapon systems, zero out the reaction delay
-    /// for auto-engage tasks on the client. The delay (Random * _maxReactiontime)
-    /// causes a 0-2s lag because the client weapon system starts cold after receiving
-    /// the host's AutoFireWeapon order. Since ALL client auto-engage tasks come from
-    /// the host (client AI is suppressed), skipping the delay is safe.
+    /// Prefix: PvP guard — track which enemy puppet units have received a network
+    /// fire order. Block HandleEngageTasks for enemy puppets that have never received
+    /// a network order, catching pre-existing engage tasks loaded from save files
+    /// that bypass AddEngageTask/InsertEngageTask Harmony patches.
+    ///
+    /// Postfix: zero out the reaction delay for auto-engage tasks on the receiving
+    /// side. The delay (Random * _maxReactiontime) causes a 0-2s lag because the
+    /// weapon system starts cold after receiving a network fire order. Since ALL
+    /// enemy auto-engage tasks come from the network, skipping the delay is safe.
     /// </summary>
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.HandleEngageTasks))]
     public static class Patch_ObjectBase_HandleEngageTasks
     {
+        /// <summary>
+        /// Tracks enemy unit IDs that have received at least one network fire order.
+        /// Once a unit receives a network order, HandleEngageTasks is allowed to run
+        /// for it (the pre-existing tasks were flushed by CeaseFire in OnSceneReady,
+        /// so any remaining tasks are from legitimate network orders).
+        /// </summary>
+        private static readonly HashSet<int> _networkOrderedUnits = new();
+
+        /// <summary>Call when an enemy puppet receives a fire order from the network.</summary>
+        internal static void MarkNetworkOrdered(int unitId) => _networkOrderedUnits.Add(unitId);
+
+        /// <summary>Clear tracking on disconnect/scene change.</summary>
+        internal static void Reset() => _networkOrderedUnits.Clear();
+
+        static bool Prefix(ObjectBase __instance)
+        {
+            if (!Plugin.Instance.CfgPvP.Value) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (SessionManager.SceneLoading) return true;
+
+            // Own units: always process normally
+            if (__instance._taskforce == Globals._playerTaskforce) return true;
+
+            // Enemy puppet that has received a network order: allow processing
+            if (_networkOrderedUnits.Contains(__instance.UniqueID)) return true;
+
+            // Enemy puppet with no network orders: block processing.
+            // Any engage tasks are residual from the save file.
+            return false;
+        }
+
         static void Postfix(ObjectBase __instance)
         {
             bool isPvP = Plugin.Instance.CfgPvP.Value;
@@ -1567,6 +1602,10 @@ namespace SeapowerMultiplayer
     [HarmonyPatch]
     public static class Patch_Blastzone_OnHitUnit
     {
+        // Dedup: only send one MissileImpact per weapon (OnHitUnit fires every frame while overlapping)
+        private static readonly HashSet<int> _sentMissileImpacts = new();
+        internal static void ClearMissileImpacts() => _sentMissileImpacts.Clear();
+
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(Blastzone), "OnHitUnit");
 
@@ -1622,17 +1661,19 @@ namespace SeapowerMultiplayer
             if (dmgMsg != null)
                 CombatSyncHelper.SendDamageState(dmgMsg);
 
-            // PvP: notify missile owner to destroy their authoritative copy
+            // PvP: notify missile owner to destroy their authoritative copy (once per missile)
             if (Plugin.Instance.CfgPvP.Value && ____weapon != null
-                && ____weapon._taskforce != SeaPower.Globals._playerTaskforce)
+                && ____weapon._taskforce != SeaPower.Globals._playerTaskforce
+                && _sentMissileImpacts.Add(____weapon.UniqueID))
             {
+                int remoteWeaponId = ProjectileIdMapper.TranslateForRemote(____weapon.UniqueID);
                 CombatSyncHelper.Send(new CombatEventMessage
                 {
                     EventType      = CombatEventType.MissileImpact,
-                    TargetEntityId = ____weapon.UniqueID,
+                    TargetEntityId = remoteWeaponId,
                     SourceEntityId = hitObject.UniqueID,
                 });
-                Plugin.Log.LogInfo($"[Combat] PvP: Sent MissileImpact for enemy missile {____weapon.UniqueID} hitting unit {hitObject.UniqueID}");
+                Plugin.Log.LogInfo($"[Combat] PvP: Sent MissileImpact for enemy missile {____weapon.UniqueID} (remote={remoteWeaponId}) hitting unit {hitObject.UniqueID}");
             }
         }
     }
@@ -1973,19 +2014,11 @@ namespace SeapowerMultiplayer
         }
     }
 
-    [HarmonyPatch(typeof(UnitMembershipViewModel))]
-    public static class Patch_UnitMembershipViewModel_PvP
-    {
-        static MethodBase TargetMethod() =>
-            AccessTools.Constructor(typeof(UnitMembershipViewModel),
-                new[] { typeof(MapFormationViewModel), typeof(MapUnitViewModel) });
-
-        static void Postfix(UnitMembershipViewModel __instance, MapFormationViewModel source)
-        {
-            if (FormationHelper.IsEnemyFormation(source.Formation))
-                __instance.ConnectionToFormation.Clear();
-        }
-    }
+    // UnitMembershipViewModel constructor patch removed:
+    // Clearing ConnectionToFormation caused ArgumentOutOfRangeException in
+    // PositionChanged() (called every frame via position subscription).
+    // The formation is already hidden via IsValid=false and Lat/Lng=NaN,
+    // so connection lines don't render even without clearing the collection.
 
     // ═══════════════════════════════════════════════════════════════════════
     // PvP: Missile/Torpedo death notification (Postfix-only, no suppression)

@@ -133,10 +133,11 @@
                                  Checked="Role_Changed"/>
                     </StackPanel>
 
-                    <!-- Host IP -->
-                    <Label Content="Host IP"/>
-                    <TextBox x:Name="TxtHostIP"
-                         Text="127.0.0.1"
+                <!-- Host IP -->
+                <Label Content="Host IP"/>
+                <TextBox x:Name="TxtHostIP"
+                         Text="0.0.0.0"
+                         TextChanged="TxtHostIP_TextChanged"
                          IsEnabled="False"
                          Margin="0,0,0,12"/>
 
@@ -144,6 +145,7 @@
                     <Label Content="Port"/>
                     <TextBox x:Name="TxtPort"
                          Text="7777"
+                         TextChanged="TxtPort_TextChanged"
                          Margin="0,0,0,12"/>
 
                     <!-- Auto-connect -->
