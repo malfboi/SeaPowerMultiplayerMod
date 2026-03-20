@@ -17,7 +17,7 @@
 
         <!-- Header -->
         <TextBlock Grid.Row="0"
-                   Text="v0.1.1 Release Notes"
+                   Text="v0.1.2 Release Notes"
                    Foreground="{StaticResource TextPrimary}"
                    FontSize="18"
                    FontWeight="Bold"
@@ -67,7 +67,7 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Queued attack orders causing missile desync from pre made missions have been fixed. You should now be able to run the games existing missions without missile desync"/>
+                           Text="Launcher not always launching correctly has been fixed. Game should now always launch with the correct settings and mod."/>
 
                 <!-- Disclaimer -->
                 <Rectangle Height="1"
