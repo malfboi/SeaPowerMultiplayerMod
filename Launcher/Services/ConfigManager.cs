@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Launcher.Services
         public string? GameDirectory { get; set; }
         public string Transport { get; set; } = "Steam";
         public bool IsHost { get; set; } = true;
-        public string HostIP { get; set; } = "127.0.0.1";
+        public string HostIP { get; set; } = "0.0.0.0";
         public int Port { get; set; } = 7777;
         public bool AutoConnect { get; set; } = false;
         public bool TimeVote { get; set; } = false;
