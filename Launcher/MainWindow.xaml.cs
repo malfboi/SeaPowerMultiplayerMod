@@ -247,8 +247,17 @@ namespace SeapowerMultiplayer.Launcher
 
         private async void BtnLaunch_Click(object sender, RoutedEventArgs e)
         {
+            //Doublecheck that everything is where it should be
             var gameDir = TxtGamePath.Text;
-            if (string.IsNullOrEmpty(gameDir)) return;
+            bool bepinex = GameDetector.IsBepInExInstalled(gameDir);
+            bool mod = GameDetector.IsModInstalled(gameDir);
+            bool proxy = GameDetector.IsProxyStored(gameDir);
+            if (string.IsNullOrEmpty(gameDir) || !bepinex || !mod || !proxy)
+            {
+                UpdateInstallStatus();
+                return;
+            }
+            
 
             // Show disclaimer once per version
             if (_config.Settings.AcknowledgedVersion != CurrentVersion)
