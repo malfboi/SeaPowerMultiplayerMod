@@ -1606,13 +1606,34 @@ namespace SeapowerMultiplayer
         private static readonly HashSet<int> _sentMissileImpacts = new();
         internal static void ClearMissileImpacts() => _sentMissileImpacts.Clear();
 
+        private static readonly FieldInfo _blastzoneWeaponField =
+            AccessTools.Field(typeof(Blastzone), "_weapon");
+        private static readonly FieldInfo _launchPlatformField =
+            AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
+
+        /// <summary>Grace period (seconds) preventing projectiles from hitting their own launcher.</summary>
+        private const float SelfHitGracePeriod = 10f;
+
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(Blastzone), "OnHitUnit");
 
-        static bool Prefix(ObjectBase hitObject, out bool __state)
+        static bool Prefix(ObjectBase hitObject, WeaponBase ____weapon, out bool __state)
         {
             // Capture pre-hit kill state: destroyed OR marked for deferred destruction
             __state = hitObject.IsDestroyed || hitObject._externalDestructionNotified;
+
+            // Grace period: prevent projectiles from damaging their own launch platform
+            if (____weapon != null)
+            {
+                var launcher = _launchPlatformField?.GetValue(____weapon) as ObjectBase;
+                if (launcher != null && launcher.UniqueID == hitObject.UniqueID
+                    && Patch_WeaponBase_CommonLaunchSettings.ProjectileSpawnTimes.TryGetValue(
+                        ____weapon.UniqueID, out float spawnTime)
+                    && Time.time - spawnTime < SelfHitGracePeriod)
+                {
+                    return false;
+                }
+            }
 
             // PvP: only the target owner resolves damage (defensive authority)
             if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
@@ -1736,8 +1757,18 @@ namespace SeapowerMultiplayer
         private static readonly System.Reflection.FieldInfo _launchPlatformField =
             AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
 
+        /// <summary>
+        /// Tracks projectile spawn times so OnHitUnit can enforce a grace period
+        /// preventing projectiles from damaging their own launch platform.
+        /// </summary>
+        internal static readonly Dictionary<int, float> ProjectileSpawnTimes = new();
+        internal static void ClearSpawnTimes() => ProjectileSpawnTimes.Clear();
+
         static void Postfix(WeaponBase __instance)
         {
+            // Record spawn time for self-hit grace period (always, even if not connected)
+            ProjectileSpawnTimes[__instance.UniqueID] = Time.time;
+
             if (!NetworkManager.Instance.IsConnected) return;
             if (SessionManager.SceneLoading) return;
 

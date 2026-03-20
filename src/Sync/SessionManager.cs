@@ -60,6 +60,7 @@ namespace SeapowerMultiplayer
             PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+            Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
             ProjectileIdMapper.Clear();
             Patch_Submarine_SetDepth.Reset();
 
@@ -195,6 +196,7 @@ namespace SeapowerMultiplayer
                 PvPFireAuth.Clear();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
                 Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+                Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
                 Patch_Submarine_SetDepth.Reset();
 
                 _pendingRngSeed = msg.RngSeed;
