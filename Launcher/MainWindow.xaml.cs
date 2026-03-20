@@ -249,6 +249,11 @@ namespace SeapowerMultiplayer.Launcher
             }
         }
 
+        private void BtnDiscord_Click(object sender, RoutedEventArgs e)
+        {
+            Process.Start(new ProcessStartInfo("https://discord.gg/rMMnwJHc8w") { UseShellExecute = true });
+        }
+
         private void BtnFeedback_Click(object sender, RoutedEventArgs e)
         {
             var window = new FeedbackWindow(TxtGamePath.Text);
