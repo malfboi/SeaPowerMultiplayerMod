@@ -7,7 +7,11 @@ namespace SeapowerMultiplayer.Launcher.Services
 {
     public static class GameLauncher
     {
-        private static Process? _gameProcess;
+        /// <summary>
+        /// How long (in seconds) to wait for a new game process to appear after one exits.
+        /// Steam may restart the game, so we need to give it time to spawn a new process.
+        /// </summary>
+        private const int RestartGracePeriodSeconds = 15;
 
         public static Task LaunchAsync(string gameDir, Action onExit)
         {
@@ -20,32 +24,86 @@ namespace SeapowerMultiplayer.Launcher.Services
                        Path.Combine(gameDir, "doorstop_config.ini"), overwrite: true);
 
             // Launch the game
-            _gameProcess = Process.Start(new ProcessStartInfo
+            var proc = Process.Start(new ProcessStartInfo
             {
                 FileName = Path.Combine(gameDir, "Sea Power.exe"),
                 WorkingDirectory = gameDir,
                 UseShellExecute = true,
             });
 
-            if (_gameProcess == null)
+            if (proc == null)
             {
                 CleanupProxy(gameDir);
                 throw new InvalidOperationException("Failed to start Sea Power.exe");
             }
 
-            _gameProcess.EnableRaisingEvents = true;
-            _gameProcess.Exited += (_, _) =>
-            {
-                CleanupProxy(gameDir);
-                _gameProcess?.Dispose();
-                _gameProcess = null;
-                onExit();
-            };
+            // Monitor game lifecycle on a background thread.
+            // Steam often restarts the game (original process exits, new one spawns
+            // via Steam), so we track by process name rather than a single PID.
+            _ = MonitorGameLifecycleAsync(proc, gameDir, onExit);
 
             // Register cleanup in case the launcher is closed while game is running
             AppDomain.CurrentDomain.ProcessExit += (_, _) => CleanupProxy(gameDir);
 
             return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Monitors the game process lifecycle, handling Steam restarts.
+        /// Waits for the initial process to exit, then polls for new game processes.
+        /// Only cleans up proxy files and signals exit when the game is truly closed.
+        /// </summary>
+        private static async Task MonitorGameLifecycleAsync(
+            Process initialProc, string gameDir, Action onExit)
+        {
+            try
+            {
+                await Task.Run(() => initialProc.WaitForExit());
+                initialProc.Dispose();
+
+                // After each process exit, wait for a potential Steam restart
+                while (true)
+                {
+                    Process? gameProc = null;
+                    for (int i = 0; i < RestartGracePeriodSeconds; i++)
+                    {
+                        await Task.Delay(1_000);
+                        gameProc = FindGameProcess();
+                        if (gameProc != null) break;
+                    }
+
+                    if (gameProc == null)
+                        break; // No new process appeared — game is truly closed
+
+                    // A restarted process was found — wait for it to exit
+                    await Task.Run(() => gameProc.WaitForExit());
+                    gameProc.Dispose();
+                }
+            }
+            finally
+            {
+                CleanupProxy(gameDir);
+                onExit();
+            }
+        }
+
+        /// <summary>
+        /// Find any running Sea Power game process.
+        /// </summary>
+        private static Process? FindGameProcess()
+        {
+            string[] names = { "Sea Power", "SeaPower", "Sea_Power" };
+            foreach (var name in names)
+            {
+                var procs = Process.GetProcessesByName(name);
+                if (procs.Length > 0)
+                {
+                    for (int i = 1; i < procs.Length; i++)
+                        procs[i].Dispose();
+                    return procs[0];
+                }
+            }
+            return null;
         }
 
         /// <summary>
