@@ -734,14 +734,13 @@ namespace SeapowerMultiplayer
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
 
-            Plugin.Log.LogDebug($"[Order] entity={msg.SourceEntityId} order={msg.Order}");
-
             var unit = StateSerializer.FindById(msg.SourceEntityId);
             if (unit == null)
             {
-                Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found");
+                Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found (order={msg.Order})");
                 return;
             }
+            Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}");
 
             ApplyingFromNetwork = true;
             try
@@ -769,7 +768,11 @@ namespace SeapowerMultiplayer
                         // PvP: authorize enemy ship to spawn weapons from this order
                         if (Plugin.Instance.CfgPvP.Value
                             && unit._taskforce != Globals._playerTaskforce)
+                        {
                             PvPFireAuth.Authorize(unit.UniqueID, msg.ShotsToFire);
+                            Patch_ObjectBase_HandleEngageTasks.MarkNetworkOrdered(unit.UniqueID);
+                            Plugin.Log.LogInfo($"[PvPAuth] FireWeapon: authorized {msg.ShotsToFire} shots for unit {unit.UniqueID} ({unit.name}), total auth now={PvPFireAuth.ActiveAuthForUnit(unit.UniqueID)}");
+                        }
 
                         ObjectBase? target = null;
                         if (msg.TargetEntityId > 0)
@@ -803,7 +806,11 @@ namespace SeapowerMultiplayer
                         // PvP: authorize enemy ship to spawn weapons from this order
                         if (Plugin.Instance.CfgPvP.Value
                             && unit._taskforce != Globals._playerTaskforce)
+                        {
                             PvPFireAuth.Authorize(unit.UniqueID, msg.ShotsToFire);
+                            Patch_ObjectBase_HandleEngageTasks.MarkNetworkOrdered(unit.UniqueID);
+                            Plugin.Log.LogInfo($"[PvPAuth] AutoFire: authorized {msg.ShotsToFire} shots for unit {unit.UniqueID} ({unit.name}), total auth now={PvPFireAuth.ActiveAuthForUnit(unit.UniqueID)}");
+                        }
 
                         ObjectBase? target = null;
                         if (msg.TargetEntityId > 0)

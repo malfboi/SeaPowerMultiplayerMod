@@ -29,6 +29,7 @@ namespace SeapowerMultiplayer
 
         private static int _pendingRngSeed;
         private static float _pendingGameSeconds;
+        private static List<SessionSyncMessage.UnitIdEntry> _pendingUnitIdMap = new();
 
         private static ManualLogSource Log => Plugin.Log;
 
@@ -57,8 +58,15 @@ namespace SeapowerMultiplayer
             MissileStateSyncHandler.ResetCounters();
             StateApplier.ResetOrphanTracking();
             PvPFireAuth.Clear();
+            Patch_ObjectBase_HandleEngageTasks.Reset();
+            Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
             ProjectileIdMapper.Clear();
             Patch_Submarine_SetDepth.Reset();
+
+            // PvP: flush stale engage tasks on enemy puppet units so they don't
+            // consume auth tokens when the remote player issues fire orders.
+            if (Plugin.Instance.CfgPvP.Value)
+                FlushEnemyEngageTasks();
 
             // SaveGame does not check IsSavingAllowed, but set it true to be safe
             bool wasAllowed = SaveLoadManager.IsSavingAllowed;
@@ -120,6 +128,23 @@ namespace SeapowerMultiplayer
 
             float gameSeconds = Singleton<SeaPower.Environment>.Instance.Seconds;
 
+            // Collect host unit IDs so the client can align its IDs after loading.
+            // On different PCs, Unity's ObjectBase counter diverges, giving the
+            // same save-file units different UniqueIDs.
+            var unitIdMap = new List<SessionSyncMessage.UnitIdEntry>();
+            foreach (var obj in Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
+            {
+                if (obj.IsDestroyed) continue;
+                var pos = obj.transform.position;
+                unitIdMap.Add(new SessionSyncMessage.UnitIdEntry
+                {
+                    UniqueId = obj.UniqueID,
+                    Name     = obj.name,
+                    PosX     = pos.x,
+                    PosZ     = pos.z,
+                });
+            }
+
             var msg = new SessionSyncMessage
             {
                 SaveFileContent    = saveContent,
@@ -127,9 +152,10 @@ namespace SeapowerMultiplayer
                 MissionFileContent = missionFileContent,
                 RngSeed            = rngSeed,
                 GameSeconds        = gameSeconds,
+                UnitIdMap          = unitIdMap,
             };
 
-            Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
+            Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}, unitIdMap={unitIdMap.Count} entries");
             NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
 
             // Seed host RNG to match what client will use
@@ -163,14 +189,17 @@ namespace SeapowerMultiplayer
 
             try
             {
-                // Clear state and projectile ID mappings from previous session                
+                // Clear state and projectile ID mappings from previous session
                 ProjectileIdMapper.Clear();
                 PvPDeathNotifications.Clear();
                 PvPFireAuth.Clear();
+                Patch_ObjectBase_HandleEngageTasks.Reset();
+                Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
                 Patch_Submarine_SetDepth.Reset();
 
                 _pendingRngSeed = msg.RngSeed;
                 _pendingGameSeconds = msg.GameSeconds;
+                _pendingUnitIdMap = msg.UnitIdMap ?? new();
 
                 if (msg.LoadByName)
                     ApplyByName(msg);
@@ -416,6 +445,24 @@ namespace SeapowerMultiplayer
             MissileStateSyncHandler.ResetCounters();
             ProjectileIdMapper.Clear();
 
+            // Align client unit IDs to match host IDs. On different PCs, Unity's
+            // ObjectBase counter diverges so the same units get different UniqueIDs.
+            // Without this, all orders fail because the host can't find units by
+            // the client's local IDs.
+            if (!Plugin.Instance.CfgIsHost.Value && _pendingUnitIdMap.Count > 0)
+                AlignUnitIds();
+
+            // PvP: flush pre-existing engage tasks on enemy puppet units.
+            // The save file may contain active engage tasks that bypass all Harmony
+            // suppression layers (AddEngageTask, InsertEngageTask) because they're
+            // deserialized directly into the unit's weapon queue. Without this,
+            // those tasks fire unauthorized missiles that get suppressed by PvPFireAuth,
+            // wasting ammo and corrupting the projectile ID mapper.
+            if (Plugin.Instance.CfgPvP.Value)
+            {
+                FlushEnemyEngageTasks();
+            }
+
             // Diagnostic: log what SceneCreator actually loaded for side names
             if (Singleton<SceneCreator>.InstanceExists(false))
             {
@@ -485,6 +532,186 @@ namespace SeapowerMultiplayer
             {
                 Log.LogInfo("[Session] Host scene ready — paused, unpause to start");
             }
+        }
+
+        /// <summary>
+        /// PvP: call CeaseFire on all enemy puppet units to flush any engage tasks
+        /// that were deserialized from the save file. These tasks bypass Harmony patches
+        /// (AddEngageTask/InsertEngageTask) because they're restored directly into the
+        /// weapon system queue, leading to unauthorized missile spawns.
+        /// </summary>
+        private static void FlushEnemyEngageTasks()
+        {
+            int flushed = 0;
+            foreach (var obj in Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
+            {
+                if (obj._taskforce == Globals._playerTaskforce) continue;
+                if (obj.IsDestroyed) continue;
+
+                // CeaseFire clears all active engage tasks and weapon system queues.
+                // Args: report=false (no radio chatter), clearEngageTasks=true,
+                // clearWeapons=true, clearSonar=false, clearAutoAttack=true, clearGuns=true
+                OrderHandler.ApplyingFromNetwork = true;
+                try { obj.CeaseFire(false, true, true, false, true, true); }
+                finally { OrderHandler.ApplyingFromNetwork = false; }
+                flushed++;
+            }
+            Log.LogInfo($"[Session] PvP: flushed engage tasks on {flushed} enemy puppet units");
+        }
+
+        /// <summary>
+        /// Client: reassign local unit UniqueIDs to match the host's IDs.
+        /// On different PCs, Unity's ObjectBase ID counter starts at different values,
+        /// so the same save file produces different UniqueIDs. This breaks all orders
+        /// because the host can't find units by the client's divergent IDs.
+        /// Matches units by name (with occurrence index for duplicate names).
+        /// Uses a two-pass approach to avoid ID collisions during reassignment.
+        /// </summary>
+        private static void AlignUnitIds()
+        {
+            // Build host entry lookup by name (for primary matching)
+            var hostByName = new Dictionary<string, List<SessionSyncMessage.UnitIdEntry>>();
+            foreach (var entry in _pendingUnitIdMap)
+            {
+                if (!hostByName.TryGetValue(entry.Name, out var list))
+                {
+                    list = new List<SessionSyncMessage.UnitIdEntry>();
+                    hostByName[entry.Name] = list;
+                }
+                list.Add(entry);
+            }
+            // Sort each name group by ID for deterministic Nth-occurrence matching
+            foreach (var list in hostByName.Values)
+                list.Sort((a, b) => a.UniqueId.CompareTo(b.UniqueId));
+
+            // Build client name→object groups, sorted by UniqueID
+            var clientByName = new Dictionary<string, List<ObjectBase>>();
+            foreach (var obj in Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
+            {
+                if (obj.IsDestroyed) continue;
+                if (!clientByName.TryGetValue(obj.name, out var list))
+                {
+                    list = new List<ObjectBase>();
+                    clientByName[obj.name] = list;
+                }
+                list.Add(obj);
+            }
+            foreach (var list in clientByName.Values)
+                list.Sort((a, b) => a.UniqueID.CompareTo(b.UniqueID));
+
+            // Phase 1: match by name (Nth occurrence on client = Nth on host)
+            var reassignments = new List<(ObjectBase obj, int hostId)>();
+            var matchedHostIds = new HashSet<int>();
+            var unmatchedClientObjs = new List<ObjectBase>();
+            int nameMatched = 0;
+
+            foreach (var kvp in clientByName)
+            {
+                string name = kvp.Key;
+                var clientList = kvp.Value;
+                if (!hostByName.TryGetValue(name, out var hostList))
+                {
+                    unmatchedClientObjs.AddRange(clientList);
+                    continue;
+                }
+
+                int count = System.Math.Min(clientList.Count, hostList.Count);
+                for (int i = 0; i < count; i++)
+                {
+                    matchedHostIds.Add(hostList[i].UniqueId);
+                    if (clientList[i].UniqueID != hostList[i].UniqueId)
+                    {
+                        reassignments.Add((clientList[i], hostList[i].UniqueId));
+                        nameMatched++;
+                    }
+                }
+                // Extra client objects with no host counterpart
+                for (int i = count; i < clientList.Count; i++)
+                    unmatchedClientObjs.Add(clientList[i]);
+            }
+
+            // Phase 2: position-based fallback for unmatched client objects
+            // Both sides loaded the same save, so positions are identical at load time
+            var unmatchedHostEntries = new List<SessionSyncMessage.UnitIdEntry>();
+            foreach (var entry in _pendingUnitIdMap)
+            {
+                if (!matchedHostIds.Contains(entry.UniqueId))
+                    unmatchedHostEntries.Add(entry);
+            }
+
+            int posMatched = 0;
+            if (unmatchedClientObjs.Count > 0 && unmatchedHostEntries.Count > 0)
+            {
+                var usedHostEntries = new HashSet<int>(); // indices
+                foreach (var obj in unmatchedClientObjs)
+                {
+                    var pos = obj.transform.position;
+                    float bestDist = float.MaxValue;
+                    int bestIdx = -1;
+
+                    for (int i = 0; i < unmatchedHostEntries.Count; i++)
+                    {
+                        if (usedHostEntries.Contains(i)) continue;
+                        var he = unmatchedHostEntries[i];
+                        float dx = pos.x - he.PosX;
+                        float dz = pos.z - he.PosZ;
+                        float dist = dx * dx + dz * dz; // squared distance
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            bestIdx = i;
+                        }
+                    }
+
+                    // Match if within 100m (10000 sq units — positions should be near-identical)
+                    if (bestIdx >= 0 && bestDist < 10000f)
+                    {
+                        var he = unmatchedHostEntries[bestIdx];
+                        usedHostEntries.Add(bestIdx);
+                        if (obj.UniqueID != he.UniqueId)
+                        {
+                            reassignments.Add((obj, he.UniqueId));
+                            posMatched++;
+                            Log.LogInfo($"[Session] Position-matched '{obj.name}' (client) → '{he.Name}' (host) ID {he.UniqueId} dist={System.Math.Sqrt(bestDist):F1}");
+                        }
+                    }
+                }
+            }
+
+            int skipped = unmatchedClientObjs.Count - posMatched;
+
+            if (reassignments.Count == 0)
+            {
+                Log.LogInfo($"[Session] Unit ID alignment: all IDs already match ({_pendingUnitIdMap.Count} entries)");
+                _pendingUnitIdMap.Clear();
+                return;
+            }
+
+            // Save _UID counter — SetUniqueId bumps it, which pollutes IDs for
+            // subsequently spawned objects (same fix as FlightOpsHandler.SafeSetUniqueId)
+            int savedUid = Singleton<SceneCreator>.Instance._UID;
+
+            // Pass 1: move all units to temporary negative IDs to avoid collisions
+            // (e.g. client unit B has ID 100, which is host unit A's target ID)
+            for (int i = 0; i < reassignments.Count; i++)
+            {
+                var (obj, _) = reassignments[i];
+                int tempId = -(i + 1);
+                obj.SetUniqueId(tempId);
+            }
+
+            // Pass 2: assign the target host IDs
+            foreach (var (obj, hostId) in reassignments)
+            {
+                obj.SetUniqueId(hostId);
+                Log.LogDebug($"[Session] Aligned unit '{obj.name}' → ID {hostId}");
+            }
+
+            // Restore _UID counter
+            Singleton<SceneCreator>.Instance._UID = savedUid;
+
+            Log.LogInfo($"[Session] Unit ID alignment: {nameMatched} by name, {posMatched} by position, {skipped} unmatched (host map had {_pendingUnitIdMap.Count} entries)");
+            _pendingUnitIdMap.Clear();
         }
 
         /// <summary>

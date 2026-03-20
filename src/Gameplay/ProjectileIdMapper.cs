@@ -25,7 +25,7 @@ namespace SeapowerMultiplayer
     /// </summary>
     public static class ProjectileIdMapper
     {
-        private const float StaleTimeout = 3f; // seconds before a pending entry is considered stale
+        private const float StaleTimeout = 15f; // real seconds before a pending entry is considered stale
 
         private struct PendingEntry
         {
@@ -179,7 +179,7 @@ namespace SeapowerMultiplayer
                 StalePurgedCount++;
                 if (revokeAuth && Plugin.Instance.CfgPvP.Value)
                     PvPFireAuth.Revoke(stale.SourceUnitId, 1);
-                Plugin.Log.LogDebug($"[IdMapper] Purged stale pending entry: id={stale.Id} source={stale.SourceUnitId} age={now - stale.EnqueueTime:F1}s");
+                Plugin.Log.LogWarning($"[IdMapper] Purged stale pending entry: id={stale.Id} source={stale.SourceUnitId} age={now - stale.EnqueueTime:F1}s");
             }
 
             // Batch remove for O(n) instead of O(n^2)

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text;
 using LiteNetLib.Utils;
 
@@ -18,6 +19,21 @@ namespace SeapowerMultiplayer.Messages
         public int    RngSeed;                     // deterministic seed for synchronized RNG
         public float  GameSeconds;                  // Environment.Seconds (save format drops sub-minute precision)
 
+        /// <summary>
+        /// Host unit IDs keyed by unit name. Used by the client to reassign
+        /// UniqueIDs after loading so orders reference IDs the host recognises.
+        /// On different PCs, Unity's ObjectBase counter diverges, giving
+        /// the same units different IDs — this map corrects for that.
+        /// </summary>
+        public List<UnitIdEntry> UnitIdMap = new();
+
+        public struct UnitIdEntry
+        {
+            public int    UniqueId;
+            public string Name;
+            public float  PosX, PosZ; // world position for fallback matching
+        }
+
         public void Serialize(NetDataWriter w)
         {
             w.Put(LoadByName);
@@ -26,17 +42,48 @@ namespace SeapowerMultiplayer.Messages
             PutLargeString(w, MissionFileContent);
             w.Put(RngSeed);
             w.Put(GameSeconds);
+
+            // Unit ID map
+            w.Put(UnitIdMap.Count);
+            foreach (var entry in UnitIdMap)
+            {
+                w.Put(entry.UniqueId);
+                w.Put(entry.Name ?? "");
+                w.Put(entry.PosX);
+                w.Put(entry.PosZ);
+            }
         }
 
-        public static SessionSyncMessage Deserialize(NetDataReader r) => new SessionSyncMessage
+        public static SessionSyncMessage Deserialize(NetDataReader r)
         {
-            LoadByName         = r.GetBool(),
-            SaveFileContent    = GetLargeString(r),
-            MissionFileName    = r.GetString(),
-            MissionFileContent = GetLargeString(r),
-            RngSeed            = r.GetInt(),
-            GameSeconds        = r.GetFloat(),
-        };
+            var msg = new SessionSyncMessage
+            {
+                LoadByName         = r.GetBool(),
+                SaveFileContent    = GetLargeString(r),
+                MissionFileName    = r.GetString(),
+                MissionFileContent = GetLargeString(r),
+                RngSeed            = r.GetInt(),
+                GameSeconds        = r.GetFloat(),
+            };
+
+            // Unit ID map (may be absent in older versions)
+            if (r.AvailableBytes >= 4)
+            {
+                int count = r.GetInt();
+                for (int i = 0; i < count; i++)
+                {
+                    msg.UnitIdMap.Add(new UnitIdEntry
+                    {
+                        UniqueId = r.GetInt(),
+                        Name     = r.GetString(),
+                        PosX     = r.GetFloat(),
+                        PosZ     = r.GetFloat(),
+                    });
+                }
+            }
+
+            return msg;
+        }
 
         /// <summary>
         /// Write a string as int32-length-prefixed UTF-8 bytes.
