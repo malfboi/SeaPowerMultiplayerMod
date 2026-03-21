@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using BepInEx.Logging;
@@ -16,15 +17,20 @@ namespace SeapowerMultiplayer.Transport
 
         private const int MaxUnreliablePayload = 1400;
 
+        // Connection ID tracking for N-player support
+        private int _nextConnectionId;
+        private readonly Dictionary<int, NetPeer> _idToPeer = new();
+        private readonly Dictionary<NetPeer, int> _peerToId = new();
+
         public bool IsConnected => _isHost
             ? (_net?.ConnectedPeersCount ?? 0) > 0
             : _serverPeer?.ConnectionState == ConnectionState.Connected;
 
         public int RttMs { get; private set; }
 
-        public event Action<byte[], int>? OnDataReceived;
-        public event Action? OnPeerConnected;
-        public event Action? OnPeerDisconnected;
+        public event Action<byte[], int, int>? OnDataReceived;
+        public event Action<int>? OnPeerConnected;
+        public event Action<int>? OnPeerDisconnected;
 
         public void Start(bool asHost)
         {
@@ -51,6 +57,9 @@ namespace SeapowerMultiplayer.Transport
         {
             _net?.Stop();
             _serverPeer = null;
+            _idToPeer.Clear();
+            _peerToId.Clear();
+            _nextConnectionId = 0;
             Log.LogInfo("[LiteNet] Stopped.");
         }
 
@@ -79,6 +88,30 @@ namespace SeapowerMultiplayer.Transport
             _net.SendToAll(data, 0, length, dm);
         }
 
+        public void SendToClient(int connectionId, byte[] data, int length, TransportDelivery delivery)
+        {
+            if (!_idToPeer.TryGetValue(connectionId, out var peer)) return;
+            var dm = MapDelivery(delivery);
+            if ((dm == DeliveryMethod.Unreliable || dm == DeliveryMethod.ReliableSequenced)
+                && length > MaxUnreliablePayload)
+                dm = DeliveryMethod.ReliableUnordered;
+            peer.Send(data, 0, length, dm);
+        }
+
+        public void SendToAllExcept(int excludeConnectionId, byte[] data, int length, TransportDelivery delivery)
+        {
+            if (_net == null) return;
+            var dm = MapDelivery(delivery);
+            if ((dm == DeliveryMethod.Unreliable || dm == DeliveryMethod.ReliableSequenced)
+                && length > MaxUnreliablePayload)
+                dm = DeliveryMethod.ReliableUnordered;
+            foreach (var kvp in _idToPeer)
+            {
+                if (kvp.Key != excludeConnectionId)
+                    kvp.Value.Send(data, 0, length, dm);
+            }
+        }
+
         private static DeliveryMethod MapDelivery(TransportDelivery delivery) => delivery switch
         {
             TransportDelivery.Unreliable => DeliveryMethod.Unreliable,
@@ -91,17 +124,26 @@ namespace SeapowerMultiplayer.Transport
 
         void INetEventListener.OnPeerConnected(NetPeer peer)
         {
-            Log.LogInfo($"[LiteNet] Peer connected: {peer.EndPoint}");
+            int connId = _nextConnectionId++;
+            _idToPeer[connId] = peer;
+            _peerToId[peer] = connId;
+            Log.LogInfo($"[LiteNet] Peer connected: {peer.EndPoint} (connectionId={connId})");
             if (!_isHost)
                 _serverPeer = peer;
-            OnPeerConnected?.Invoke();
+            OnPeerConnected?.Invoke(connId);
         }
 
         void INetEventListener.OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
         {
-            Log.LogInfo($"[LiteNet] Peer disconnected: {peer.EndPoint}  reason={disconnectInfo.Reason}");
+            int connId = -1;
+            if (_peerToId.TryGetValue(peer, out connId))
+            {
+                _peerToId.Remove(peer);
+                _idToPeer.Remove(connId);
+            }
+            Log.LogInfo($"[LiteNet] Peer disconnected: {peer.EndPoint} (connectionId={connId})  reason={disconnectInfo.Reason}");
             if (!_isHost) _serverPeer = null;
-            OnPeerDisconnected?.Invoke();
+            OnPeerDisconnected?.Invoke(connId);
         }
 
         void INetEventListener.OnNetworkError(IPEndPoint endPoint, SocketError socketError)
@@ -115,7 +157,8 @@ namespace SeapowerMultiplayer.Transport
             int length = reader.AvailableBytes;
             byte[] data = new byte[length];
             Buffer.BlockCopy(reader.RawData, reader.Position, data, 0, length);
-            OnDataReceived?.Invoke(data, length);
+            int connId = _peerToId.TryGetValue(peer, out var id) ? id : -1;
+            OnDataReceived?.Invoke(data, length, connId);
         }
 
         void INetEventListener.OnNetworkReceiveUnconnected(IPEndPoint remoteEndPoint, NetPacketReader reader, UnconnectedMessageType messageType) { }

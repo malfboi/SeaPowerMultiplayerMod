@@ -193,6 +193,11 @@ namespace SeapowerMultiplayer
             GUILayout.Space(4);
             DrawConnection();
             GUILayout.Space(6);
+            if (NetworkManager.Instance.IsConnected)
+            {
+                DrawPlayerList();
+                GUILayout.Space(6);
+            }
             DrawTimeControls();
             GUILayout.Space(6);
 
@@ -371,7 +376,7 @@ namespace SeapowerMultiplayer
             }
             else if (inLobby)
             {
-                GUILayout.Label($"Lobby: {SteamLobbyManager.MemberCount}/2 players", _labelStyle);
+                GUILayout.Label($"Lobby: {SteamLobbyManager.MemberCount}/{Plugin.Instance.CfgMaxPlayers.Value} players", _labelStyle);
             }
 
             GUILayout.Space(4);
@@ -420,10 +425,10 @@ namespace SeapowerMultiplayer
             switch (state)
             {
                 case SimState.WaitingForClient:
-                    GUILayout.Label("Waiting for client to load...", _warningStyle);
+                    GUILayout.Label($"Waiting for players ({SimSyncManager.ReadyCount}/{SimSyncManager.ExpectedCount} ready)", _warningStyle);
                     break;
                 case SimState.Synchronized when GameTime.IsPaused():
-                    GUILayout.Label("Client ready \u2014 unpause to begin", _successStyle);
+                    GUILayout.Label("All players ready \u2014 unpause to begin", _successStyle);
                     break;
                 case SimState.Synchronized:
                     GUILayout.Label("Sim synced", _successStyle);
@@ -434,6 +439,63 @@ namespace SeapowerMultiplayer
             {
                 GUILayout.Label("Receiving scene...", _warningStyle);
             }
+        }
+
+        // ── Player list section ──────────────────────────────────────────────
+
+        private void DrawPlayerList()
+        {
+            GUILayout.Label("\u2500\u2500 Players \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
+
+            bool isHost = NetworkManager.Instance.IsHost;
+
+            foreach (var kvp in PlayerRegistry.Players)
+            {
+                var p = kvp.Value;
+                string tfName = p.AssignedTfIndex >= 0
+                    ? GetTaskforceName(p.AssignedTfIndex)
+                    : "Unassigned";
+                string teamStr = p.TeamSide == 0 ? "" : " [Enemy]";
+                string readyStr = p.IsReady ? " \u2713" : "";
+                string localStr = p.PlayerId == PlayerRegistry.LocalPlayerId ? " (you)" : "";
+
+                GUILayout.Label($"  {p.DisplayName}{localStr}{teamStr} \u2014 {tfName}{readyStr}", _labelStyle);
+
+                // Host: buttons to assign task force and team
+                if (isHost && p.PlayerId != PlayerRegistry.LocalPlayerId)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Space(20);
+                    if (GUILayout.Button("Assign TF", _buttonStyle, GUILayout.Width(80)))
+                    {
+                        // Cycle through task force indices
+                        int nextIdx = p.AssignedTfIndex + 1;
+                        int tfCount = GetTaskforceCount();
+                        if (nextIdx >= tfCount) nextIdx = -1; // wrap to unassigned
+                        PlayerRegistry.HostAssignTaskforce(p.PlayerId, nextIdx);
+                    }
+                    if (GUILayout.Button(p.TeamSide == 0 ? "Team: Player" : "Team: Enemy", _buttonStyle, GUILayout.Width(100)))
+                    {
+                        PlayerRegistry.HostAssignTeam(p.PlayerId, (byte)(p.TeamSide == 0 ? 1 : 0));
+                    }
+                    GUILayout.EndHorizontal();
+                }
+            }
+        }
+
+        private static string GetTaskforceName(int index)
+        {
+            var tf = PlayerRegistry.GetTaskforceByIndex(index);
+            if (tf == null) return $"TF#{index}";
+            return !string.IsNullOrEmpty(tf._nameInMissionFile)
+                ? tf._nameInMissionFile
+                : $"TF#{index} ({tf.Nation})";
+        }
+
+        private static int GetTaskforceCount()
+        {
+            if (!Singleton<SeaPower.TaskforceManager>.InstanceExists(false)) return 0;
+            return Singleton<SeaPower.TaskforceManager>.Instance._taskForces.Count;
         }
 
         // ── Time compression section ──────────────────────────────────────────

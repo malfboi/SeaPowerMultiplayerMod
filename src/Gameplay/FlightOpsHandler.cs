@@ -55,13 +55,15 @@ namespace SeapowerMultiplayer
         private static bool _idRangeInitialized;
 
         /// <summary>
-        /// Returns a UniqueID guaranteed not to collide with the other side's aircraft.
+        /// Returns a UniqueID guaranteed not to collide with other players' aircraft.
+        /// Each player gets a 1M ID range: 2M + playerId * 1M.
         /// </summary>
         internal static int NextSafeId()
         {
             if (!_idRangeInitialized)
             {
-                _nextSafeId = Plugin.Instance.CfgIsHost.Value ? 2_000_000 : 3_000_000;
+                int playerId = PlayerRegistry.LocalPlayerId;
+                _nextSafeId = 2_000_000 + playerId * 1_000_000;
                 _idRangeInitialized = true;
             }
             return ++_nextSafeId;

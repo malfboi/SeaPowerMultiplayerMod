@@ -21,6 +21,11 @@ namespace SeapowerMultiplayer.Transport
         private const int MaxMessages = 64;
         private readonly IntPtr[] _messagePointers = new IntPtr[MaxMessages];
 
+        // Connection ID tracking for N-player support
+        private int _nextConnectionId;
+        private readonly Dictionary<int, HSteamNetConnection> _idToConn = new();
+        private readonly Dictionary<HSteamNetConnection, int> _connToId = new();
+
         /// <summary>Host SteamID is read from SteamLobbyManager when connecting as client.</summary>
 
         public bool IsConnected => _isHost
@@ -29,9 +34,9 @@ namespace SeapowerMultiplayer.Transport
 
         public int RttMs { get; private set; }
 
-        public event Action<byte[], int>? OnDataReceived;
-        public event Action? OnPeerConnected;
-        public event Action? OnPeerDisconnected;
+        public event Action<byte[], int, int>? OnDataReceived;
+        public event Action<int>? OnPeerConnected;
+        public event Action<int>? OnPeerDisconnected;
 
         public void Start(bool asHost)
         {
@@ -81,6 +86,9 @@ namespace SeapowerMultiplayer.Transport
                 }
             }
 
+            _idToConn.Clear();
+            _connToId.Clear();
+            _nextConnectionId = 0;
             _connectionStatusCallback?.Dispose();
             _connectionStatusCallback = null;
             _running = false;
@@ -116,6 +124,21 @@ namespace SeapowerMultiplayer.Transport
                 SendMessage(conn, data, length, delivery);
         }
 
+        public void SendToClient(int connectionId, byte[] data, int length, TransportDelivery delivery)
+        {
+            if (!_idToConn.TryGetValue(connectionId, out var conn)) return;
+            SendMessage(conn, data, length, delivery);
+        }
+
+        public void SendToAllExcept(int excludeConnectionId, byte[] data, int length, TransportDelivery delivery)
+        {
+            foreach (var kvp in _idToConn)
+            {
+                if (kvp.Key != excludeConnectionId)
+                    SendMessage(kvp.Value, data, length, delivery);
+            }
+        }
+
         private void SendMessage(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
         {
             int flags = delivery switch
@@ -144,6 +167,7 @@ namespace SeapowerMultiplayer.Transport
         private void ReceiveMessages(HSteamNetConnection conn)
         {
             int count = SteamNetworkingSockets.ReceiveMessagesOnConnection(conn, _messagePointers, MaxMessages);
+            int connId = _connToId.TryGetValue(conn, out var id) ? id : -1;
 
             for (int i = 0; i < count; i++)
             {
@@ -154,7 +178,7 @@ namespace SeapowerMultiplayer.Transport
 
                 SteamNetworkingMessage_t.Release(_messagePointers[i]);
 
-                OnDataReceived?.Invoke(data, length);
+                OnDataReceived?.Invoke(data, length, connId);
             }
         }
 
@@ -195,21 +219,33 @@ namespace SeapowerMultiplayer.Transport
                     break;
 
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected:
+                {
+                    int connId = _nextConnectionId++;
+                    _idToConn[connId] = conn;
+                    _connToId[conn] = connId;
                     if (_isHost)
                     {
                         _clientConnections.Add(conn);
-                        Log.LogInfo($"[SteamTransport] Client connected ({_clientConnections.Count} peers)");
+                        Log.LogInfo($"[SteamTransport] Client connected (connectionId={connId}, {_clientConnections.Count} peers)");
                     }
                     else
                     {
-                        Log.LogInfo("[SteamTransport] Connected to host");
+                        Log.LogInfo($"[SteamTransport] Connected to host (connectionId={connId})");
                     }
-                    OnPeerConnected?.Invoke();
+                    OnPeerConnected?.Invoke(connId);
                     break;
+                }
 
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ClosedByPeer:
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
-                    Log.LogInfo($"[SteamTransport] Connection closed: {info.m_szEndDebug}");
+                {
+                    int connId = _connToId.TryGetValue(conn, out var cid) ? cid : -1;
+                    if (connId >= 0)
+                    {
+                        _connToId.Remove(conn);
+                        _idToConn.Remove(connId);
+                    }
+                    Log.LogInfo($"[SteamTransport] Connection closed (connectionId={connId}): {info.m_szEndDebug}");
 
                     if (_isHost)
                     {
@@ -221,8 +257,9 @@ namespace SeapowerMultiplayer.Transport
                     }
 
                     SteamNetworkingSockets.CloseConnection(conn, 0, null, false);
-                    OnPeerDisconnected?.Invoke();
+                    OnPeerDisconnected?.Invoke(connId);
                     break;
+                }
             }
         }
     }

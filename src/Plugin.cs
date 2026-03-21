@@ -25,6 +25,7 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgPvP = null!;
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
+        internal ConfigEntry<int> CfgMaxPlayers = null!;
 
         // Drift correction config
         internal ConfigEntry<float> CfgSoftSyncElevated = null!;
@@ -53,6 +54,7 @@ namespace SeapowerMultiplayer
             CfgPvP.Value   = true; // Force PvP on for now
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
+            CfgMaxPlayers  = Config.Bind("Network", "MaxPlayers",   8,           "Maximum number of players (lobby size)");
 
             // Drift correction
             CfgSoftSyncElevated   = Config.Bind("DriftCorrection", "SoftSyncElevated",   20f,  "Avg drift threshold for Elevated tier");

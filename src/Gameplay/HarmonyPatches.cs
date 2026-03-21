@@ -610,20 +610,22 @@ namespace SeapowerMultiplayer
         {
             if (!NetworkManager.Instance.IsConnected) return true;
 
+            var unit = _aiBaseObjectField?.GetValue(instance) as ObjectBase;
+
             // PvP: suppress enemy AI auto-fire BEFORE SceneLoading check.
             // During the connection window SceneLoading is true, which would
             // bypass the PvP guard and let enemy AI fire unsuppressed.
             if (Plugin.Instance.CfgPvP.Value)
             {
-                var unit = _aiBaseObjectField?.GetValue(instance) as ObjectBase;
-                if (unit == null || unit._taskforce != Globals._playerTaskforce) return false;
+                if (unit == null || !PlayerRegistry.IsLocallyAuthoritative(unit)) return false;
                 InsideAIAutoFire = true;
                 return true;
             }
 
             if (SessionManager.SceneLoading) return true;
 
-            if (!Plugin.Instance.CfgIsHost.Value) return false;
+            // N-player co-op: only run AI auto-fire for locally authoritative units
+            if (unit != null && !PlayerRegistry.IsLocallyAuthoritative(unit)) return false;
             InsideAIAutoFire = true;
             return true;
         }
@@ -1199,21 +1201,30 @@ namespace SeapowerMultiplayer
             // PvP: don't sync orders for weapons (missiles/torpedoes) — their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
-            if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
-            NetworkManager.Instance.SendToServer(msg);
-            return true;
+
+            // N-player: if we're authoritative, execute locally and send to host for relay
+            if (PlayerRegistry.IsLocallyAuthoritative(unit))
+            {
+                if (!Plugin.Instance.CfgIsHost.Value)
+                    NetworkManager.Instance.SendToServer(msg);
+                return true;
+            }
+
+            // Not authoritative: block execution
+            return false;
         }
 
         internal static void Postfix(ObjectBase unit, PlayerOrderMessage msg)
         {
-            if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (OrderHandler.ApplyingFromNetwork) return;
             // PvP: don't sync orders for weapons (missiles/torpedoes)
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
-            NetworkManager.Instance.BroadcastToClients(msg);
+
+            // Host: broadcast locally-originated orders to all clients
+            if (Plugin.Instance.CfgIsHost.Value)
+                NetworkManager.Instance.BroadcastToClients(msg);
         }
 
         internal static PlayerOrderMessage SensorMsg(ObjectBase u, int group, bool enable) =>

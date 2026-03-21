@@ -288,8 +288,8 @@ namespace SeapowerMultiplayer
                 // Skip projectiles found by coincidental ID collision with a unit ID
                 if (unit is WeaponBase) continue;
 
-                // PvP: skip own units — we are authoritative for them
-                if (isPvP && unit._taskforce == Globals._playerTaskforce) continue;
+                // Skip units we are authoritative for — we run local physics
+                if (PlayerRegistry.IsLocallyAuthoritative(unit)) continue;
 
                 // PvP: skip aircraft still in the flight deck pipeline
                 // (prevents state updates from fighting with elevator/taxi/takeoff positioning)

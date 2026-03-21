@@ -4,9 +4,8 @@ using SeapowerMultiplayer.Messages;
 namespace SeapowerMultiplayer
 {
     /// <summary>
-    /// Tracks which task force the client has been assigned to control.
-    /// TfType.None = free control (all friendly units).
-    /// Host tracks this too so it can display the current assignment in the UI.
+    /// Tracks which task force the local player has been assigned to control.
+    /// Delegates to PlayerRegistry for per-player authority in N-player mode.
     /// </summary>
     public static class TaskforceAssignmentManager
     {
@@ -32,13 +31,12 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>
-        /// Returns true if the client is allowed to issue orders to this unit.
-        /// Always true on host, or when no task force is assigned (free control).
+        /// Returns true if the local player is allowed to issue orders to this unit.
+        /// Delegates to PlayerRegistry for per-player task force authority.
         /// </summary>
         public static bool ClientMayControl(ObjectBase unit)
         {
-            if (ClientAssignedTfType == Taskforce.TfType.None) return true;
-            return unit._taskforce?.Side == ClientAssignedTfType;
+            return PlayerRegistry.IsLocallyAuthoritative(unit);
         }
     }
 }

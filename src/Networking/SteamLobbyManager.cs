@@ -68,7 +68,7 @@ namespace SeapowerMultiplayer.Transport
             }
 
             Log.LogInfo("[SteamLobby] Creating lobby...");
-            SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, 2);
+            SteamMatchmaking.CreateLobby(ELobbyType.k_ELobbyTypeFriendsOnly, Plugin.Instance.CfgMaxPlayers.Value);
         }
 
         public static void InviteFriend()

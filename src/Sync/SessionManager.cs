@@ -527,7 +527,11 @@ namespace SeapowerMultiplayer
                 // Notify host we're ready
                 SimSyncManager.CurrentState = SimState.Synchronized;
                 Log.LogInfo($"[Session] SimState set to {SimSyncManager.CurrentState}");
-                NetworkManager.Instance.SendToServer(new SessionReadyMessage { IsReady = true });
+                NetworkManager.Instance.SendToServer(new SessionReadyMessage
+                {
+                    IsReady = true,
+                    PlayerId = PlayerRegistry.LocalPlayerId,
+                });
                 Log.LogInfo("[Session] Sent SessionReady to host — waiting for unpause");
             }
             else

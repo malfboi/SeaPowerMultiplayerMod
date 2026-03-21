@@ -96,21 +96,30 @@ namespace SeapowerMultiplayer
             bool isHost = Plugin.Instance.CfgIsHost.Value;
             bool isPvP  = Plugin.Instance.CfgPvP.Value;
 
-            // Co-op: only host broadcasts (unchanged)
-            if (!isPvP && !isHost) return;
-
             // Don't broadcast during scene transitions or before sync is established
             if (SimSyncManager.CurrentState != SimState.Synchronized) return;
             if (SessionManager.SceneLoading) return;
 
-            // PvP: capture own units only; Co-op: capture all
-            // Guard: if _playerTaskforce isn't set yet, skip to avoid unfiltered broadcast
+            // Determine filter taskforce for this player's authoritative units
             SeaPower.Taskforce filter = null;
-            if (isPvP)
+            var localTf = PlayerRegistry.GetLocalTaskforce();
+            if (localTf != null)
             {
+                // Player has a specific task force assignment — only broadcast those units
+                filter = localTf;
+            }
+            else if (isPvP)
+            {
+                // Legacy PvP fallback: use player taskforce
                 filter = SeaPower.Globals._playerTaskforce;
                 if (filter == null) return;
             }
+            else if (!isHost)
+            {
+                // Co-op client with no assignment: don't broadcast
+                return;
+            }
+            // else: host with no assignment in co-op: broadcast all (filter = null)
 
             var msg = StateSerializer.Capture(filter);
 
@@ -151,20 +160,20 @@ namespace SeapowerMultiplayer
                 if (!NetworkManager.Instance.IsConnected) continue;
 
                 bool isPvP = Plugin.Instance.CfgPvP.Value;
-                // Co-op: host only. PvP: both sides send corrections for own damaged ships.
-                if (!isPvP && !Plugin.Instance.CfgIsHost.Value) continue;
+                // Send corrections for locally authoritative damaged ships
+                if (!isPvP && !Plugin.Instance.CfgIsHost.Value && PlayerRegistry.GetLocalTaskforce() == null) continue;
 
-                BroadcastDamageCorrections(isPvP);
+                BroadcastDamageCorrections();
             }
         }
 
-        private static void BroadcastDamageCorrections(bool isPvP)
+        private static void BroadcastDamageCorrections()
         {
-            SendCorrections<Vessel>(isPvP);
-            SendCorrections<Submarine>(isPvP);
+            SendCorrections<Vessel>();
+            SendCorrections<Submarine>();
         }
 
-        private static void SendCorrections<T>(bool isPvP) where T : ObjectBase
+        private static void SendCorrections<T>() where T : ObjectBase
         {
             foreach (var unit in Object.FindObjectsByType<T>(FindObjectsSortMode.None))
             {
@@ -172,8 +181,8 @@ namespace SeapowerMultiplayer
                 var comps = unit.Compartments;
                 if (comps == null) continue;
 
-                // PvP: only send corrections for own units that have taken damage
-                if (isPvP && unit._taskforce != SeaPower.Globals._playerTaskforce) continue;
+                // Only send corrections for units we are authoritative for
+                if (!PlayerRegistry.IsLocallyAuthoritative(unit)) continue;
 
                 // Only send for units that have taken damage or are sinking
                 if (!comps._isSinking && comps.IntegrityPercentage > 99f) continue;
@@ -196,9 +205,6 @@ namespace SeapowerMultiplayer
                 if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
                 if (SessionManager.SceneLoading) continue;
 
-                var playerTf = SeaPower.Globals._playerTaskforce;
-                if (playerTf == null) continue;
-
                 var missiles = Object.FindObjectsByType<Missile>(FindObjectsSortMode.None);
                 if (missiles.Length == 0) continue;
 
@@ -208,9 +214,9 @@ namespace SeapowerMultiplayer
                 {
                     if (m.IsDestroyed) continue;
 
-                    // Owner authority: send state for missiles launched by my units
+                    // Owner authority: send state for missiles launched by units we control
                     var launcher = _launchPlatformField?.GetValue(m) as ObjectBase;
-                    if (launcher == null || launcher._taskforce != playerTf) continue;
+                    if (launcher == null || !PlayerRegistry.IsLocallyAuthoritative(launcher)) continue;
 
                     // Encode position as absolute GeoPosition (floating-origin safe)
                     var geo = Utils.worldPositionFromUnityToLongLat(

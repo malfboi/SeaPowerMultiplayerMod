@@ -11,15 +11,18 @@ namespace SeapowerMultiplayer.Messages
         public MessageType Type => MessageType.SessionReady;
 
         public bool IsReady = true;
+        public byte PlayerId;
 
         public void Serialize(NetDataWriter w)
         {
             w.Put(IsReady);
+            w.Put(PlayerId);
         }
 
         public static SessionReadyMessage Deserialize(NetDataReader r) => new SessionReadyMessage
         {
             IsReady = r.GetBool(),
+            PlayerId = r.GetByte(),
         };
     }
 }

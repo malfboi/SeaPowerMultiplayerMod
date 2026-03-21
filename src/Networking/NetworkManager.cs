@@ -27,6 +27,9 @@ namespace SeapowerMultiplayer
         private readonly ConcurrentQueue<Action> _mainThreadQueue = new();
         private readonly NetDataWriter           _writer          = new();
 
+        /// <summary>ConnectionId of the sender for the message currently being processed. -1 for host/local.</summary>
+        public int CurrentSenderConnectionId { get; private set; } = -1;
+
         private static ManualLogSource Log => Plugin.Log;
 
         // ── Public API ────────────────────────────────────────────────────────────
@@ -42,6 +45,7 @@ namespace SeapowerMultiplayer
         public void StartHost(int port)
         {
             _isHost = true;
+            PlayerRegistry.RegisterHost();
             _transport = CreateTransport();
             WireTransportEvents();
             _transport.Start(asHost: true);
@@ -78,6 +82,7 @@ namespace SeapowerMultiplayer
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
+            PlayerRegistry.Reset();
             _transport?.Stop();
             _transport = null;
             _running = false;
@@ -124,6 +129,30 @@ namespace SeapowerMultiplayer
                 SendToServer(msg, delivery);
         }
 
+        public void SendToClient(int connectionId, INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (_transport == null) return;
+            _writer.Reset();
+            _writer.Put((byte)msg.Type);
+            msg.Serialize(_writer);
+            _transport.SendToClient(connectionId, _writer.Data, _writer.Length, MapDelivery(delivery));
+        }
+
+        public void SendToAllExcept(int excludeConnectionId, INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (_transport == null) return;
+            _writer.Reset();
+            _writer.Put((byte)msg.Type);
+            msg.Serialize(_writer);
+            _transport.SendToAllExcept(excludeConnectionId, _writer.Data, _writer.Length, MapDelivery(delivery));
+        }
+
+        /// <summary>Relay raw bytes to all clients except the sender. Avoids re-serialization.</summary>
+        public void RelayToAllExcept(int excludeConnectionId, byte[] data, int length, DeliveryMethod delivery)
+        {
+            _transport?.SendToAllExcept(excludeConnectionId, data, length, MapDelivery(delivery));
+        }
+
         // ── Transport factory ───────────────────────────────────────────────────
 
         private ITransport CreateTransport()
@@ -154,38 +183,66 @@ namespace SeapowerMultiplayer
 
         // ── Transport event handlers ────────────────────────────────────────────
 
-        private void OnPeerConnected()
+        private void OnPeerConnected(int connectionId)
         {
-            Log.LogInfo("[Net] Peer connected");
-        }
-
-        private void OnPeerDisconnected()
-        {
-            Log.LogInfo("[Net] Peer disconnected");
+            Log.LogInfo($"[Net] Peer connected (connectionId={connectionId})");
             _mainThreadQueue.Enqueue(() =>
             {
-                OrderDelayQueue.Clear();
-                DriftDetector.Reset();
-                StateApplier.ResetOrphanTracking();
-                PvPDeathNotifications.Clear();
-                PvPFireAuth.Clear();
-                Patch_ObjectBase_HandleEngageTasks.Reset();
-                Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
-                Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
-                FlightOpsHandler.Clear();
-                Patch_Compartments_CalculateWantedVelocityInKnots.ClearLogCache();
-                Patch_Vessel_ApplyRudderThrust.ClearLogCache();
-                Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();
+                PlayerRegistry.OnPeerConnected(connectionId);
             });
         }
 
-        private void OnDataReceived(byte[] data, int length)
+        private void OnPeerDisconnected(int connectionId)
+        {
+            Log.LogInfo($"[Net] Peer disconnected (connectionId={connectionId})");
+            _mainThreadQueue.Enqueue(() =>
+            {
+                PlayerRegistry.OnPeerDisconnected(connectionId);
+                // If no more clients, do full cleanup
+                if (!IsConnected)
+                {
+                    OrderDelayQueue.Clear();
+                    DriftDetector.Reset();
+                    StateApplier.ResetOrphanTracking();
+                    PvPDeathNotifications.Clear();
+                    PvPFireAuth.Clear();
+                    Patch_ObjectBase_HandleEngageTasks.Reset();
+                    Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+                    Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
+                    FlightOpsHandler.Clear();
+                    Patch_Compartments_CalculateWantedVelocityInKnots.ClearLogCache();
+                    Patch_Vessel_ApplyRudderThrust.ClearLogCache();
+                    Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();
+                }
+            });
+        }
+
+        private void OnDataReceived(byte[] data, int length, int connectionId)
         {
             var reader = new NetDataReader(data, 0, length);
             var type = (MessageType)reader.GetByte();
 
             if (type != MessageType.StateUpdate && type != MessageType.MissileStateSync)
-                Log.LogDebug($"[Net] Received {type}");
+                Log.LogDebug($"[Net] Received {type} from connectionId={connectionId}");
+
+            // Host relay: forward certain messages from one client to all others
+            if (_isHost)
+            {
+                switch (type)
+                {
+                    case MessageType.StateUpdate:
+                    case MessageType.MissileStateSync:
+                        RelayToAllExcept(connectionId, data, length, DeliveryMethod.Unreliable);
+                        break;
+                    case MessageType.CombatEvent:
+                    case MessageType.DamageState:
+                    case MessageType.DamageDecal:
+                    case MessageType.FlightOps:
+                    case MessageType.ChaffLaunch:
+                        RelayToAllExcept(connectionId, data, length, DeliveryMethod.ReliableOrdered);
+                        break;
+                }
+            }
 
             switch (type)
             {
@@ -206,8 +263,11 @@ namespace SeapowerMultiplayer
                             $"unit={msg.SourceEntityId} ammo={msg.AmmoId} target={msg.TargetEntityId} " +
                             $"shots={msg.ShotsToFire}");
                     }
+                    // Host relay: forward orders from one client to all other clients
+                    int senderConnId = connectionId;
                     _mainThreadQueue.Enqueue(() =>
                     {
+                        CurrentSenderConnectionId = senderConnId;
                         if (msg.Order == Messages.OrderType.AutoFireWeapon)
                         {
                             long applyMs = AIAutoFireState.DiagMs;
@@ -215,6 +275,10 @@ namespace SeapowerMultiplayer
                                 $"waited {applyMs - enqueueMs}ms) unit={msg.SourceEntityId} ammo={msg.AmmoId}");
                         }
                         OrderHandler.Apply(msg);
+                        // Host relays received orders to all other clients
+                        if (_isHost)
+                            SendToAllExcept(senderConnId, msg);
+                        CurrentSenderConnectionId = -1;
                     });
                     break;
                 }
@@ -236,7 +300,14 @@ namespace SeapowerMultiplayer
                 case MessageType.SessionReady:
                 {
                     var msg = SessionReadyMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => SimSyncManager.OnClientReady());
+                    _mainThreadQueue.Enqueue(() => SimSyncManager.OnClientReady(msg.PlayerId));
+                    break;
+                }
+
+                case MessageType.PlayerAssignment:
+                {
+                    var msg = PlayerAssignmentMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => PlayerRegistry.OnAssignmentReceived(msg));
                     break;
                 }
 

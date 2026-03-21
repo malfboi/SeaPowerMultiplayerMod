@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using SeaPower;
 
 namespace SeapowerMultiplayer
@@ -11,7 +12,7 @@ namespace SeapowerMultiplayer
 
     /// <summary>
     /// Coordinates the synchronized simulation lifecycle.
-    /// Tracks whether both sides have loaded and are ready to run.
+    /// Tracks whether all players have loaded and are ready to run.
     /// </summary>
     public static class SimSyncManager
     {
@@ -29,23 +30,57 @@ namespace SeapowerMultiplayer
             }
         }
 
-        public static bool BothSidesReady { get; set; }
+        // Legacy compat
+        public static bool BothSidesReady => AllPlayersReady;
+
+        private static readonly HashSet<byte> _readyPlayers = new();
+
+        public static bool AllPlayersReady
+        {
+            get
+            {
+                // Check all non-host players in registry have reported ready
+                foreach (var kvp in PlayerRegistry.Players)
+                {
+                    if (kvp.Key == 0) continue; // skip host
+                    if (!_readyPlayers.Contains(kvp.Key)) return false;
+                }
+                return PlayerRegistry.PlayerCount > 1; // at least one client
+            }
+        }
+
+        public static int ReadyCount => _readyPlayers.Count;
+        public static int ExpectedCount => PlayerRegistry.PlayerCount > 0 ? PlayerRegistry.PlayerCount - 1 : 0;
 
         public static void Reset()
         {
             Plugin.Log.LogInfo("[SimSync] Reset()");
             CurrentState = SimState.Idle;
-            BothSidesReady = false;
+            _readyPlayers.Clear();
+        }
+
+        public static void RemoveFromReady(byte playerId)
+        {
+            _readyPlayers.Remove(playerId);
+            if (PlayerRegistry.Players.TryGetValue(playerId, out var info))
+                info.IsReady = false;
         }
 
         /// <summary>
-        /// Called on host when a SessionReady message arrives from the client.
+        /// Called on host when a SessionReady message arrives from a client.
         /// </summary>
-        public static void OnClientReady()
+        public static void OnClientReady(byte playerId)
         {
-            BothSidesReady = true;
-            CurrentState = SimState.Synchronized;
-            Plugin.Log.LogInfo($"[SimSync] Client ready — paused={GameTime.IsPaused()}, TC={GameTime.TimeCompression}");
+            _readyPlayers.Add(playerId);
+            if (PlayerRegistry.Players.TryGetValue(playerId, out var info))
+                info.IsReady = true;
+            Plugin.Log.LogInfo($"[SimSync] Player {playerId} ready ({_readyPlayers.Count}/{ExpectedCount})");
+
+            if (AllPlayersReady)
+            {
+                CurrentState = SimState.Synchronized;
+                Plugin.Log.LogInfo($"[SimSync] All players ready — paused={GameTime.IsPaused()}, TC={GameTime.TimeCompression}");
+            }
         }
     }
 }
