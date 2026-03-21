@@ -91,7 +91,7 @@ namespace SeapowerMultiplayer.Transport
 
         void INetEventListener.OnPeerConnected(NetPeer peer)
         {
-            Log.LogInfo($"[LiteNet] Peer connected: {peer.EndPoint}");
+            Log.LogInfo($"[LiteNet] Peer connected: {peer}");
             if (!_isHost)
                 _serverPeer = peer;
             OnPeerConnected?.Invoke();
@@ -99,7 +99,7 @@ namespace SeapowerMultiplayer.Transport
 
         void INetEventListener.OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
         {
-            Log.LogInfo($"[LiteNet] Peer disconnected: {peer.EndPoint}  reason={disconnectInfo.Reason}");
+            Log.LogInfo($"[LiteNet] Peer disconnected: {peer}  reason={disconnectInfo.Reason}");
             if (!_isHost) _serverPeer = null;
             OnPeerDisconnected?.Invoke();
         }
