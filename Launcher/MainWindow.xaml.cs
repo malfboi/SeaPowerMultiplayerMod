@@ -176,7 +176,29 @@ namespace SeapowerMultiplayer.Launcher
         private void Transport_Changed(object sender, RoutedEventArgs e)
         {
             if (PnlDirectIP != null)
-                PnlDirectIP.Visibility = RbSteam.IsChecked == true ? Visibility.Collapsed : Visibility.Visible;
+            {
+                if (RbSteam.IsChecked == true)
+                {
+                    PnlDirectIP.Visibility = Visibility.Collapsed;
+                    //This prevents someone from enabling the launch button by flipping between steam and direct networking
+                    if (!ValidInstall())
+                    {
+                        return;
+                    }
+                    BtnLaunch.IsEnabled = true;
+                    TxtStatus.Text = "Ready";
+                   
+                }
+                else
+                {
+                    //This prevents someone from enabling the launch button by flipping between steam and direct networking. Then checks the network settings to highlight the boxes
+                    PnlDirectIP.Visibility = Visibility.Visible;
+                    if (!ValidInstall())
+                        return;
+                    ValidateNetworkSettings();
+                }
+            }
+
         }
 
         private void Role_Changed(object sender, RoutedEventArgs e)
@@ -201,7 +223,8 @@ namespace SeapowerMultiplayer.Launcher
                     TxtHostIP.Text = _lastIP;
                 }
             }
-                
+            ValidateNetworkSettings();
+
         }
         private bool IsValidIP(string IP)
         {
@@ -235,6 +258,7 @@ namespace SeapowerMultiplayer.Launcher
             {
                 TxtHostIP.BorderBrush = System.Windows.Media.Brushes.Green;
             }
+            ValidateNetworkSettings();
         }
         //Update the boarder of the Port box to indicate that something is invalid to the user
         private void TxtPort_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
@@ -247,6 +271,36 @@ namespace SeapowerMultiplayer.Launcher
             {
                 TxtPort.BorderBrush = System.Windows.Media.Brushes.Green;
             }
+            ValidateNetworkSettings();
+        }
+        private void ValidateNetworkSettings()
+        {
+            if (BtnLaunch == null)
+                return;
+            if (IsValidIP(TxtHostIP.Text) && IsValidPort(TxtPort.Text))
+            {
+                BtnLaunch.IsEnabled = true;
+                TxtStatus.Text = "Ready";
+            }
+            else
+            {
+                BtnLaunch.IsEnabled = false;
+                TxtStatus.Text = "Invalid network configuration.";
+            }
+        }
+        //Checks to make sure everything needed for the mod is where it should be
+        private bool ValidInstall()
+        {
+            var gameDir = TxtGamePath.Text;
+            bool bepinex = GameDetector.IsBepInExInstalled(gameDir);
+            bool mod = GameDetector.IsModInstalled(gameDir);
+            bool proxy = GameDetector.IsProxyStored(gameDir);
+            if (string.IsNullOrEmpty(gameDir) || !bepinex || !mod || !proxy)
+            {
+                UpdateInstallStatus();
+                return false;
+            }
+            return true;
         }
 
         private void BtnDiscord_Click(object sender, RoutedEventArgs e)
@@ -318,16 +372,10 @@ namespace SeapowerMultiplayer.Launcher
 
         private async void BtnLaunch_Click(object sender, RoutedEventArgs e)
         {
-            //Doublecheck that everything is where it should be
+            //Don't let the game launch with an invalid mod install
             var gameDir = TxtGamePath.Text;
-            bool bepinex = GameDetector.IsBepInExInstalled(gameDir);
-            bool mod = GameDetector.IsModInstalled(gameDir);
-            bool proxy = GameDetector.IsProxyStored(gameDir);
-            if (string.IsNullOrEmpty(gameDir) || !bepinex || !mod || !proxy)
-            {
-                UpdateInstallStatus();
+            if (!ValidInstall())
                 return;
-            }
             
 
             // Show disclaimer once per version
