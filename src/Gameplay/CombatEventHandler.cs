@@ -28,11 +28,41 @@ namespace SeapowerMultiplayer
         private const float PvpDestroyDelay = 3f;
         private static readonly List<(int id, float destroyAt)> _delayedDestroys = new();
 
+        // ── PvP: deferred unit-death watch ───────────────────────────────────
+        // When an enemy weapon hits our unit (OnHitUnit) without immediately killing it,
+        // we send MissileImpact but still need to notify the host when the unit
+        // eventually dies (e.g. via Compartments.DestroyByExplosion on next few frames).
+        // notifyOfExternalDestruction is not reliable for compartment-based units, so
+        // we poll IsDestroyed / _externalDestructionNotified each frame instead.
+        private const float DeathWatchTimeout = 60f;
+        private static readonly Dictionary<int, float> _deathWatch = new(); // unitId → watchStartTime
+        private static readonly List<int> _deathWatchRemove = new();
+
+        // ── PvP: periodic kill resync ────────────────────────────────────────
+        // Re-broadcasts UnitDestroyed for all dead own-side units every N seconds.
+        // Ensures the remote machine catches any kills it missed (e.g. radar dying
+        // between hard syncs, or a delayed delivery that was never processed).
+        private const float KillResyncInterval = 5f;
+        private static float _lastKillResync = 0f;
+
+        internal static void WatchForDeath(int unitId)
+        {
+            if (!_deathWatch.ContainsKey(unitId))
+                _deathWatch[unitId] = Time.unscaledTime;
+        }
+
+        internal static void ClearDeathWatch()
+        {
+            _deathWatch.Clear();
+            _lastKillResync = 0f;
+        }
+
         /// <summary>Called from Plugin.Update() each frame.</summary>
         internal static void Tick()
         {
-            if (_delayedDestroys.Count == 0) return;
             float now = Time.unscaledTime;
+
+            // Delayed projectile destroys
             for (int i = _delayedDestroys.Count - 1; i >= 0; i--)
             {
                 var (id, destroyAt) = _delayedDestroys[i];
@@ -44,6 +74,65 @@ namespace SeapowerMultiplayer
 
                 RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
                 Log.LogDebug($"[Combat] PvP delayed destroy fired for {id}");
+            }
+
+            if (!Plugin.Instance.CfgPvP.Value || !NetworkManager.Instance.IsConnected || SessionManager.SceneLoading)
+                return;
+
+            // Death watch: send UnitDestroyed when a watched unit finally dies
+            if (_deathWatch.Count > 0)
+            {
+                _deathWatchRemove.Clear();
+                foreach (var kvp in _deathWatch)
+                {
+                    if (now - kvp.Value > DeathWatchTimeout)
+                    {
+                        _deathWatchRemove.Add(kvp.Key);
+                        continue;
+                    }
+                    var unit = StateSerializer.FindById(kvp.Key);
+                    if (unit == null || unit.IsDestroyed || unit._externalDestructionNotified)
+                    {
+                        // Send UnitDestroyed regardless — unit==null means it was removed from the
+                        // registry by Compartments.DestroyByExplosion after being hit by enemy fire.
+                        CombatSyncHelper.Send(new CombatEventMessage
+                        {
+                            EventType      = CombatEventType.UnitDestroyed,
+                            TargetEntityId = kvp.Key,
+                            SourceEntityId = 0,
+                        });
+                        if (unit != null)
+                        {
+                            // Silence sensors so radar stops being a target immediately.
+                            DisableSensors(unit);
+                            Log.LogInfo($"[Combat] PvP WatchForDeath: unit {kvp.Key} ({unit.name}) died — sent UnitDestroyed");
+                        }
+                        else
+                        {
+                            Log.LogInfo($"[Combat] PvP WatchForDeath: unit {kvp.Key} missing from registry (destroyed via compartments) — sent UnitDestroyed");
+                        }
+                        _deathWatchRemove.Add(kvp.Key);
+                    }
+                }
+                foreach (var id in _deathWatchRemove) _deathWatch.Remove(id);
+            }
+
+            // Periodic kill resync: re-broadcast all dead own-side units so the
+            // remote machine catches any UnitDestroyed it may have missed.
+            if (now - _lastKillResync > KillResyncInterval)
+            {
+                _lastKillResync = now;
+                foreach (var obj in UnityEngine.Object.FindObjectsByType<ObjectBase>(UnityEngine.FindObjectsSortMode.None))
+                {
+                    if (obj._taskforce != Globals._playerTaskforce) continue;
+                    if (!obj.IsDestroyed && !obj._externalDestructionNotified) continue;
+                    CombatSyncHelper.Send(new CombatEventMessage
+                    {
+                        EventType      = CombatEventType.UnitDestroyed,
+                        TargetEntityId = obj.UniqueID,
+                        SourceEntityId = 0,
+                    });
+                }
             }
         }
 
@@ -64,6 +153,9 @@ namespace SeapowerMultiplayer
         /// _externalDestructionNotified in their OnFixedUpdate and self-destruct.
         /// Vessels and submarines never check that flag, so we must call
         /// Compartments.DestroyByExplosion() directly for them.
+        /// Also explicitly disables sensors so radar emissions stop immediately —
+        /// without this, compartment destruction kills the health but leaves the
+        /// emission component active, letting ARMs continue to home on a dead radar.
         /// </summary>
         internal static void DestroyFromNetwork(ObjectBase unit)
         {
@@ -72,6 +164,33 @@ namespace SeapowerMultiplayer
                 comps.DestroyByExplosion();
             else
                 unit.notifyOfExternalDestruction();
+
+            // LandUnit has no Compartments and doesn't check _externalDestructionNotified
+            // in its update loop, so neither path above actually kills it.
+            // Replicate the game's natural LandUnit death: make all systems inoperable
+            // (triggers fire effects) then set the destroyed flag.
+            if (unit is LandUnit && !unit.IsDestroyed)
+            {
+                foreach (var sys in unit._obp._systems)
+                    sys.MakeInoperable();
+                unit.setDestroyedFlag(false, TacView.TCEvent.Destroyed);
+                Log.LogInfo($"[Combat] Destroyed LandUnit {unit.UniqueID} ({unit.name}) via setDestroyedFlag");
+            }
+
+            DisableSensors(unit);
+        }
+
+        /// <summary>
+        /// Disable all active sensors on a unit, bypassing the PvP AI sensor guard
+        /// patches (which would otherwise block the call for enemy-taskforce units).
+        /// </summary>
+        private static void DisableSensors(ObjectBase unit)
+        {
+            bool prev = OrderHandler.ApplyingFromNetwork;
+            OrderHandler.ApplyingFromNetwork = true;
+            try { unit.DisableAllActiveSensors(); }
+            catch { /* sensor disable is best-effort */ }
+            finally { OrderHandler.ApplyingFromNetwork = prev; }
         }
 
         public static void Apply(CombatEventMessage msg)
@@ -91,15 +210,15 @@ namespace SeapowerMultiplayer
             if (target == null)
             {
                 EventsNotFound++;
-                Log.LogWarning($"[Combat] Target {msg.TargetEntityId} NOT FOUND (missile may have already been destroyed by impact)");
+                Log.LogWarning($"[Combat] {msg.EventType} target={msg.TargetEntityId} NOT FOUND");
                 return;
             }
 
             Log.LogDebug($"[Combat] Found target {msg.TargetEntityId}: type={target.GetType().Name} name={target.Name?.Value ?? "?"} IsDestroyed={target.IsDestroyed}");
 
-            if (target.IsDestroyed)
+            if (target.IsDestroyed || target._externalDestructionNotified)
             {
-                Log.LogDebug($"[Combat] Target {msg.TargetEntityId} already destroyed locally — no action needed");
+                Log.LogDebug($"[Combat] Target {msg.TargetEntityId} already destroyed/notified locally — no action needed");
                 return;
             }
 

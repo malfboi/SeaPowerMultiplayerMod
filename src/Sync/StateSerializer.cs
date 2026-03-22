@@ -223,6 +223,13 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<int, int> _missedUpdateCount = new(); // unitId → consecutive misses
         private const int MissedCyclesBeforeDestroy = 6; // ~30s (6 cleanup cycles × 5s)
 
+        // ── State-sync-driven ID alignment ─────────────────────────────────
+        private static bool _pendingAlignment;
+
+        /// <summary>Called by SessionManager.OnSceneReady on the client to defer
+        /// alignment until the first state update from the host arrives.</summary>
+        internal static void SetPendingAlignment() => _pendingAlignment = true;
+
         // ── Per-frame projectile smoothing ──────────────────────────────────
         // Instead of snapping missiles to host positions every 500ms (visible jumps),
         // store the target and interpolate toward it each frame. The client's own
@@ -256,6 +263,15 @@ namespace SeapowerMultiplayer
 
             // Don't process state updates until scene has loaded
             if (SimSyncManager.CurrentState != SimState.Synchronized) return;
+
+            // Client: run ID alignment on the first state update after scene load.
+            // The host has live positions, so this is more accurate than save-file positions.
+            if (_pendingAlignment)
+            {
+                _pendingAlignment = false;
+                RunAlignmentFromStateUpdate(msg);
+                return;
+            }
 
             // PvP: need a valid _playerTaskforce to filter — bail if not set yet
             if (isPvP && Globals._playerTaskforce == null) return;
@@ -572,6 +588,72 @@ namespace SeapowerMultiplayer
             }
         }
 
+        private static void RunAlignmentFromStateUpdate(StateUpdateMessage msg)
+        {
+            int savedUid = Singleton<SceneCreator>.Instance._UID;
+            var reassignments = new List<(ObjectBase obj, int hostId)>();
+
+            foreach (var state in msg.Units)
+            {
+                if (StateSerializer.FindById(state.EntityId) != null)
+                    continue; // already aligned
+
+                var geo = new GeoPosition
+                {
+                    _longitude = state.X,
+                    _latitude  = state.Z,
+                    _height    = state.Y,
+                };
+                Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                Vector3 worldPos = new Vector3(local.x, state.Y, local.y);
+
+                var best = FindLocalByPosition(worldPos, state.Kind);
+                if (best != null && best.UniqueID != state.EntityId)
+                    reassignments.Add((best, state.EntityId));
+            }
+
+            if (reassignments.Count == 0)
+            {
+                Plugin.Log.LogInfo("[StateApplier] Alignment: all IDs already match");
+                return;
+            }
+
+            // Pass 1: temp IDs to avoid collisions
+            for (int i = 0; i < reassignments.Count; i++)
+                reassignments[i].obj.SetUniqueId(-(i + 1));
+
+            // Pass 2: assign host IDs
+            foreach (var (obj, hostId) in reassignments)
+                obj.SetUniqueId(hostId);
+
+            Singleton<SceneCreator>.Instance._UID = savedUid;
+            Plugin.Log.LogInfo($"[StateApplier] Alignment: {reassignments.Count} units remapped from first state update");
+        }
+
+        private static ObjectBase FindLocalByPosition(Vector3 worldPos, UnitType kind)
+        {
+            ObjectBase best = null;
+            float bestDist = float.MaxValue;
+            foreach (var obj in UnityEngine.Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
+            {
+                if (obj.IsDestroyed) continue;
+                if (!KindMatches(obj, kind)) continue;
+                float d = (obj.transform.position - worldPos).sqrMagnitude;
+                if (d < bestDist) { bestDist = d; best = obj; }
+            }
+            return best;
+        }
+
+        private static bool KindMatches(ObjectBase obj, UnitType kind) => kind switch
+        {
+            UnitType.Vessel     => obj is Vessel,
+            UnitType.Submarine  => obj is Submarine,
+            UnitType.Aircraft   => obj is Aircraft,
+            UnitType.Helicopter => obj is Helicopter,
+            UnitType.LandUnit   => obj is LandUnit,
+            _                   => false,
+        };
+
         /// <summary>
         /// Called every frame (from StateBroadcaster.Update) to smoothly interpolate
         /// projectile positions toward host targets instead of snapping at 2 Hz.
@@ -716,6 +798,7 @@ namespace SeapowerMultiplayer
         {
             _lastSeenRemoteUnitIds.Clear();
             _missedUpdateCount.Clear();
+            _pendingAlignment = false;
             ProjectilesDestroyedByTimeout = 0;
             PvpShipDriftAvg = PvpShipDriftMax = 0f;
             PvpAirDriftAvg = PvpAirDriftMax = 0f;
@@ -900,7 +983,7 @@ namespace SeapowerMultiplayer
                             case 0: if (enable) unit.EnableAirSearchRadars(); else unit.DisableAirSearchRadars(); break;
                             case 1: if (enable) unit.EnableSurfaceSearchRadars(); else unit.DisableSurfaceSearchRadars(); break;
                             case 2: if (enable) unit.EnableActiveSonars(); else unit.DisableActiveSonars(); break;
-                        
+
                         }
                         break;
                     }

@@ -1249,6 +1249,56 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── PvP: Block AI group-level sensor management on enemy puppets ─────────
+    //
+    // In PvP the game AI independently manages all units' sensors via
+    // DisableAllActiveSensors, OnUpdate→DisableAirSearchRadars, etc.
+    // Block these high-level group methods on enemy puppets so only the remote
+    // player's network orders can change their sensor state.
+    //
+    // We patch at the group-level (Enable/DisableAirSearchRadars, etc.) rather than
+    // SensorSystem.Enable/Disable because the SensorSystem level also fires during
+    // initialization (LoadSensorSystemRadar, SetAdditionalParameters) and from
+    // combat damage callbacks — both of which must be allowed through.
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableAllActiveSensors))]
+    public static class Patch_DisableAllActiveSensors
+    {
+        /// <summary>Shared guard: allow sensor changes only for own-side units (or network-applied).</summary>
+        internal static bool AllowSensorChange(ObjectBase unit)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!Plugin.Instance.CfgPvP.Value || !NetworkManager.Instance.IsConnected) return true;
+            return unit._taskforce == Globals._playerTaskforce;
+        }
+
+        static bool Prefix(ObjectBase __instance) => AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableAirSearchRadars))]
+    public static class Patch_DisableAirSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableSurfaceSearchRadars))]
+    public static class Patch_DisableSurfaceSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.EnableAirSearchRadars))]
+    public static class Patch_EnableAirSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.EnableSurfaceSearchRadars))]
+    public static class Patch_EnableSurfaceSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
     // ── Radar Enable/Disable (catches both context menu and per-sensor UI) ──
     //
     // The player toggles radars via either:
@@ -1695,14 +1745,44 @@ namespace SeapowerMultiplayer
                     SourceEntityId = hitObject.UniqueID,
                 });
                 Plugin.Log.LogInfo($"[Combat] PvP: Sent MissileImpact for enemy missile {____weapon.UniqueID} (remote={remoteWeaponId}) hitting unit {hitObject.UniqueID}");
+                // Monitor hit unit for deferred death (compartment integrity may not
+                // kill it immediately; WatchForDeath polls IsDestroyed each frame)
+                CombatEventHandler.WatchForDeath(hitObject.UniqueID);
             }
         }
     }
 
-    // NOTE: Patch_NotifyOfExternalDestruction removed.
-    // All combat resolution is already suppressed at source (OnHitUnit, InterceptAirTarget,
-    // OnHitWeapon Prefixes return false on client). The blanket gate was blocking legitimate
-    // destruction from Compartments.OnFixedUpdate (integrity < 10%) after synced damage.
+    // NOTE: Patch_NotifyOfExternalDestruction was previously a Prefix that BLOCKED the call —
+    // that blocked legitimate compartment-death on client. The Postfix below only observes.
+    //
+    // In PvP mode the CLIENT is authoritative for damage to its own units. When our unit
+    // dies via the compartment-integrity path (Compartments.OnFixedUpdate → notifyOfExternalDestruction),
+    // OnHitUnit's Postfix is NOT re-invoked, so no UnitDestroyed was ever sent to the host.
+    // This Postfix closes that gap by broadcasting our unit's death whenever it dies locally.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.notifyOfExternalDestruction))]
+    public static class Patch_ObjectBase_NotifyDestroyed_PvP
+    {
+        // Dedup: one broadcast per unit death (notifyOfExternalDestruction can fire multiple times)
+        private static readonly HashSet<int> _sent = new();
+        internal static void Clear() => _sent.Clear();
+
+        static void Postfix(ObjectBase __instance)
+        {
+            if (!CombatSyncHelper.ShouldBroadcast()) return;
+            if (SessionManager.SceneLoading) return;
+            if (__instance is WeaponBase) return; // missiles handled by Patch_Missile_OnFixedUpdate_PvP with ProjectileDestroyed (3s delay)
+            if (__instance._taskforce != Globals._playerTaskforce) return;
+            if (!_sent.Add(__instance.UniqueID)) return; // already sent for this unit
+
+            CombatSyncHelper.Send(new CombatEventMessage
+            {
+                EventType      = CombatEventType.UnitDestroyed,
+                TargetEntityId = __instance.UniqueID,
+                SourceEntityId = 0,
+            });
+            Plugin.Log.LogInfo($"[Combat] PvP: sent UnitDestroyed for own unit {__instance.UniqueID} ({__instance.name}) via notifyOfExternalDestruction");
+        }
+    }
 
     // ── Damage decal replication ────────────────────────────────────────────
     //

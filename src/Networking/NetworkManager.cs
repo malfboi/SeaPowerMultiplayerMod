@@ -78,6 +78,8 @@ namespace SeapowerMultiplayer
             PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+            CombatEventHandler.ClearDeathWatch();
+            Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
             _transport?.Stop();
             _transport = null;
