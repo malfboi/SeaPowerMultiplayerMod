@@ -100,28 +100,21 @@ namespace SeapowerMultiplayer
             if (SimSyncManager.CurrentState != SimState.Synchronized) return;
             if (SessionManager.SceneLoading) return;
 
-            // Determine filter taskforce for this player's authoritative units
-            SeaPower.Taskforce filter = null;
-            var localTf = PlayerRegistry.GetLocalTaskforce();
-            if (localTf != null)
-            {
-                // Player has a specific task force assignment — only broadcast those units
-                filter = localTf;
-            }
-            else if (isPvP)
-            {
-                // Legacy PvP fallback: use player taskforce
-                filter = SeaPower.Globals._playerTaskforce;
-                if (filter == null) return;
-            }
-            else if (!isHost)
+            // Determine authority filter mode
+            var localPlayer = PlayerRegistry.GetLocalPlayer();
+            bool hasSpecificAssignment = localPlayer != null && localPlayer.AssignedTfNames.Count > 0;
+
+            if (!hasSpecificAssignment && !isHost && !isPvP)
             {
                 // Co-op client with no assignment: don't broadcast
                 return;
             }
-            // else: host with no assignment in co-op: broadcast all (filter = null)
 
-            var msg = StateSerializer.Capture(filter);
+            // Use per-unit authority filter when player has specific group assignments,
+            // or in PvP mode (each side only broadcasts its own units).
+            bool useAuthorityFilter = hasSpecificAssignment || isPvP;
+
+            var msg = StateSerializer.Capture(useAuthorityFilter);
 
             if (isHost)
                 NetworkManager.Instance.BroadcastToClients(msg, LiteNetLib.DeliveryMethod.Unreliable);
@@ -161,7 +154,8 @@ namespace SeapowerMultiplayer
 
                 bool isPvP = Plugin.Instance.CfgPvP.Value;
                 // Send corrections for locally authoritative damaged ships
-                if (!isPvP && !Plugin.Instance.CfgIsHost.Value && PlayerRegistry.GetLocalTaskforce() == null) continue;
+                var localPlayer = PlayerRegistry.GetLocalPlayer();
+                if (!isPvP && !Plugin.Instance.CfgIsHost.Value && (localPlayer == null || localPlayer.AssignedTfNames.Count == 0)) continue;
 
                 BroadcastDamageCorrections();
             }

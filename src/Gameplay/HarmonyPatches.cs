@@ -548,6 +548,9 @@ namespace SeapowerMultiplayer
             __result.SetUniqueId(safeId);
             Singleton<SceneCreator>.Instance._UID = prevUid;
 
+            // Spawned aircraft inherits carrier's formation group
+            FormationRegistry.RegisterSpawnedUnit(safeId, vessel.UniqueID);
+
             int elevatorIdx = __instance._elevators.IndexOf(elevator);
 
             var msg = new FlightOpsMessage
@@ -617,6 +620,9 @@ namespace SeapowerMultiplayer
             // bypass the PvP guard and let enemy AI fire unsuppressed.
             if (Plugin.Instance.CfgPvP.Value)
             {
+                // During scene loading, suppress ALL AI auto-fire to prevent NREs
+                // from uninitialized helicopter/unit state during LoadMission.
+                if (SessionManager.SceneLoading) return false;
                 if (unit == null || !PlayerRegistry.IsLocallyAuthoritative(unit)) return false;
                 InsideAIAutoFire = true;
                 return true;
@@ -639,6 +645,17 @@ namespace SeapowerMultiplayer
 
         static bool Prefix(AI __instance) => AIAutoFireState.Prefix(__instance);
         static void Postfix() => AIAutoFireState.InsideAIAutoFire = false;
+
+        // Swallow NRE from cleared detection data after PvP side-swap
+        static Exception Finalizer(Exception __exception)
+        {
+            if (__exception is System.NullReferenceException)
+            {
+                AIAutoFireState.InsideAIAutoFire = false;
+                return null;
+            }
+            return __exception;
+        }
     }
 
     [HarmonyPatch]
@@ -649,6 +666,17 @@ namespace SeapowerMultiplayer
 
         static bool Prefix(AI __instance) => AIAutoFireState.Prefix(__instance);
         static void Postfix() => AIAutoFireState.InsideAIAutoFire = false;
+
+        // Swallow NRE from cleared detection data after PvP side-swap
+        static Exception Finalizer(Exception __exception)
+        {
+            if (__exception is System.NullReferenceException)
+            {
+                AIAutoFireState.InsideAIAutoFire = false;
+                return null;
+            }
+            return __exception;
+        }
     }
 
     /// <summary>
@@ -2153,6 +2181,25 @@ namespace SeapowerMultiplayer
                 SourceEntityId = 0,
             });
             Plugin.Log.LogDebug($"[Combat] PvP torpedo death notification: id={id}");
+        }
+    }
+
+    // ── Allied minimap color: teammate TFs show as allied (magenta) ─────────
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.IsControllable), MethodType.Getter)]
+    public static class Patch_ObjectBase_IsControllable
+    {
+        static void Postfix(ObjectBase __instance, ref bool __result)
+        {
+            if (!__result) return; // already not controllable
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            var local = PlayerRegistry.GetLocalPlayer();
+            if (local == null || local.AssignedTfNames.Count == 0) return; // "All" — don't change
+
+            // If this unit is on our team but NOT in our assigned formation groups → allied (not controllable)
+            if (!FormationRegistry.IsInAssignedGroup(__instance, local.AssignedTfNames))
+                __result = false;
         }
     }
 }

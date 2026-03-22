@@ -28,7 +28,7 @@ namespace SeapowerMultiplayer
             return SceneCreator.FindGlobalObjectById(id);
         }
 
-        public static StateUpdateMessage Capture(Taskforce filterTaskforce = null)
+        public static StateUpdateMessage Capture(bool useAuthorityFilter = false)
         {
             var msg = new StateUpdateMessage
             {
@@ -38,36 +38,36 @@ namespace SeapowerMultiplayer
                             + Singleton<SeaPower.Environment>.Instance.Seconds,
             };
 
-            AddUnits<Vessel>    (msg, UnitType.Vessel,     filterTaskforce);
-            AddUnits<Submarine> (msg, UnitType.Submarine,  filterTaskforce);
-            AddUnits<Aircraft>  (msg, UnitType.Aircraft,   filterTaskforce);
-            AddUnits<Helicopter>(msg, UnitType.Helicopter, filterTaskforce);
-            AddUnits<LandUnit>  (msg, UnitType.LandUnit,   filterTaskforce);
+            AddUnits<Vessel>    (msg, UnitType.Vessel,     useAuthorityFilter);
+            AddUnits<Submarine> (msg, UnitType.Submarine,  useAuthorityFilter);
+            AddUnits<Aircraft>  (msg, UnitType.Aircraft,   useAuthorityFilter);
+            AddUnits<Helicopter>(msg, UnitType.Helicopter, useAuthorityFilter);
+            AddUnits<LandUnit>  (msg, UnitType.LandUnit,   useAuthorityFilter);
             // Biologics excluded — ambient sonar contacts, not gameplay units
 
-            if (filterTaskforce == null)
+            if (!useAuthorityFilter)
             {
-                // Co-op: all projectiles (host-authoritative)
+                // Co-op host: all projectiles (host-authoritative)
                 AddProjectiles<Missile>(msg, 0);
                 AddProjectiles<Torpedo>(msg, 1);
             }
             else
             {
-                // PvP: owned projectiles only (owner-authoritative)
-                AddOwnedProjectiles<Missile>(msg, 0, filterTaskforce);
-                AddOwnedProjectiles<Torpedo>(msg, 1, filterTaskforce);
+                // PvP or specific assignment: owned projectiles only (owner-authoritative)
+                AddOwnedProjectiles<Missile>(msg, 0);
+                AddOwnedProjectiles<Torpedo>(msg, 1);
             }
 
             Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
             return msg;
         }
 
-        private static void AddUnits<T>(StateUpdateMessage msg, UnitType kind, Taskforce filterTf = null)
+        private static void AddUnits<T>(StateUpdateMessage msg, UnitType kind, bool useAuthorityFilter = false)
             where T : ObjectBase
         {
             foreach (var unit in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
             {
-                if (filterTf != null && unit._taskforce != filterTf) continue;
+                if (useAuthorityFilter && !PlayerRegistry.IsLocallyAuthoritative(unit)) continue;
 
                 // Encode as absolute GeoPosition (longitude/latitude/height) so
                 // positions are independent of each machine's floating origin.
@@ -125,14 +125,14 @@ namespace SeapowerMultiplayer
         private static readonly FieldInfo _launchPlatformField =
             AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
 
-        private static void AddOwnedProjectiles<T>(StateUpdateMessage msg, byte kind, Taskforce ownerTf)
+        private static void AddOwnedProjectiles<T>(StateUpdateMessage msg, byte kind)
             where T : ObjectBase
         {
             foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
             {
                 if (p.IsDestroyed) continue;
                 var launcher = _launchPlatformField?.GetValue(p) as ObjectBase;
-                if (launcher == null || launcher._taskforce != ownerTf) continue;
+                if (launcher == null || !PlayerRegistry.IsLocallyAuthoritative(launcher)) continue;
 
                 // Encode as GeoPosition (floating-origin safe)
                 var geo = Utils.worldPositionFromUnityToLongLat(
@@ -220,6 +220,7 @@ namespace SeapowerMultiplayer
         // Track which remote unit IDs appear in incoming state updates.
         // Units missing from multiple cleanup cycles get destroyed.
         private static readonly HashSet<int> _lastSeenRemoteUnitIds = new();
+        private static readonly HashSet<int> _everSeenRemoteUnitIds = new(); // cumulative — only orphan units we've seen before
         private static readonly Dictionary<int, int> _missedUpdateCount = new(); // unitId → consecutive misses
         private const int MissedCyclesBeforeDestroy = 6; // ~30s (6 cleanup cycles × 5s)
 
@@ -281,7 +282,11 @@ namespace SeapowerMultiplayer
 
             foreach (var state in msg.Units)
             {
-                if (isPvP) _lastSeenRemoteUnitIds.Add(state.EntityId);
+                if (isPvP)
+                {
+                    _lastSeenRemoteUnitIds.Add(state.EntityId);
+                    _everSeenRemoteUnitIds.Add(state.EntityId);
+                }
                 var unit = StateSerializer.FindById(state.EntityId);
                 if (unit == null) continue;
 
@@ -636,21 +641,21 @@ namespace SeapowerMultiplayer
                 _projectileTargets.Remove(id);
         }
 
-        private static int CountLocalUnits(Taskforce filterTf = null)
+        private static int CountLocalUnits()
         {
             int count = 0;
-            CountType<Vessel>(filterTf, ref count);
-            CountType<Submarine>(filterTf, ref count);
-            CountType<Aircraft>(filterTf, ref count);
-            CountType<Helicopter>(filterTf, ref count);
-            CountType<LandUnit>(filterTf, ref count);
+            CountType<Vessel>(ref count);
+            CountType<Submarine>(ref count);
+            CountType<Aircraft>(ref count);
+            CountType<Helicopter>(ref count);
+            CountType<LandUnit>(ref count);
             return count;
         }
 
-        private static void CountType<T>(Taskforce filterTf, ref int count) where T : ObjectBase
+        private static void CountType<T>(ref int count) where T : ObjectBase
         {
             foreach (var u in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
-                if (filterTf == null || u._taskforce == filterTf) count++;
+                if (PlayerRegistry.IsLocallyAuthoritative(u)) count++;
         }
 
         /// <summary>
@@ -684,6 +689,11 @@ namespace SeapowerMultiplayer
                 if (unit.IsDestroyed) continue;
                 if (unit._taskforce != enemyTf) continue;
 
+                // Skip units we are locally authoritative for. With partial
+                // assignments the host fallback covers unassigned enemy units —
+                // those units are under our control, not orphans.
+                if (PlayerRegistry.IsLocallyAuthoritative(unit)) continue;
+
                 // Skip aircraft managed by the flight ops pipeline (awaiting ID remap
                 // or still in pipeline after remap). Their local IDs won't appear in
                 // state updates until remap completes and they become airborne.
@@ -697,6 +707,11 @@ namespace SeapowerMultiplayer
                     _missedUpdateCount.Remove(id);
                     continue;
                 }
+
+                // Only orphan units that were previously seen in remote state.
+                // With partial assignments, the remote side may not broadcast all
+                // enemy units — unseen units are not orphans, just unassigned.
+                if (!_everSeenRemoteUnitIds.Contains(id)) continue;
 
                 _missedUpdateCount.TryGetValue(id, out int misses);
                 misses++;
@@ -715,6 +730,7 @@ namespace SeapowerMultiplayer
         public static void ResetOrphanTracking()
         {
             _lastSeenRemoteUnitIds.Clear();
+            _everSeenRemoteUnitIds.Clear();
             _missedUpdateCount.Clear();
             ProjectilesDestroyedByTimeout = 0;
             PvpShipDriftAvg = PvpShipDriftMax = 0f;

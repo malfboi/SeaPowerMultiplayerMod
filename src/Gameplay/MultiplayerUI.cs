@@ -49,6 +49,9 @@ namespace SeapowerMultiplayer
         private bool _foldProjectiles, _foldMissileState, _foldFlightOps;
         private bool _foldFireAuth, _foldCombatEvents, _foldDrift;
 
+        // TF dropdown state
+        private byte? _tfDropdownOpenFor; // which player's dropdown is open, null = none
+
         // Overall sync status
         private enum SyncStatus { OK, Degraded, Issues }
 
@@ -396,12 +399,7 @@ namespace SeapowerMultiplayer
             }
             else if (inLobby)
             {
-                // In lobby, waiting for peer
-                if (GUILayout.Button("Invite Friend", _buttonStyle))
-                    SteamLobbyManager.InviteFriend();
-
-                GUILayout.Space(2);
-
+                // In lobby — invite buttons are in the player list section
                 if (GUILayout.Button("Leave Lobby", _buttonStyle))
                     SteamLobbyManager.LeaveLobby();
             }
@@ -448,54 +446,121 @@ namespace SeapowerMultiplayer
             GUILayout.Label("\u2500\u2500 Players \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
 
             bool isHost = NetworkManager.Instance.IsHost;
+            bool isSteam = Plugin.Instance.CfgTransport.Value == "Steam";
 
+            // Invite buttons (host only, Steam only)
+            if (isHost && isSteam && SteamLobbyManager.InLobby)
+            {
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Invite to Blue", _buttonStyle))
+                {
+                    PlayerRegistry.PendingInviteTeam = 0;
+                    SteamLobbyManager.InviteFriend();
+                }
+                if (GUILayout.Button("Invite to Red", _buttonStyle))
+                {
+                    PlayerRegistry.PendingInviteTeam = 1;
+                    SteamLobbyManager.InviteFriend();
+                }
+                GUILayout.EndHorizontal();
+                GUILayout.Space(4);
+            }
+
+            // Collect players by team
+            var bluePlayers = new System.Collections.Generic.List<PlayerInfo>();
+            var redPlayers = new System.Collections.Generic.List<PlayerInfo>();
             foreach (var kvp in PlayerRegistry.Players)
             {
-                var p = kvp.Value;
-                string tfName = p.AssignedTfIndex >= 0
-                    ? GetTaskforceName(p.AssignedTfIndex)
-                    : "Unassigned";
-                string teamStr = p.TeamSide == 0 ? "" : " [Enemy]";
-                string readyStr = p.IsReady ? " \u2713" : "";
-                string localStr = p.PlayerId == PlayerRegistry.LocalPlayerId ? " (you)" : "";
+                if (kvp.Value.TeamSide == 0)
+                    bluePlayers.Add(kvp.Value);
+                else
+                    redPlayers.Add(kvp.Value);
+            }
 
-                GUILayout.Label($"  {p.DisplayName}{localStr}{teamStr} \u2014 {tfName}{readyStr}", _labelStyle);
+            // Blue team
+            GUILayout.Label("BLUE TEAM", _sectionHeaderStyle);
+            foreach (var p in bluePlayers)
+                DrawPlayerEntry(p, isHost);
 
-                // Host: buttons to assign task force and team
-                if (isHost && p.PlayerId != PlayerRegistry.LocalPlayerId)
+            GUILayout.Space(4);
+
+            // Red team
+            GUILayout.Label("RED TEAM", _sectionHeaderStyle);
+            foreach (var p in redPlayers)
+                DrawPlayerEntry(p, isHost);
+        }
+
+        private void DrawPlayerEntry(PlayerInfo p, bool isHost)
+        {
+            string tfLabel = p.AssignedTfNames.Count == 0
+                ? "All"
+                : $"{p.AssignedTfNames.Count} TF{(p.AssignedTfNames.Count > 1 ? "s" : "")}";
+            string readyStr = p.IsReady ? " \u2713" : "";
+            string localStr = p.PlayerId == PlayerRegistry.LocalPlayerId ? " (you)" : "";
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"  {p.DisplayName}{localStr}{readyStr}", _labelStyle, GUILayout.Width(100));
+
+            if (isHost)
+            {
+                // TF dropdown button
+                string btnText = $"TF: {tfLabel}";
+                if (GUILayout.Button(btnText, _buttonStyle, GUILayout.Width(100)))
                 {
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Space(20);
-                    if (GUILayout.Button("Assign TF", _buttonStyle, GUILayout.Width(80)))
-                    {
-                        // Cycle through task force indices
-                        int nextIdx = p.AssignedTfIndex + 1;
-                        int tfCount = GetTaskforceCount();
-                        if (nextIdx >= tfCount) nextIdx = -1; // wrap to unassigned
-                        PlayerRegistry.HostAssignTaskforce(p.PlayerId, nextIdx);
-                    }
-                    if (GUILayout.Button(p.TeamSide == 0 ? "Team: Player" : "Team: Enemy", _buttonStyle, GUILayout.Width(100)))
-                    {
-                        PlayerRegistry.HostAssignTeam(p.PlayerId, (byte)(p.TeamSide == 0 ? 1 : 0));
-                    }
-                    GUILayout.EndHorizontal();
+                    if (_tfDropdownOpenFor == p.PlayerId)
+                        _tfDropdownOpenFor = null;
+                    else
+                        _tfDropdownOpenFor = p.PlayerId;
+                }
+
+                // Team swap button
+                string teamIcon = p.TeamSide == 0 ? "\u2192R" : "\u2192B";
+                if (GUILayout.Button(teamIcon, _buttonStyle, GUILayout.Width(30)))
+                {
+                    PlayerRegistry.HostAssignTeam(p.PlayerId, (byte)(p.TeamSide == 0 ? 1 : 0));
+                    _tfDropdownOpenFor = null;
                 }
             }
+            else
+            {
+                GUILayout.Label($"TF: {tfLabel}", _dimLabelStyle, GUILayout.Width(100));
+            }
+
+            GUILayout.EndHorizontal();
+
+            // Draw dropdown list if open for this player
+            if (isHost && _tfDropdownOpenFor == p.PlayerId)
+                DrawTfDropdown(p);
         }
 
-        private static string GetTaskforceName(int index)
+        private void DrawTfDropdown(PlayerInfo p)
         {
-            var tf = PlayerRegistry.GetTaskforceByIndex(index);
-            if (tf == null) return $"TF#{index}";
-            return !string.IsNullOrEmpty(tf._nameInMissionFile)
-                ? tf._nameInMissionFile
-                : $"TF#{index} ({tf.Nation})";
-        }
+            var options = PlayerRegistry.GetTeamGroups(p.TeamSide);
 
-        private static int GetTaskforceCount()
-        {
-            if (!Singleton<SeaPower.TaskforceManager>.InstanceExists(false)) return 0;
-            return Singleton<SeaPower.TaskforceManager>.Instance._taskForces.Count;
+            GUILayout.BeginVertical(GUI.skin.box, GUILayout.MaxWidth(PanelWidth - Margin * 2));
+
+            // "All" option (clears selections)
+            bool isAll = p.AssignedTfNames.Count == 0;
+            if (GUILayout.Button(isAll ? "> All" : "  All", _buttonStyle))
+                PlayerRegistry.HostAssignAll(p.PlayerId);
+
+            // Individual formation/unit group options (toggle checkboxes)
+            foreach (var (groupKey, displayName, unitCount) in options)
+            {
+                bool selected = p.AssignedTfNames.Contains(groupKey);
+                string prefix = selected ? "[x] " : "[ ] ";
+                string countStr = unitCount > 1 ? $" ({unitCount})" : "";
+                string label = displayName + countStr;
+                if (label.Length > 30) label = label.Substring(0, 27) + "...";
+                if (GUILayout.Button($"{prefix}{label}", _buttonStyle))
+                    PlayerRegistry.HostToggleTaskforce(p.PlayerId, groupKey);
+            }
+
+            // Done button to close
+            if (GUILayout.Button("Done", _buttonStyle))
+                _tfDropdownOpenFor = null;
+
+            GUILayout.EndVertical();
         }
 
         // ── Time compression section ──────────────────────────────────────────

@@ -7,7 +7,7 @@ namespace SeapowerMultiplayer.Messages
     {
         public byte PlayerId;
         public byte TeamSide;
-        public int AssignedTfIndex;
+        public List<string> AssignedTfNames = new();
         public string DisplayName;
     }
 
@@ -26,7 +26,9 @@ namespace SeapowerMultiplayer.Messages
             {
                 w.Put(e.PlayerId);
                 w.Put(e.TeamSide);
-                w.Put(e.AssignedTfIndex);
+                w.Put((byte)e.AssignedTfNames.Count);
+                foreach (var name in e.AssignedTfNames)
+                    w.Put(name ?? "");
                 w.Put(e.DisplayName ?? "");
             }
         }
@@ -40,13 +42,16 @@ namespace SeapowerMultiplayer.Messages
             int count = r.GetByte();
             for (int i = 0; i < count; i++)
             {
-                msg.Entries.Add(new PlayerAssignmentEntry
+                var entry = new PlayerAssignmentEntry
                 {
                     PlayerId = r.GetByte(),
                     TeamSide = r.GetByte(),
-                    AssignedTfIndex = r.GetInt(),
-                    DisplayName = r.GetString(),
-                });
+                };
+                int tfCount = r.GetByte();
+                for (int j = 0; j < tfCount; j++)
+                    entry.AssignedTfNames.Add(r.GetString());
+                entry.DisplayName = r.GetString();
+                msg.Entries.Add(entry);
             }
             return msg;
         }

@@ -231,6 +231,10 @@ namespace SeapowerMultiplayer
                     int localId = result.UniqueID;
                     SafeSetUniqueId(result, msg.SpawnedUnitId);
                     PipelineAircraftIds.Add(msg.SpawnedUnitId);
+
+                    // Spawned aircraft inherits carrier's formation group
+                    FormationRegistry.RegisterSpawnedUnit(msg.SpawnedUnitId, msg.VesselId);
+
                     Plugin.Log.LogInfo($"[FlightOps] SpawnVehicle applied: vessel={msg.VesselId} " +
                         $"aircraft={localId}->{msg.SpawnedUnitId} elevator={msg.ElevatorIndex} " +
                         $"type={vehicle._type}");

@@ -156,6 +156,9 @@ namespace SeapowerMultiplayer
                 UnitIdMap          = unitIdMap,
             };
 
+            // Build formation registry on host from the save we just created
+            FormationRegistry.Build(savePath);
+
             Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}, unitIdMap={unitIdMap.Count} entries");
             NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
 
@@ -264,8 +267,11 @@ namespace SeapowerMultiplayer
                     m => m.Groups[1].Value + missionPath.Replace("\\", "/"));
             }
 
-            // PvP: swap PlayerTaskforce ↔ EnemyTaskforce so client controls the opposing side
-            if (Plugin.Instance.CfgPvP.Value)
+            // Swap PlayerTaskforce ↔ EnemyTaskforce so the client controls the correct side.
+            // Swap when the client's TeamSide is Red (1) — they need the enemy perspective.
+            var localPlayer = PlayerRegistry.GetLocalPlayer();
+            bool needsSwap = localPlayer != null && localPlayer.TeamSide == 1;
+            if (needsSwap)
             {
                 patchedSave = SwapTaskforceSides(patchedSave, "save");
 
@@ -489,7 +495,10 @@ namespace SeapowerMultiplayer
                     Log.LogInfo($"[Session] _listOfAllPlayerObjects.Count={objMgr._listOfAllPlayerObjects.Count}");
             }
 
-            InitializeAllUnits();          
+            InitializeAllUnits();
+
+            // Build formation registry from save file data (maps units to formation groups)
+            FormationRegistry.Build();
 
             // Restore sub-minute precision the save format drops
             if (_pendingGameSeconds > 0f)

@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using SeaPower;
 using SeapowerMultiplayer.Messages;
+using UnityEngine;
 
 namespace SeapowerMultiplayer
 {
@@ -10,7 +11,7 @@ namespace SeapowerMultiplayer
         public byte PlayerId;
         public int ConnectionId;      // -1 for host (local)
         public string DisplayName;
-        public int AssignedTfIndex;    // index in TaskforceManager._taskForces, -1 = unassigned
+        public HashSet<string> AssignedTfNames = new(); // empty = "All" (controls entire team)
         public byte TeamSide;         // 0 = player side, 1 = enemy side
         public bool IsReady;
 
@@ -19,7 +20,6 @@ namespace SeapowerMultiplayer
             PlayerId = playerId;
             ConnectionId = connectionId;
             DisplayName = displayName;
-            AssignedTfIndex = -1;
             TeamSide = 0;
         }
     }
@@ -32,6 +32,12 @@ namespace SeapowerMultiplayer
         public static byte LocalPlayerId { get; private set; }
         public static IReadOnlyDictionary<byte, PlayerInfo> Players => _players;
         public static int PlayerCount => _players.Count;
+
+        /// <summary>
+        /// Set by UI invite buttons, consumed by OnPeerConnected to auto-assign team.
+        /// 0 = Blue (player side), 1 = Red (enemy side).
+        /// </summary>
+        public static byte PendingInviteTeam { get; set; }
 
         public static void RegisterHost()
         {
@@ -76,8 +82,9 @@ namespace SeapowerMultiplayer
 
         /// <summary>
         /// Returns true if the local player is authoritative for this unit.
-        /// Each player is authoritative for units in their assigned task force.
-        /// Host is also authoritative for unassigned task forces (fallback).
+        /// AssignedTfNames empty ("All"): authoritative for every TF on the player's team side.
+        /// AssignedTfNames non-empty: authoritative ONLY for those specific TFs.
+        /// Host fallback: also authoritative for TFs not assigned to any player.
         /// </summary>
         public static bool IsLocallyAuthoritative(ObjectBase unit)
         {
@@ -89,22 +96,42 @@ namespace SeapowerMultiplayer
             var unitTf = unit._taskforce;
             if (unitTf == null) return Plugin.Instance.CfgIsHost.Value;
 
-            // Check if unit's task force matches local player's assignment
-            if (localPlayer.AssignedTfIndex >= 0)
+            if (localPlayer.AssignedTfNames.Count > 0)
             {
-                var assignedTf = GetTaskforceByIndex(localPlayer.AssignedTfIndex);
-                if (assignedTf != null && unitTf == assignedTf)
+                // Specific group assignment: check if unit is in an assigned formation group
+                if (FormationRegistry.IsInAssignedGroup(unit, localPlayer.AssignedTfNames))
+                    return true;
+            }
+            else
+            {
+                // "All" (empty set): authoritative for every unit on the local player's side.
+                // Use Globals._playerTaskforce directly — it's always correct after side swap.
+                if (unitTf == Globals._playerTaskforce)
                     return true;
             }
 
-            // Host fallback: authoritative for any task force not assigned to another player
+            // Host fallback: authoritative for any unit whose group isn't assigned to any player
             if (Plugin.Instance.CfgIsHost.Value)
             {
-                if (!IsTaskforceAssignedToAnyPlayer(unitTf))
+                if (!FormationRegistry.IsAssignedToAnyPlayer(unit))
                     return true;
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Returns true if the given taskforce belongs to the specified team side.
+        /// TeamSide 0 (Blue): tf.Side == Player or Ally
+        /// TeamSide 1 (Red): tf.Side == Enemy
+        /// </summary>
+        public static bool IsOnTeamSide(Taskforce tf, byte teamSide)
+        {
+            if (tf == null) return false;
+            if (teamSide == 0)
+                return tf.Side == Taskforce.TfType.Player || tf.Side == Taskforce.TfType.Ally;
+            else
+                return tf.Side == Taskforce.TfType.Enemy;
         }
 
         /// <summary>
@@ -130,29 +157,10 @@ namespace SeapowerMultiplayer
             return -1;
         }
 
-        /// <summary>
-        /// Returns the locally resolved Taskforce for the local player, or null if unassigned.
-        /// </summary>
-        public static Taskforce GetLocalTaskforce()
-        {
-            var local = GetLocalPlayer();
-            if (local == null || local.AssignedTfIndex < 0) return null;
-            return GetTaskforceByIndex(local.AssignedTfIndex);
-        }
-
         public static PlayerInfo GetLocalPlayer()
         {
             _players.TryGetValue(LocalPlayerId, out var p);
             return p;
-        }
-
-        private static bool IsTaskforceAssignedToAnyPlayer(Taskforce tf)
-        {
-            int idx = GetTaskforceIndex(tf);
-            if (idx < 0) return false;
-            foreach (var p in _players.Values)
-                if (p.AssignedTfIndex == idx) return true;
-            return false;
         }
 
         // ── Event handlers (called from NetworkManager on main thread) ────────
@@ -163,6 +171,13 @@ namespace SeapowerMultiplayer
 
             string name = $"Player {_nextPlayerId}";
             byte playerId = RegisterClient(connectionId, name);
+
+            // Apply pending invite team (set by "Invite to Blue/Red" buttons).
+            // For direct connect (non-Steam), default to Red (1) since the host is already Blue.
+            bool isSteam = Plugin.Instance.CfgTransport.Value == "Steam";
+            byte defaultTeam = isSteam ? PendingInviteTeam : (byte)1;
+            if (_players.TryGetValue(playerId, out var newPlayer))
+                newPlayer.TeamSide = defaultTeam;
 
             // Send full assignment to all clients
             BroadcastAssignment();
@@ -201,31 +216,52 @@ namespace SeapowerMultiplayer
             {
                 var info = new PlayerInfo(entry.PlayerId, -1, entry.DisplayName)
                 {
-                    AssignedTfIndex = entry.AssignedTfIndex,
                     TeamSide = entry.TeamSide,
                 };
+                info.AssignedTfNames = new HashSet<string>(entry.AssignedTfNames);
                 _players[entry.PlayerId] = info;
             }
             LocalPlayerId = msg.YourPlayerId;
             Plugin.Log.LogInfo($"[PlayerRegistry] Assignment received: {_players.Count} players, localId={LocalPlayerId}");
         }
 
-        /// <summary>Host: assign a task force to a player by playerId.</summary>
-        public static void HostAssignTaskforce(byte playerId, int tfIndex)
+        /// <summary>Host: toggle a taskforce assignment for a player.</summary>
+        public static void HostToggleTaskforce(byte playerId, string tfName)
         {
             if (!_players.TryGetValue(playerId, out var info)) return;
-            info.AssignedTfIndex = tfIndex;
-            Plugin.Log.LogInfo($"[PlayerRegistry] Assigned player {playerId} to TF index {tfIndex}");
+            if (info.AssignedTfNames.Contains(tfName))
+                info.AssignedTfNames.Remove(tfName);
+            else
+                info.AssignedTfNames.Add(tfName);
+            Plugin.Log.LogInfo($"[PlayerRegistry] Toggled TF '{tfName}' for player {playerId} (now: {string.Join(", ", info.AssignedTfNames)})");
             BroadcastAssignment();
         }
 
-        /// <summary>Host: assign a team side to a player.</summary>
+        /// <summary>Host: set a player to control all TFs on their team.</summary>
+        public static void HostAssignAll(byte playerId)
+        {
+            if (!_players.TryGetValue(playerId, out var info)) return;
+            info.AssignedTfNames.Clear();
+            Plugin.Log.LogInfo($"[PlayerRegistry] Set player {playerId} to All TFs");
+            BroadcastAssignment();
+        }
+
+        /// <summary>Host: assign a team side to a player. Resets TF to "All" since old TF may not exist on the new team.
+        /// Triggers a session re-sync so the player reloads with the correct save file for their new side.</summary>
         public static void HostAssignTeam(byte playerId, byte teamSide)
         {
             if (!_players.TryGetValue(playerId, out var info)) return;
             info.TeamSide = teamSide;
+            info.AssignedTfNames.Clear(); // reset to "All" — old TFs don't exist on new team
             Plugin.Log.LogInfo($"[PlayerRegistry] Assigned player {playerId} to team {teamSide}");
             BroadcastAssignment();
+
+            // Re-sync the session so the player reloads with the correct save for their new side
+            if (SimSyncManager.CurrentState == SimState.Synchronized)
+            {
+                Plugin.Log.LogInfo($"[PlayerRegistry] Team change for player {playerId}, triggering session re-sync");
+                SessionManager.CaptureAndSend();
+            }
         }
 
         public static void BroadcastAssignment()
@@ -254,12 +290,21 @@ namespace SeapowerMultiplayer
                 {
                     PlayerId = p.PlayerId,
                     TeamSide = p.TeamSide,
-                    AssignedTfIndex = p.AssignedTfIndex,
+                    AssignedTfNames = new List<string>(p.AssignedTfNames),
                     DisplayName = p.DisplayName,
                 });
             }
 
             return msg;
+        }
+
+        /// <summary>
+        /// Returns formation/lone-unit groups for the given team side.
+        /// Delegates to FormationRegistry for formation-level granularity.
+        /// </summary>
+        public static List<(string groupKey, string displayName, int unitCount)> GetTeamGroups(byte teamSide)
+        {
+            return FormationRegistry.GetTeamGroups(teamSide);
         }
 
         private static string GetLocalDisplayName()
