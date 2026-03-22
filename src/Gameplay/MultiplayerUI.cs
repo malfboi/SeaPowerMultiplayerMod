@@ -274,8 +274,6 @@ namespace SeapowerMultiplayer
 
             // Mode + status
             string modeStr   = isHost ? "HOST" : "CLIENT";
-            //Color  statusCol = isConnected ? new Color(0.3f, 1f, 0.4f) : new Color(1f, 0.4f, 0.4f);
-            //string statusStr = isConnected ? "Connected" : "Disconnected";
 
             if (isConnected)
             {

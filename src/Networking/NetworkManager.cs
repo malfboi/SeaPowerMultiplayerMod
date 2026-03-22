@@ -38,7 +38,7 @@ namespace SeapowerMultiplayer
         public bool IsConnectedClient => !_isHost && IsConnected;
 
         public bool IsHost => _isHost;
-        public bool IsHostRunning => _running && IsHost;
+        public bool IsHostRunning => _running && _isHost;
 
         public void StartHost(int port)
         {
