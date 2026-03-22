@@ -169,6 +169,12 @@ namespace SeapowerMultiplayer
                         SessionManager.OnSceneReady();
                     }
                 }
+                else
+                {
+                    // Reset if IsLoadingDone flickers false during unload/reload
+                    // (prevents stale frame count from carrying over)
+                    _sceneReadyFrames = 0;
+                }
             }
             else
             {

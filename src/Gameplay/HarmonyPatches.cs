@@ -334,6 +334,8 @@ namespace SeapowerMultiplayer
                 DestX = (float)geo._longitude, DestY = (float)geo._height, DestZ = (float)geo._latitude,
             };
 
+            if (!OrderDeduplicator.ShouldSend(msg)) return; // position unchanged
+
             if (Plugin.Instance.CfgIsHost.Value)
                 NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.Unreliable);
             else
@@ -1201,6 +1203,7 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
+            if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate — skip send, still execute locally
             NetworkManager.Instance.SendToServer(msg);
             return true;
         }
@@ -1213,6 +1216,7 @@ namespace SeapowerMultiplayer
             // PvP: don't sync orders for weapons (missiles/torpedoes)
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
+            if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate — skip broadcast
             NetworkManager.Instance.BroadcastToClients(msg);
         }
 
@@ -1248,6 +1252,83 @@ namespace SeapowerMultiplayer
             return -1; // FCR, targeting radar — not player-toggled
         }
     }
+
+    // ── Order deduplication ─────────────────────────────────────────────────
+    //
+    // The game engine calls patched methods (setTelegraph, UpdateSimulation, etc.)
+    // every frame as part of normal autopilot/simulation. Without dedup, identical
+    // orders flood the network at tick rate. This cache tracks last-sent values
+    // per (entity, orderType, subKey) and suppresses sends when nothing changed.
+
+    static class OrderDeduplicator
+    {
+        private struct Fingerprint
+        {
+            public float V1, V2, V3, V4;
+
+            public bool Matches(Fingerprint other, float eps = 0.001f) =>
+                Math.Abs(V1 - other.V1) < eps && Math.Abs(V2 - other.V2) < eps &&
+                Math.Abs(V3 - other.V3) < eps && Math.Abs(V4 - other.V4) < eps;
+        }
+
+        private static readonly Dictionary<(int, OrderType, int), Fingerprint> _cache = new();
+
+        /// <summary>
+        /// Returns true if the order differs from the last-sent value (should send).
+        /// Returns false if it's a duplicate (suppress). One-shot orders always return true.
+        /// </summary>
+        internal static bool ShouldSend(PlayerOrderMessage msg)
+        {
+            switch (msg.Order)
+            {
+                case OrderType.FireWeapon:
+                case OrderType.AutoFireWeapon:
+                case OrderType.CeaseFire:
+                case OrderType.RemoveWaypoints:
+                case OrderType.DeleteWaypoint:
+                case OrderType.DropSonobuoy:
+                case OrderType.SubmarineMast:
+                    return true;
+            }
+
+            var key = MakeKey(msg);
+            var fp  = MakeFingerprint(msg);
+
+            if (_cache.TryGetValue(key, out var last) && last.Matches(fp))
+                return false;
+
+            _cache[key] = fp;
+            return true;
+        }
+
+        /// <summary>Update cache without checking (for network-received orders).</summary>
+        internal static void UpdateCache(PlayerOrderMessage msg)
+        {
+            _cache[MakeKey(msg)] = MakeFingerprint(msg);
+        }
+
+        internal static void Clear() => _cache.Clear();
+
+        private static (int, OrderType, int) MakeKey(PlayerOrderMessage msg)
+        {
+            int subKey = msg.Order switch
+            {
+                OrderType.EditWaypoint => (int)msg.Speed,   // waypoint index
+                OrderType.SensorToggle => (int)msg.Heading, // sensor group
+                _ => 0,
+            };
+            return (msg.SourceEntityId, msg.Order, subKey);
+        }
+
+        private static Fingerprint MakeFingerprint(PlayerOrderMessage msg) => msg.Order switch
+        {
+            OrderType.EditWaypoint => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
+            OrderType.MoveTo       => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
+            OrderType.SensorToggle => new Fingerprint { V1 = msg.Speed },
+            _                      => new Fingerprint { V1 = msg.Speed, V2 = msg.Heading },
+        };
+    }
+
 
     // ── PvP: Block AI group-level sensor management on enemy puppets ─────────
     //

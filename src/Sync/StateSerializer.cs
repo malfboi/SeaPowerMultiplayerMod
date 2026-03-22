@@ -826,6 +826,7 @@ namespace SeapowerMultiplayer
             Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}");
 
             ApplyingFromNetwork = true;
+            OrderDeduplicator.UpdateCache(msg); // track received values so local patches won't re-send
             try
             {
                 switch (msg.Order)
