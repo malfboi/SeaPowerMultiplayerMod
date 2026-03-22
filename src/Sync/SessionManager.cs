@@ -142,7 +142,7 @@ namespace SeapowerMultiplayer
             // Build formation registry on host from the save we just created
             FormationRegistry.Build(savePath);
 
-            Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}, unitIdMap={unitIdMap.Count} entries");
+            Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
             NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
 
             // Seed host RNG to match what client will use

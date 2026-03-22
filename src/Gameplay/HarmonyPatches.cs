@@ -611,23 +611,23 @@ namespace SeapowerMultiplayer
         /// <summary>Shared prefix for AI auto-fire/auto-attack patches.</summary>
         internal static bool Prefix(AI instance)
         {
-            if (!NetworkManager.Instance.IsConnected) return true;
-
             var unit = _aiBaseObjectField?.GetValue(instance) as ObjectBase;
 
-            // PvP: suppress enemy AI auto-fire BEFORE SceneLoading check.
-            // During the connection window SceneLoading is true, which would
-            // bypass the PvP guard and let enemy AI fire unsuppressed.
+            // PvP: only allow AI auto-fire for player-side units, regardless of
+            // connection state. Enemy AI must always be suppressed in PvP — the
+            // enemy player controls their own units. Using _playerTaskforce directly
+            // avoids the host fallback in IsLocallyAuthoritative which would let
+            // enemy AI fire when no opponent is connected.
             if (Plugin.Instance.CfgPvP.Value)
             {
-                // During scene loading, suppress ALL AI auto-fire to prevent NREs
-                // from uninitialized helicopter/unit state during LoadMission.
                 if (SessionManager.SceneLoading) return false;
-                if (unit == null || !PlayerRegistry.IsLocallyAuthoritative(unit)) return false;
-                InsideAIAutoFire = true;
+                if (unit == null || unit._taskforce != Globals._playerTaskforce) return false;
+                if (NetworkManager.Instance.IsConnected)
+                    InsideAIAutoFire = true;
                 return true;
             }
 
+            if (!NetworkManager.Instance.IsConnected) return true;
             if (SessionManager.SceneLoading) return true;
 
             // N-player co-op: only run AI auto-fire for locally authoritative units

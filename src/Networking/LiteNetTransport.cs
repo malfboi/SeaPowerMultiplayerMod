@@ -127,7 +127,7 @@ namespace SeapowerMultiplayer.Transport
             int connId = _nextConnectionId++;
             _idToPeer[connId] = peer;
             _peerToId[peer] = connId;
-            Log.LogInfo($"[LiteNet] Peer connected: {peer.EndPoint} (connectionId={connId})");
+            Log.LogInfo($"[LiteNet] Peer connected: id={peer.Id} (connectionId={connId})");
             if (!_isHost)
                 _serverPeer = peer;
             OnPeerConnected?.Invoke(connId);
@@ -141,7 +141,7 @@ namespace SeapowerMultiplayer.Transport
                 _peerToId.Remove(peer);
                 _idToPeer.Remove(connId);
             }
-            Log.LogInfo($"[LiteNet] Peer disconnected: {peer.EndPoint} (connectionId={connId})  reason={disconnectInfo.Reason}");
+            Log.LogInfo($"[LiteNet] Peer disconnected: id={peer.Id} (connectionId={connId})  reason={disconnectInfo.Reason}");
             if (!_isHost) _serverPeer = null;
             OnPeerDisconnected?.Invoke(connId);
         }

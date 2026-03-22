@@ -196,7 +196,8 @@ namespace SeapowerMultiplayer
             GUILayout.Space(4);
             DrawConnection();
             GUILayout.Space(6);
-            if (NetworkManager.Instance.IsConnected)
+            bool isSteamLobby = Plugin.Instance.CfgTransport.Value == "Steam" && SteamLobbyManager.InLobby;
+            if (NetworkManager.Instance.IsConnected || isSteamLobby)
             {
                 DrawPlayerList();
                 GUILayout.Space(6);
