@@ -41,6 +41,7 @@ namespace SeapowerMultiplayer
         public bool IsConnectedClient => !_isHost && IsConnected;
 
         public bool IsHost => _isHost;
+        public bool IsHostRunning => _running && _isHost;
 
         public void StartHost(int port)
         {
@@ -81,6 +82,8 @@ namespace SeapowerMultiplayer
             PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+            CombatEventHandler.ClearDeathWatch();
+            Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
             PlayerRegistry.Reset();
             _transport?.Stop();
