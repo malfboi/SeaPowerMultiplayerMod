@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using LiteNetLib;
 using SeaPower;
 using SeapowerMultiplayer.Messages;
+using UnityEngine;
 
 namespace SeapowerMultiplayer
 {
@@ -40,6 +42,34 @@ namespace SeapowerMultiplayer
         /// Removed once the local aircraft's _isInFlight becomes true.
         /// </summary>
         internal static readonly HashSet<int> PipelineAircraftIds = new();
+
+        // ── Spawn records (for recovery requests) ─────────────────────────
+
+        internal struct AircraftSpawnRecord
+        {
+            public int CarrierVesselId;
+            public string VehicleTypeName;
+            public int LoadoutIndex;
+            public int SquadronIndex;
+            public int CallsignIndex;
+            public byte MissionType;
+            public bool IsMultipleLaunch;
+        }
+
+        private static readonly Dictionary<int, AircraftSpawnRecord> _spawnRecords = new();
+
+        internal static void RecordSpawn(int safeId, AircraftSpawnRecord record)
+        {
+            _spawnRecords[safeId] = record;
+        }
+
+        // ── Aircraft recovery (detects missing remote aircraft, requests info, hard-spawns) ──
+
+        private static readonly Dictionary<int, int> _missingAircraftSightings = new();
+        private static readonly Dictionary<int, float> _recoveryRequested = new();
+        private static readonly HashSet<int> _recoveryInProgress = new();
+        private const int RecoveryDetectionThreshold = 3;
+        private const float RecoveryCooldown = 2f;
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
@@ -144,11 +174,31 @@ namespace SeapowerMultiplayer
 
             var fd = vessel._obp._flightDeck;
 
-            // Bounds checks
+            // Bounds checks — fall back to type-name matching if index is invalid
             if (msg.VehicleIndex < 0 || msg.VehicleIndex >= fd._vehiclesOnBoard.Count)
             {
-                Plugin.Log.LogWarning($"[FlightOps] SpawnVehicle: vehicleIndex {msg.VehicleIndex} out of range (count={fd._vehiclesOnBoard.Count})");
-                return true;
+                if (!string.IsNullOrEmpty(msg.VehicleTypeName))
+                {
+                    int fallback = FindVehicleIndexByType(fd, msg.VehicleTypeName);
+                    if (fallback >= 0)
+                    {
+                        Plugin.Log.LogWarning($"[FlightOps] SpawnVehicle: vehicleIndex {msg.VehicleIndex} out of range " +
+                            $"(count={fd._vehiclesOnBoard.Count}), using type-name fallback '{msg.VehicleTypeName}' -> index {fallback}");
+                        msg.VehicleIndex = fallback;
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[FlightOps] SpawnVehicle: vehicleIndex {msg.VehicleIndex} out of range " +
+                            $"and no '{msg.VehicleTypeName}' found on vessel {msg.VesselId}");
+                        return true;
+                    }
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[FlightOps] SpawnVehicle: vehicleIndex {msg.VehicleIndex} out of range " +
+                        $"(count={fd._vehiclesOnBoard.Count}), no type name available");
+                    return true;
+                }
             }
             var vehicle = fd._vehiclesOnBoard[msg.VehicleIndex];
             if (msg.LoadoutIndex < 0 || msg.LoadoutIndex >= vehicle.Loadouts.Count)
@@ -259,6 +309,176 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>
+        /// Finds the first vehicle in the flight deck's _vehiclesOnBoard list
+        /// whose _type matches the given type name. Returns -1 if not found.
+        /// </summary>
+        internal static int FindVehicleIndexByType(FlightDeck fd, string typeName)
+        {
+            for (int i = 0; i < fd._vehiclesOnBoard.Count; i++)
+            {
+                if (fd._vehiclesOnBoard[i]._type.ToString() == typeName)
+                    return i;
+            }
+            return -1;
+        }
+
+        // ── Aircraft recovery: detection, request, response ─────────────────
+
+        /// <summary>
+        /// Called from StateApplier when a state update contains a remote aircraft
+        /// ID that doesn't exist locally. Rate-limits and sends recovery requests.
+        /// </summary>
+        internal static void OnMissingRemoteAircraft(int aircraftId)
+        {
+            if (PipelineAircraftIds.Contains(aircraftId)) return;
+            if (_recoveryInProgress.Contains(aircraftId)) return;
+
+            _missingAircraftSightings.TryGetValue(aircraftId, out int count);
+            count++;
+            _missingAircraftSightings[aircraftId] = count;
+            if (count < RecoveryDetectionThreshold) return;
+
+            if (_recoveryRequested.TryGetValue(aircraftId, out float lastTime)
+                && Time.unscaledTime - lastTime < RecoveryCooldown)
+                return;
+
+            Plugin.Log.LogInfo($"[FlightOps] Recovery: requesting info for missing aircraft {aircraftId} " +
+                $"(seen {count} times in state updates)");
+
+            var req = new AircraftRecoveryRequestMessage { MissingAircraftId = aircraftId };
+            NetworkManager.Instance.SendToOther(req, DeliveryMethod.ReliableOrdered);
+            _recoveryRequested[aircraftId] = Time.unscaledTime;
+        }
+
+        /// <summary>
+        /// Authoritative side: handles a recovery request by looking up the aircraft's
+        /// spawn record and sending back the details needed to recreate it.
+        /// </summary>
+        internal static void HandleRecoveryRequest(AircraftRecoveryRequestMessage msg)
+        {
+            int id = msg.MissingAircraftId;
+            var aircraft = StateSerializer.FindById(id);
+
+            // Aircraft doesn't exist or is destroyed — tell the requester to stop looking
+            if (aircraft == null)
+            {
+                Plugin.Log.LogInfo($"[FlightOps] Recovery: aircraft {id} not found, sending NotFound");
+                var resp = new AircraftRecoveryResponseMessage { AircraftId = id, NotFound = true };
+                NetworkManager.Instance.SendToOther(resp, DeliveryMethod.ReliableOrdered);
+                return;
+            }
+
+            // If not yet airborne, don't respond — requester will retry after cooldown
+            bool inFlight = false;
+            if (aircraft is Aircraft ac) inFlight = ac._isInFlight;
+            else if (aircraft is Helicopter heli) inFlight = heli._isInFlight;
+            if (!inFlight)
+            {
+                Plugin.Log.LogInfo($"[FlightOps] Recovery: aircraft {id} not yet airborne, deferring response");
+                return;
+            }
+
+            // Look up spawn record
+            if (!_spawnRecords.TryGetValue(id, out var record))
+            {
+                Plugin.Log.LogWarning($"[FlightOps] Recovery: no spawn record for aircraft {id}, sending NotFound");
+                var resp = new AircraftRecoveryResponseMessage { AircraftId = id, NotFound = true };
+                NetworkManager.Instance.SendToOther(resp, DeliveryMethod.ReliableOrdered);
+                return;
+            }
+
+            Plugin.Log.LogInfo($"[FlightOps] Recovery: sending spawn info for aircraft {id} " +
+                $"(carrier={record.CarrierVesselId}, type={record.VehicleTypeName})");
+
+            var response = new AircraftRecoveryResponseMessage
+            {
+                AircraftId       = id,
+                NotFound         = false,
+                CarrierVesselId  = record.CarrierVesselId,
+                VehicleTypeName  = record.VehicleTypeName,
+                LoadoutIndex     = record.LoadoutIndex,
+                SquadronIndex    = record.SquadronIndex,
+                CallsignIndex    = record.CallsignIndex,
+                MissionType      = record.MissionType,
+                IsMultipleLaunch = record.IsMultipleLaunch,
+            };
+            NetworkManager.Instance.SendToOther(response, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>
+        /// Requesting side: receives spawn info for a missing aircraft and attempts
+        /// to recreate it via launchVehicle with type-name-matched parameters.
+        /// </summary>
+        internal static void HandleRecoveryResponse(AircraftRecoveryResponseMessage msg)
+        {
+            int id = msg.AircraftId;
+
+            if (msg.NotFound)
+            {
+                Plugin.Log.LogInfo($"[FlightOps] Recovery: aircraft {id} no longer exists on remote, cleaning up");
+                CleanupRecoveryTracking(id);
+                return;
+            }
+
+            // Race condition: aircraft appeared via normal spawn path
+            if (StateSerializer.FindById(id) != null)
+            {
+                Plugin.Log.LogInfo($"[FlightOps] Recovery: aircraft {id} already exists locally, cleaning up");
+                CleanupRecoveryTracking(id);
+                return;
+            }
+
+            var vessel = StateSerializer.FindById(msg.CarrierVesselId);
+            if (vessel?._obp?._flightDeck == null)
+            {
+                Plugin.Log.LogWarning($"[FlightOps] Recovery: carrier {msg.CarrierVesselId} not found for aircraft {id}");
+                CleanupRecoveryTracking(id);
+                return;
+            }
+
+            var fd = vessel._obp._flightDeck;
+            int vehicleIndex = FindVehicleIndexByType(fd, msg.VehicleTypeName);
+            if (vehicleIndex < 0)
+            {
+                Plugin.Log.LogWarning($"[FlightOps] Recovery: no '{msg.VehicleTypeName}' found on carrier {msg.CarrierVesselId}");
+                CleanupRecoveryTracking(id);
+                return;
+            }
+
+            Plugin.Log.LogInfo($"[FlightOps] Recovery: spawning aircraft {id} via carrier {msg.CarrierVesselId} " +
+                $"(type={msg.VehicleTypeName}, vehicleIndex={vehicleIndex})");
+
+            _recoveryInProgress.Add(id);
+
+            var synthetic = new FlightOpsMessage
+            {
+                OpsType          = FlightOpsType.SpawnVehicle,
+                VesselId         = msg.CarrierVesselId,
+                VehicleIndex     = vehicleIndex,
+                LoadoutIndex     = msg.LoadoutIndex,
+                SquadronIndex    = msg.SquadronIndex,
+                CallsignIndex    = msg.CallsignIndex,
+                MissionType      = msg.MissionType,
+                SpawnedUnitId    = id,
+                ElevatorIndex    = -1,  // let ApplySpawnVehicle find any free elevator
+                IsMultipleLaunch = msg.IsMultipleLaunch,
+                VehicleTypeName  = msg.VehicleTypeName,
+            };
+
+            if (!ApplySpawnVehicle(synthetic))
+                _deferredSpawns.Add(synthetic);
+
+            _missingAircraftSightings.Remove(id);
+        }
+
+        private static void CleanupRecoveryTracking(int id)
+        {
+            _missingAircraftSightings.Remove(id);
+            _recoveryRequested.Remove(id);
+            _recoveryInProgress.Remove(id);
+        }
+
+        /// <summary>
         /// Reset all flight ops state. Called on disconnect.
         /// </summary>
         internal static void Clear()
@@ -266,6 +486,10 @@ namespace SeapowerMultiplayer
             NetworkSyncedVessels.Clear();
             PipelineAircraftIds.Clear();
             _deferredSpawns.Clear();
+            _spawnRecords.Clear();
+            _missingAircraftSightings.Clear();
+            _recoveryRequested.Clear();
+            _recoveryInProgress.Clear();
             _idRangeInitialized = false;
             _nextSafeId = 0;
         }
@@ -276,7 +500,8 @@ namespace SeapowerMultiplayer
         /// </summary>
         internal static bool IsProtectedFromOrphanCleanup(ObjectBase unit)
         {
-            return PipelineAircraftIds.Contains(unit.UniqueID);
+            int id = unit.UniqueID;
+            return PipelineAircraftIds.Contains(id) || _recoveryInProgress.Contains(id);
         }
 
         /// <summary>
@@ -300,6 +525,8 @@ namespace SeapowerMultiplayer
             {
                 // Aircraft is airborne — remove protection, allow state updates
                 PipelineAircraftIds.Remove(entityId);
+                if (_recoveryInProgress.Remove(entityId))
+                    _recoveryRequested.Remove(entityId);
                 Plugin.Log.LogInfo($"[FlightOps] Aircraft {entityId} is airborne — " +
                     $"removing pipeline protection, state updates active");
                 return false;

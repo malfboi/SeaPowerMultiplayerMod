@@ -16,6 +16,8 @@ namespace SeapowerMultiplayer.Messages
         FlightOps,                  // bidirectional: flight deck operations sync (PvP)
         MissileStateSync,           // bidirectional: missile guidance/position sync (PvP)
         ChaffLaunch,                // bidirectional: manual chaff deployment sync (PvP)
+        AircraftRecoveryRequest,    // "I don't have aircraft X, send me its details"
+        AircraftRecoveryResponse,   // "Here's how to spawn aircraft X"
     }
 
     public interface INetMessage

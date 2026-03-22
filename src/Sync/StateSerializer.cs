@@ -299,7 +299,19 @@ namespace SeapowerMultiplayer
             {
                 if (isPvP) _lastSeenRemoteUnitIds.Add(state.EntityId);
                 var unit = StateSerializer.FindById(state.EntityId);
-                if (unit == null) continue;
+                if (unit == null)
+                {
+                    // Detect missing remote aircraft for recovery spawning
+                    if (isPvP && (state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter))
+                    {
+                        bool isRemoteAircraft = isHost
+                            ? state.EntityId >= 3_000_001
+                            : state.EntityId >= 2_000_001 && state.EntityId < 3_000_000;
+                        if (isRemoteAircraft)
+                            FlightOpsHandler.OnMissingRemoteAircraft(state.EntityId);
+                    }
+                    continue;
+                }
 
                 // Skip projectiles found by coincidental ID collision with a unit ID
                 if (unit is WeaponBase) continue;

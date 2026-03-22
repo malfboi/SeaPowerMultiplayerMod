@@ -35,6 +35,7 @@ namespace SeapowerMultiplayer.Messages
         public int   SpawnedUnitId;    // for SpawnVehicle/SpawnId: the aircraft's safe UniqueID
         public int   ElevatorIndex;    // for SpawnVehicle: which elevator was used
         public bool  IsMultipleLaunch; // for SpawnVehicle: formation launch flag
+        public string VehicleTypeName;  // for SpawnVehicle: aircraft _type for fallback matching
 
         public void Serialize(NetDataWriter w)
         {
@@ -68,6 +69,7 @@ namespace SeapowerMultiplayer.Messages
                     w.Put(SpawnedUnitId);
                     w.Put(ElevatorIndex);
                     w.Put(IsMultipleLaunch);
+                    w.Put(VehicleTypeName ?? "");
                     break;
             }
         }
@@ -107,6 +109,7 @@ namespace SeapowerMultiplayer.Messages
                     msg.SpawnedUnitId    = r.GetInt();
                     msg.ElevatorIndex    = r.GetInt();
                     msg.IsMultipleLaunch = r.GetBool();
+                    msg.VehicleTypeName  = r.GetString();
                     break;
             }
 

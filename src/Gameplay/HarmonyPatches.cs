@@ -564,7 +564,18 @@ namespace SeapowerMultiplayer
                 SpawnedUnitId    = safeId,
                 ElevatorIndex    = elevatorIdx,
                 IsMultipleLaunch = multipleLaunch,
+                VehicleTypeName  = __result._type.ToString(),
             };
+            FlightOpsHandler.RecordSpawn(safeId, new FlightOpsHandler.AircraftSpawnRecord
+            {
+                CarrierVesselId = vessel.UniqueID,
+                VehicleTypeName = __result._type.ToString(),
+                LoadoutIndex    = loadoutIndex,
+                SquadronIndex   = squadronIndex,
+                CallsignIndex   = callsignIndex,
+                MissionType     = (byte)ltp._missionType,
+                IsMultipleLaunch = multipleLaunch,
+            });
             NetworkManager.Instance.SendToOther(msg, LiteNetLib.DeliveryMethod.ReliableOrdered);
             Plugin.Log.LogInfo($"[FlightOps] Sent SpawnVehicle: vessel={vessel.UniqueID} " +
                 $"aircraft={originalId}->{safeId} elevator={elevatorIdx} type={__result._type}");

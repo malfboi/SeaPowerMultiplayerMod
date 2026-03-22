@@ -294,6 +294,20 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.AircraftRecoveryRequest:
+                {
+                    var msg = AircraftRecoveryRequestMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => FlightOpsHandler.HandleRecoveryRequest(msg));
+                    break;
+                }
+
+                case MessageType.AircraftRecoveryResponse:
+                {
+                    var msg = AircraftRecoveryResponseMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => FlightOpsHandler.HandleRecoveryResponse(msg));
+                    break;
+                }
+
                 default:
                     Log.LogWarning($"[Net] Unknown message type: {type}");
                     break;
