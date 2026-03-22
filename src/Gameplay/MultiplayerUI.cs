@@ -1,7 +1,7 @@
-using System.Reflection;
 using HarmonyLib;
 using SeaPower;
 using SeapowerMultiplayer.Transport;
+using System.Reflection;
 using UnityEngine;
 
 namespace SeapowerMultiplayer
@@ -266,13 +266,30 @@ namespace SeapowerMultiplayer
         {
             bool isHost      = Plugin.Instance.CfgIsHost.Value;
             bool isConnected = NetworkManager.Instance.IsConnected;
+            bool isHostRunning = NetworkManager.Instance.IsHostRunning;
+            string statusStr;
+            Color statusCol;
 
             GUILayout.Label("\u2500\u2500 Network \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
 
             // Mode + status
             string modeStr   = isHost ? "HOST" : "CLIENT";
-            Color  statusCol = isConnected ? new Color(0.3f, 1f, 0.4f) : new Color(1f, 0.4f, 0.4f);
-            string statusStr = isConnected ? "Connected" : "Disconnected";
+
+            if (isConnected)
+            {
+                statusStr = "Connected";
+                statusCol = new Color(0.3f, 1f, 0.4f); //Green
+            }
+            else if (isHostRunning)
+            {
+                statusStr = "Listening";
+                statusCol = new Color(1f, 0.7f, 0.2f); //Same color as _warningStyle
+            }
+            else
+            {
+                statusStr = "Disconnected";
+                statusCol = new Color(1f, 0.4f, 0.4f); //Red
+            }
 
             GUILayout.BeginHorizontal();
             GUILayout.Label($"Mode: {modeStr}", _labelStyle, GUILayout.Width(100));
@@ -301,11 +318,31 @@ namespace SeapowerMultiplayer
             // Connect / Disconnect button
             if (!isConnected)
             {
-                string btnLabel = isHost ? "Start Hosting" : "Connect";
+                //Adjust button verbage depending on if the game is serving or a client
+                string btnLabel;
+                if (isHost && !isHostRunning)
+                {
+                    btnLabel = "Start Hosting";
+                }    
+                else if (isHost && isHostRunning)
+                {
+                    btnLabel = "Stop Hosting";
+                }
+                else
+                {
+                    btnLabel = "Connect";
+                }
+
                 if (GUILayout.Button(btnLabel, _buttonStyle))
                 {
-                    if (isHost)
+                    if (isHost && !isHostRunning)
+                    {
                         NetworkManager.Instance.StartHost(Plugin.Instance.CfgPort.Value);
+                    }
+                    else if (isHost && isHostRunning)
+                    {
+                        NetworkManager.Instance.Stop();
+                    }
                     else
                         NetworkManager.Instance.StartClient(Plugin.Instance.CfgHostIP.Value, Plugin.Instance.CfgPort.Value);
                 }
