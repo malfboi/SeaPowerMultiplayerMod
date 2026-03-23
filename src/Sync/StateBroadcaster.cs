@@ -113,6 +113,7 @@ namespace SeapowerMultiplayer
             }
 
             var msg = StateSerializer.Capture(filter);
+            Plugin.Log.LogInfo(msg);
 
             if (isHost)
                 NetworkManager.Instance.BroadcastToClients(msg, LiteNetLib.DeliveryMethod.Unreliable);

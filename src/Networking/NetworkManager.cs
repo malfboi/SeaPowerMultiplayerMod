@@ -122,9 +122,13 @@ namespace SeapowerMultiplayer
         public void SendToOther(INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
         {
             if (_isHost)
+            {
                 BroadcastToClients(msg, delivery);
+            }
             else
+            {
                 SendToServer(msg, delivery);
+            }
         }
 
         // ── Transport factory ───────────────────────────────────────────────────
