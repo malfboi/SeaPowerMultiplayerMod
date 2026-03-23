@@ -67,12 +67,12 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Launcher not always launching correctly has been fixed. Game should now always launch with the correct settings and mod."/>
+                           Text="Fix sensor state and damage syncing between ground units."/>
                 <TextBlock Foreground="{StaticResource TextSecondary}"
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Temp fix for subs killing themselves with their own torps."/>
+                           Text="Various fixes to reduce desync issues."/>
 
                 <!-- Disclaimer -->
                 <Rectangle Height="1"
