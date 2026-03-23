@@ -40,5 +40,12 @@ namespace SeapowerMultiplayer
             if (ClientAssignedTfType == Taskforce.TfType.None) return true;
             return unit._taskforce?.Side == ClientAssignedTfType;
         }
+
+        /// <summary>Reset assignment on disconnect so stale assignment doesn't carry to next session.</summary>
+        public static void Reset()
+        {
+            ClientAssignedTfType = Taskforce.TfType.None;
+            Plugin.Log.LogInfo("[TF] Task force assignment reset on disconnect.");
+        }
     }
 }

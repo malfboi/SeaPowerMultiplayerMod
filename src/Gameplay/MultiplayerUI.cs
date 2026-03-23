@@ -49,6 +49,9 @@ namespace SeapowerMultiplayer
         private bool _foldProjectiles, _foldMissileState, _foldFlightOps;
         private bool _foldFireAuth, _foldCombatEvents, _foldDrift;
 
+        // Lock indicator: track last known locked ID to avoid per-frame FindObjectsOfType
+        private int _lastLockedUnitId = 0;
+
         // Overall sync status
         private enum SyncStatus { OK, Degraded, Issues }
 
@@ -207,6 +210,67 @@ namespace SeapowerMultiplayer
                 _contentHeight = GUILayoutUtility.GetLastRect().yMax;
 
             GUILayout.EndArea();
+
+            // ── Lock indicator: highlight the unit the remote player has selected ──
+            int lockedId = UnitLockManager.RemoteLockedUnitId;
+            if (lockedId != 0 && NetworkManager.Instance.IsConnected && !Plugin.Instance.CfgPvP.Value)
+            {
+                // Refresh cached unit reference only when the locked ID changes
+                if (lockedId != _lastLockedUnitId)
+                {
+                    _lastLockedUnitId = lockedId;
+                    UnitLockManager.SetRemoteLockedUnit(null);
+                    foreach (var obj in UnityEngine.Object.FindObjectsOfType<SeaPower.ObjectBase>())
+                    {
+                        if (obj.UniqueID == lockedId)
+                        {
+                            UnitLockManager.SetRemoteLockedUnit(obj);
+                            break;
+                        }
+                    }
+                }
+
+                var lockedUnit = UnitLockManager.RemoteLockedUnit;
+                if (lockedUnit != null && Camera.main != null)
+                {
+                    Vector3 screenPos = Camera.main.WorldToScreenPoint(lockedUnit.transform.position);
+                    if (screenPos.z > 0) // unit is in front of camera
+                    {
+                        float guiX = screenPos.x - 30f;
+                        float guiY = Screen.height - screenPos.y - 30f;
+                        Color prev = GUI.color;
+                        GUI.color = new Color(0.8f, 0.8f, 0.8f, 0.9f);
+                        GUI.Label(new Rect(guiX, guiY, 80f, 20f), "[BUSY]");
+                        GUI.color = prev;
+                    }
+                }
+
+                // Show notification if player just tried to select this unit
+                float blockedAt = UnitLockManager.SelectionBlockedAt;
+                float elapsed = UnityEngine.Time.time - blockedAt;
+                if (elapsed < 5f)
+                {
+                    float alpha = 1f - (elapsed / 5f);
+                    Color prev2 = GUI.color;
+                    GUI.color = new Color(1f, 0.6f, 0.2f, alpha);
+                    float msgW = 360f;
+                    float msgH = 36f;
+                    var _notifStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        fontSize  = 16,
+                        fontStyle = FontStyle.Bold,
+                        alignment = TextAnchor.MiddleCenter,
+                    };
+                    GUI.Label(new Rect((Screen.width - msgW) * 0.5f, Screen.height * 0.15f, msgW, msgH),
+                        "UNIT IS BUSY - selected by your partner!", _notifStyle);
+                    GUI.color = prev2;
+                }
+            }
+            else if (lockedId == 0 && _lastLockedUnitId != 0)
+            {
+                _lastLockedUnitId = 0;
+                UnitLockManager.SetRemoteLockedUnit(null);
+            }
         }
 
         // ── Time Vote Popup ──────────────────────────────────────────────────
@@ -246,6 +310,8 @@ namespace SeapowerMultiplayer
             GUILayout.FlexibleSpace();
             if (Plugin.Instance.CfgPvP.Value)
                 GUILayout.Label("PvP", _warningStyle);
+            else
+                GUILayout.Label("Co-op", _successStyle);
             GUILayout.Label("[Ctrl+F9]", _labelStyle);
             GUILayout.EndHorizontal();
         }
@@ -358,6 +424,8 @@ namespace SeapowerMultiplayer
                     if (GUILayout.Button("Send State & Wait", _buttonStyle))
                         SessionManager.CaptureAndSend();
                 }
+
+                DrawTaskforceAssignment();
             }
 
             DrawSyncState(isHost);
@@ -425,6 +493,8 @@ namespace SeapowerMultiplayer
                     if (GUILayout.Button("Send State & Wait", _buttonStyle))
                         SessionManager.CaptureAndSend();
                 }
+
+                DrawTaskforceAssignment();
             }
             else if (inLobby)
             {
@@ -445,6 +515,40 @@ namespace SeapowerMultiplayer
             }
 
             DrawSyncState(NetworkManager.Instance.IsHost);
+        }
+
+        private void DrawTaskforceAssignment()
+        {
+            if (Plugin.Instance.CfgPvP.Value) return; // Co-op only
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            GUILayout.Space(4);
+            GUILayout.Label("\u2500\u2500 Task Force Assignment \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
+
+            bool isHost = Plugin.Instance.CfgIsHost.Value;
+            var assigned = TaskforceAssignmentManager.ClientAssignedTfType;
+
+            if (isHost)
+            {
+                GUILayout.Label($"Client assigned: {(assigned == Taskforce.TfType.None ? "All Units" : assigned.ToString())}", _labelStyle);
+                GUILayout.Space(2);
+
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("All Units", _buttonStyle))
+                    TaskforceAssignmentManager.HostAssign(Taskforce.TfType.None);
+                if (GUILayout.Button("TF Player", _buttonStyle))
+                    TaskforceAssignmentManager.HostAssign(Taskforce.TfType.Player);
+                if (GUILayout.Button("TF Allied", _buttonStyle))
+                    TaskforceAssignmentManager.HostAssign(Taskforce.TfType.Enemy);
+                GUILayout.EndHorizontal();
+            }
+            else
+            {
+                string desc = assigned == Taskforce.TfType.None
+                    ? "All friendly units"
+                    : $"Task Force: {assigned}";
+                GUILayout.Label($"Your control: {desc}", _successStyle);
+            }
         }
 
         private void DrawSyncState(bool isHost)

@@ -305,6 +305,7 @@ namespace SeapowerMultiplayer
 
             bool isHost = Plugin.Instance.CfgIsHost.Value;
             if (!isHost && !TaskforceAssignmentManager.ClientMayControl(unit)) return;
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return;
 
             var root = unit._userRoot;
             if (root == null || start < 0 || start >= root.TaskViewModels.Count) return;
@@ -872,6 +873,8 @@ namespace SeapowerMultiplayer
             }
 
             // Player orders (co-op path — PvP player fires are handled by the Prefix above)
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID)) return;
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return;
 
@@ -932,6 +935,8 @@ namespace SeapowerMultiplayer
 
             // Client control check for direct AddEngageTask callers
             // (e.g. LaunchNoisemaker). Send logic is in InsertEngageTask.
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID)) return false;
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return false;
 
@@ -940,23 +945,59 @@ namespace SeapowerMultiplayer
             bool isSonobuoy = engageTask._ammoId != null
                 && engageTask._ammoId.IndexOf("ssq", StringComparison.OrdinalIgnoreCase) >= 0;
 
-            if (isSonobuoy && Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected)
+            if (isSonobuoy && NetworkManager.Instance.IsConnected)
             {
-                var geo = Utils.worldPositionFromUnityToLongLat(
-                    engageTask._targetPosition, Globals._currentCenterTile);
+                bool isPvPSono = Plugin.Instance.CfgPvP.Value;
+                bool isHostSono = Plugin.Instance.CfgIsHost.Value;
 
-                var msg = new PlayerOrderMessage
+                if (isPvPSono)
                 {
-                    SourceEntityId = __instance.UniqueID,
-                    Order          = OrderType.DropSonobuoy,
-                    AmmoId         = engageTask._ammoId,
-                    DestX          = (float)geo._longitude,
-                    DestY          = (float)geo._height,
-                    DestZ          = (float)geo._latitude,
-                };
-                NetworkManager.Instance.SendToOther(msg);
-                Plugin.Log.LogInfo($"[Sonobuoy] Sent drop via AddEngageTask: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
-                return true; // let it execute locally
+                    // PvP: encode as GeoPosition (floating-origin safe) and send to opponent
+                    var geo = Utils.worldPositionFromUnityToLongLat(
+                        engageTask._targetPosition, Globals._currentCenterTile);
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = __instance.UniqueID,
+                        Order          = OrderType.DropSonobuoy,
+                        AmmoId         = engageTask._ammoId,
+                        DestX          = (float)geo._longitude,
+                        DestY          = (float)geo._height,
+                        DestZ          = (float)geo._latitude,
+                    };
+                    NetworkManager.Instance.SendToOther(msg);
+                    Plugin.Log.LogInfo($"[Sonobuoy] PvP sent drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                }
+                else if (!isHostSono && TaskforceAssignmentManager.ClientMayControl(__instance))
+                {
+                    // Co-op client: send to host using local coords (shared origin in co-op)
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = __instance.UniqueID,
+                        Order          = OrderType.DropSonobuoy,
+                        AmmoId         = engageTask._ammoId,
+                        DestX          = engageTask._targetPosition.x,
+                        DestY          = engageTask._targetPosition.y,
+                        DestZ          = engageTask._targetPosition.z,
+                    };
+                    NetworkManager.Instance.SendToServer(msg);
+                    Plugin.Log.LogInfo($"[Sonobuoy] Co-op client sent drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                }
+                else if (isHostSono)
+                {
+                    // Co-op host: broadcast to client so client sees host-initiated sonobuoy drops
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = __instance.UniqueID,
+                        Order          = OrderType.DropSonobuoy,
+                        AmmoId         = engageTask._ammoId,
+                        DestX          = engageTask._targetPosition.x,
+                        DestY          = engageTask._targetPosition.y,
+                        DestZ          = engageTask._targetPosition.z,
+                    };
+                    NetworkManager.Instance.BroadcastToClients(msg);
+                    Plugin.Log.LogInfo($"[Sonobuoy] Co-op host broadcast drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                }
+                return true; // execute locally on whoever sent
             }
 
             // PvP: flag player fires for delay handling in InsertEngageTask Prefix
@@ -1038,6 +1079,13 @@ namespace SeapowerMultiplayer
             _lockedDepth[id] = depth;
             _lockTime[id] = now;
             __state = true; // Signal Postfix to broadcast
+
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+            {
+                __state = false; // don't broadcast
+                return false;
+            }
 
             if (Plugin.Instance.CfgIsHost.Value) return true;
 
@@ -1158,6 +1206,8 @@ namespace SeapowerMultiplayer
             // PvP: don't sync orders for weapons (missiles/torpedoes) — their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate — skip send, still execute locally
@@ -1306,6 +1356,8 @@ namespace SeapowerMultiplayer
         internal static bool AllowSensorChange(ObjectBase unit)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
             if (!Plugin.Instance.CfgPvP.Value || !NetworkManager.Instance.IsConnected) return true;
             return unit._taskforce == Globals._playerTaskforce;
         }
@@ -2260,6 +2312,105 @@ namespace SeapowerMultiplayer
                 SourceEntityId = 0,
             });
             Plugin.Log.LogDebug($"[Combat] PvP torpedo death notification: id={id}");
+        }
+    }
+
+    // ── Unit Selection Lock (Co-op) ──────────────────────────────────────────
+
+    [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.switchToObject))]
+    public static class Patch_RenderPosition_SwitchToObject
+    {
+        static bool Prefix(ObjectBase objectToAttach)
+        {
+            // Only active in co-op when connected
+            if (Plugin.Instance.CfgPvP.Value) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (objectToAttach == null) return true;
+
+            // Block selection if the remote player has this unit selected
+            if (UnitLockManager.IsLockedByRemote(objectToAttach.UniqueID))
+            {
+                Plugin.Log.LogDebug(
+                    $"[UnitLock] Selection of unit {objectToAttach.UniqueID} blocked — held by remote player.");
+                UnitLockManager.NotifySelectionBlocked();
+                return false; // prevent switchToObject from running
+            }
+
+            return true;
+        }
+
+        static void Postfix(ObjectBase objectToAttach)
+        {
+            // Only broadcast in co-op when connected
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (objectToAttach == null) return;
+
+            // Verify the selection actually took effect
+            var current = Singleton<RenderPosition>.Instance.SelectedObject;
+            if (current == null || current.UniqueID != objectToAttach.UniqueID) return;
+
+            // Broadcast our selection to the remote player
+            NetworkManager.Instance.SendToOther(new GameEventMessage
+            {
+                EventType = GameEventType.UnitSelected,
+                Param     = (float)objectToAttach.UniqueID,
+            });
+        }
+    }
+
+    [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.deselectObjectAndDetachCamera))]
+    public static class Patch_RenderPosition_DeselectObjectAndDetachCamera
+    {
+        static void Prefix()
+        {
+            // Only broadcast in co-op when connected
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            // Read SelectedObject BEFORE deselection clears it
+            var current = Singleton<RenderPosition>.Instance.SelectedObject;
+            if (current == null) return;
+
+            NetworkManager.Instance.SendToOther(new GameEventMessage
+            {
+                EventType = GameEventType.UnitDeselected,
+                Param     = (float)current.UniqueID,
+            });
+        }
+    }
+
+    // ── MapUnitViewModel registry for unit lock map indicator ────────────────
+
+    [HarmonyPatch(typeof(MapUnitViewModel), MethodType.Constructor,
+        new[] { typeof(Taskforce), typeof(Vehicle), typeof(ReactiveProperty<ISelectableObject>), typeof(bool) })]
+    public static class Patch_MapUnitViewModel_Ctor
+    {
+        static void Postfix(MapUnitViewModel __instance)
+        {
+            MapUnitViewModelRegistry.Register(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(MapUnitViewModel), nameof(MapUnitViewModel.Dispose))]
+    public static class Patch_MapUnitViewModel_Dispose
+    {
+        static void Prefix(MapUnitViewModel __instance)
+        {
+            MapUnitViewModelRegistry.Unregister(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(MapUnitViewModel), "get_ContactInfoLine2")]
+    public static class Patch_MapUnitViewModel_ContactInfoLine2
+    {
+        static void Postfix(MapUnitViewModel __instance, ref string __result)
+        {
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            var obj = __instance.Unit?.BaseObject as ObjectBase;
+            if (obj != null && UnitLockManager.IsLockedByRemote(obj.UniqueID))
+                __result = "[BUSY]";
         }
     }
 }

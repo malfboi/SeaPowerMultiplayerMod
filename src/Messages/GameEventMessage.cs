@@ -13,6 +13,8 @@ namespace SeapowerMultiplayer.Messages
         HardSyncRequest      = 6,   // client → host: request full session resync
         TimeProposal         = 7,   // vote mode: propose a time change to the other side
         TimeProposalResponse = 8,   // vote mode: accept (Param=1) or decline (Param=0)
+        UnitSelected         = 9,   // co-op: notify remote player which unit we selected
+        UnitDeselected       = 10,  // co-op: notify remote player we deselected our unit
     }
 
     /// <summary>

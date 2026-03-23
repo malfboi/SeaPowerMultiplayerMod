@@ -1056,10 +1056,21 @@ namespace SeapowerMultiplayer
                             Patch_ObjectBase_HandleEngageTasks.MarkNetworkOrdered(unit.UniqueID);
                         }
 
-                        var geo = new GeoPosition { _longitude = msg.DestX, _latitude = msg.DestZ, _height = msg.DestY };
-                        Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
-                        Vector3 localPos = new Vector3(local.x, msg.DestY, local.y);
-                        unit.AddEngageTask(new EngageTask(msg.AmmoId, localPos, unit, 1));
+                        Vector3 dropPos;
+                        if (Plugin.Instance.CfgPvP.Value)
+                        {
+                            // PvP: coordinates are GeoPosition (floating-origin safe)
+                            var geo = new GeoPosition { _longitude = msg.DestX, _latitude = msg.DestZ, _height = msg.DestY };
+                            Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                            dropPos = new Vector3(local.x, msg.DestY, local.y);
+                        }
+                        else
+                        {
+                            // Co-op: coordinates are already in local Unity space (shared origin)
+                            dropPos = new Vector3(msg.DestX, msg.DestY, msg.DestZ);
+                        }
+
+                        unit.AddEngageTask(new EngageTask(msg.AmmoId, dropPos, unit, 1));
                         Plugin.Log.LogInfo($"[Sonobuoy] Applied drop: unit={unit.UniqueID} ammo={msg.AmmoId}");
                         break;
                     }
@@ -1116,6 +1127,14 @@ namespace SeapowerMultiplayer
 
                 case GameEventType.TimeProposalResponse:
                     TimeSyncManager.OnProposalResponseReceived(msg.Param);
+                    break;
+
+                case GameEventType.UnitSelected:
+                    UnitLockManager.OnRemoteSelected((int)msg.Param);
+                    break;
+
+                case GameEventType.UnitDeselected:
+                    UnitLockManager.OnRemoteDeselected();
                     break;
             }
         }

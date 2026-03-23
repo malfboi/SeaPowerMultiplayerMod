@@ -169,6 +169,8 @@ namespace SeapowerMultiplayer
             {
                 OrderDelayQueue.Clear();
                 DriftDetector.Reset();
+                TaskforceAssignmentManager.Reset();
+                UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
                 PvPDeathNotifications.Clear();
                 PvPFireAuth.Clear();

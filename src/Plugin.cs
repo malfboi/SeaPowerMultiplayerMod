@@ -49,8 +49,7 @@ namespace SeapowerMultiplayer
             CfgHostIP      = Config.Bind("Network", "HostIP",       "127.0.0.1", "Host IP address (used when IsHost=false)");
             CfgPort        = Config.Bind("Network", "Port",         7777,        "UDP port");
             CfgAutoConnect = Config.Bind("Network", "AutoConnect",  false,       "Connect/host automatically on game launch");
-            CfgPvP         = Config.Bind("Network", "PvP",          true,        "PvP mode: swap sides for client, suppress all AI combat.");
-            CfgPvP.Value   = true; // Force PvP on for now
+            CfgPvP         = Config.Bind("Network", "PvP",          false,       "PvP=true: players control opposing sides. PvP=false: co-op, both players on same side with taskforce assignment.");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
 
