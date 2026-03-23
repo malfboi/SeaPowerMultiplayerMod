@@ -174,25 +174,29 @@ namespace SeapowerMultiplayer
         // ── PvP hybrid correction constants ────────────────────────────────
         // Fixed strong corrections — owner is definitively authoritative.
         // Ship/Submarine
-        private const float PvpShipSnapThreshold = 150f;
-        private const float PvpShipPosLerp       = 0.5f;
-        private const float PvpShipHeadingLerp   = 0.6f;
-        private const float PvpShipSpeedLerp     = 0.5f;
+        private const float PvpShipSnapThreshold = 75f;
+        private const float PvpShipPosLerp       = 0.7f;
+        private const float PvpShipHeadingLerp   = 0.8f;
+        private const float PvpShipSpeedLerp     = 0.7f;
         // Aircraft/Helicopter
-        private const float PvpAirSnapThreshold  = 300f;
-        private const float PvpAirPosLerp        = 0.6f;
-        private const float PvpAirHeadingLerp    = 0.7f;
-        private const float PvpAirSpeedLerp      = 0.5f;
+        private const float PvpAirSnapThreshold  = 150f;
+        private const float PvpAirPosLerp        = 0.75f;
+        private const float PvpAirHeadingLerp    = 0.85f;
+        private const float PvpAirSpeedLerp      = 0.7f;
         // Projectiles (missiles/torpedoes)
-        private const float PvpProjSnapThreshold = 100f;
-        private const float PvpProjPosLerp       = 0.7f;
-        private const float PvpProjHeadingLerp   = 0.8f;
-        private const float PvpProjSpeedLerp     = 0.6f;
+        private const float PvpProjSnapThreshold = 50f;
+        private const float PvpProjPosLerp       = 0.85f;
+        private const float PvpProjHeadingLerp   = 0.9f;
+        private const float PvpProjSpeedLerp     = 0.8f;
 
         // Track projectile IDs across state updates for disappearance detection.
         // If host's state update no longer includes a projectile, it was destroyed.
         private static HashSet<int> _prevProjectileIds = new HashSet<int>();
         private static HashSet<int> _currProjectileIds = new HashSet<int>();
+
+        // ── PvP periodic reconciliation ──────────────────────────────────────
+        /// <summary>When true, the next Apply() uses lerp=1.0 for all PvP corrections (full snap).</summary>
+        public static bool ForceSnapNextUpdate;
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
@@ -211,6 +215,9 @@ namespace SeapowerMultiplayer
         private static int _pvpShipCount;
         private static float _pvpAirDriftSum, _pvpAirDriftMaxAcc;
         private static int _pvpAirCount;
+
+        // PvP drift logging timer
+        private static float _nextPvpDriftLogTime;
 
         // ── PvP missile disappearance tracking ──────────────────────────────
         private static readonly Dictionary<int, int> _missedProjectileCount = new();
@@ -353,9 +360,10 @@ namespace SeapowerMultiplayer
                 Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
                 Vector3 hostPos = new Vector3(local.x, state.Y, local.y);
 
-                // Submarines: depth is order-synced via setDepth(), don't let
-                // state updates fight the local depth-change physics.
-                if (state.Kind == UnitType.Submarine)
+                // Submarines: in co-op, depth is order-synced via setDepth() on the
+                // same host, so don't let state updates fight the local depth physics.
+                // In PvP, the owner is authoritative for depth — use their value.
+                if (state.Kind == UnitType.Submarine && !isPvP)
                     hostPos.y = unit.transform.position.y;
 
                 if (isPvP)
@@ -363,9 +371,9 @@ namespace SeapowerMultiplayer
                     // PvP hybrid: local physics simulates, owner's state provides corrections
                     bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
                     float snapThresh = isAir ? PvpAirSnapThreshold : PvpShipSnapThreshold;
-                    float posLerp    = isAir ? PvpAirPosLerp       : PvpShipPosLerp;
-                    float hdgLerp    = isAir ? PvpAirHeadingLerp   : PvpShipHeadingLerp;
-                    float spdLerp    = isAir ? PvpAirSpeedLerp     : PvpShipSpeedLerp;
+                    float posLerp    = ForceSnapNextUpdate ? 1f : (isAir ? PvpAirPosLerp       : PvpShipPosLerp);
+                    float hdgLerp    = ForceSnapNextUpdate ? 1f : (isAir ? PvpAirHeadingLerp   : PvpShipHeadingLerp);
+                    float spdLerp    = ForceSnapNextUpdate ? 1f : (isAir ? PvpAirSpeedLerp     : PvpShipSpeedLerp);
 
                     float drift = Vector3.Distance(unit.transform.position, hostPos);
 
@@ -442,6 +450,18 @@ namespace SeapowerMultiplayer
                 PvpShipDriftMax = _pvpShipDriftMaxAcc;
                 PvpAirDriftAvg = _pvpAirCount > 0 ? _pvpAirDriftSum / _pvpAirCount : 0f;
                 PvpAirDriftMax = _pvpAirDriftMaxAcc;
+                if (ForceSnapNextUpdate)
+                {
+                    ForceSnapNextUpdate = false;
+                    Plugin.Log.LogInfo("[PvP Reconcile] Full snap applied to all puppet units");
+                }
+
+                // Periodic drift logging for diagnostics
+                if (Time.time >= _nextPvpDriftLogTime)
+                {
+                    _nextPvpDriftLogTime = Time.time + 30f;
+                    Plugin.Log.LogInfo($"[PvP Drift] Ships: avg={PvpShipDriftAvg:F1}m max={PvpShipDriftMax:F1}m ({_pvpShipCount} units) | Air: avg={PvpAirDriftAvg:F1}m max={PvpAirDriftMax:F1}m ({_pvpAirCount} units)");
+                }
             }
 
             // DriftDetector: skip for PvP (puppets have no drift)

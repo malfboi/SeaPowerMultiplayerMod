@@ -30,6 +30,7 @@ namespace SeapowerMultiplayer
             StartCoroutine(OrphanCleanupLoop());
             StartCoroutine(MissileStateSyncLoop());
             StartCoroutine(PendingSpawnCleanupLoop());
+            StartCoroutine(PvpReconciliationLoop());
         }
 
         private void Update()
@@ -144,10 +145,9 @@ namespace SeapowerMultiplayer
         // ── Periodic damage correction (catches drift / packet loss) ────────
         private IEnumerator DamageCorrectionLoop()
         {
-            var wait = new WaitForSeconds(5f);
             while (true)
             {
-                yield return wait;
+                yield return new WaitForSeconds(Plugin.Instance.CfgDamageSyncInterval.Value);
                 if (!NetworkManager.Instance.IsConnected) continue;
 
                 bool isPvP = Plugin.Instance.CfgPvP.Value;
@@ -253,6 +253,23 @@ namespace SeapowerMultiplayer
                 if (!Plugin.Instance.CfgPvP.Value) continue;
                 if (!NetworkManager.Instance.IsConnected) continue;
                 ProjectileIdMapper.PurgeStaleEntries();
+            }
+        }
+
+        // ── PvP periodic reconciliation (snap all puppets to clear accumulated drift) ──
+        private IEnumerator PvpReconciliationLoop()
+        {
+            while (true)
+            {
+                float minutes = Plugin.Instance.CfgPvpReconcileMinutes.Value;
+                if (minutes <= 0f) { yield return new WaitForSeconds(60f); continue; }
+                yield return new WaitForSeconds(minutes * 60f);
+                if (!Plugin.Instance.CfgPvP.Value) continue;
+                if (!NetworkManager.Instance.IsConnected) continue;
+                if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
+                if (SessionManager.SceneLoading) continue;
+                Plugin.Log.LogInfo("[PvP Reconcile] Forcing full snap correction on next state update");
+                StateApplier.ForceSnapNextUpdate = true;
             }
         }
 
