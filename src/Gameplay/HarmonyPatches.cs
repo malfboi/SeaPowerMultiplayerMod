@@ -337,9 +337,9 @@ namespace SeapowerMultiplayer
             if (!OrderDeduplicator.ShouldSend(msg)) return; // position unchanged
 
             if (Plugin.Instance.CfgIsHost.Value)
-                NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.Unreliable);
+                NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
             else
-                NetworkManager.Instance.SendToServer(msg, DeliveryMethod.Unreliable);
+                NetworkManager.Instance.SendToServer(msg, DeliveryMethod.ReliableOrdered);
         }
     }
 
