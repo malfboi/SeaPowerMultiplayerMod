@@ -221,7 +221,7 @@ namespace SeapowerMultiplayer
         // Units missing from multiple cleanup cycles get destroyed.
         private static readonly HashSet<int> _lastSeenRemoteUnitIds = new();
         private static readonly Dictionary<int, int> _missedUpdateCount = new(); // unitId → consecutive misses
-        private const int MissedCyclesBeforeDestroy = 6; // ~30s (6 cleanup cycles × 5s)
+        private const int MissedCyclesBeforeDestroy = 12; // ~120s (12 cleanup cycles × 10s)
 
         // ── State-sync-driven ID alignment ─────────────────────────────────
         private static bool _pendingAlignment;
@@ -1051,12 +1051,16 @@ namespace SeapowerMultiplayer
                         // PvP: authorize the enemy helicopter to spawn a weapon (sonobuoy Bomb)
                         if (Plugin.Instance.CfgPvP.Value
                             && unit._taskforce != Globals._playerTaskforce)
+                        {
                             PvPFireAuth.Authorize(unit.UniqueID, 1);
+                            Patch_ObjectBase_HandleEngageTasks.MarkNetworkOrdered(unit.UniqueID);
+                        }
 
                         var geo = new GeoPosition { _longitude = msg.DestX, _latitude = msg.DestZ, _height = msg.DestY };
                         Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
                         Vector3 localPos = new Vector3(local.x, msg.DestY, local.y);
                         unit.AddEngageTask(new EngageTask(msg.AmmoId, localPos, unit, 1));
+                        Plugin.Log.LogInfo($"[Sonobuoy] Applied drop: unit={unit.UniqueID} ammo={msg.AmmoId}");
                         break;
                     }
 

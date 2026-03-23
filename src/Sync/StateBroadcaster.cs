@@ -259,7 +259,7 @@ namespace SeapowerMultiplayer
         // ── PvP orphan cleanup (destroys unmatched units/missiles) ──────────
         private IEnumerator OrphanCleanupLoop()
         {
-            var wait = new WaitForSeconds(5f);
+            var wait = new WaitForSeconds(10f);
             while (true)
             {
                 yield return wait;

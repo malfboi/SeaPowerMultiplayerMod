@@ -935,11 +935,32 @@ namespace SeapowerMultiplayer
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return false;
 
+            // Sonobuoy drops come through AddEngageTask directly (never InsertEngageTask),
+            // so we must send the network message here. Detect by ammo name prefix.
+            bool isSonobuoy = engageTask._ammoId != null
+                && engageTask._ammoId.IndexOf("ssq", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            if (isSonobuoy && Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected)
+            {
+                var geo = Utils.worldPositionFromUnityToLongLat(
+                    engageTask._targetPosition, Globals._currentCenterTile);
+
+                var msg = new PlayerOrderMessage
+                {
+                    SourceEntityId = __instance.UniqueID,
+                    Order          = OrderType.DropSonobuoy,
+                    AmmoId         = engageTask._ammoId,
+                    DestX          = (float)geo._longitude,
+                    DestY          = (float)geo._height,
+                    DestZ          = (float)geo._latitude,
+                };
+                NetworkManager.Instance.SendToOther(msg);
+                Plugin.Log.LogInfo($"[Sonobuoy] Sent drop via AddEngageTask: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                return true; // let it execute locally
+            }
+
             // PvP: flag player fires for delay handling in InsertEngageTask Prefix
-            // BUT skip for sonobuoy drops — they already sent their own message
-            // and should execute immediately via the original DropSonobuoyTask path
-            if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && !Patch_DropSonobuoyTask_OnExecute.InsideSonobuoyDrop)
+            if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected)
                 DelayingPlayerFire = true;
 
             return true;
@@ -947,84 +968,9 @@ namespace SeapowerMultiplayer
     }
 
 
-    // ── Sonobuoy drop sync (PvP) ───────────────────────────────────────────
-    //
-    // DropSonobuoyTask.OnExecute() calls AddEngageTask() directly (not
-    // InsertEngageTask), so the mod's fire interception never fires.
-    // This patch intercepts OnExecute to send a network message while
-    // letting the original execute locally. The InsideSonobuoyDrop flag
-    // prevents AddEngageTask from setting DelayingPlayerFire.
-
-    [HarmonyPatch(typeof(DropSonobuoyTask), "OnExecute")]
-    public static class Patch_DropSonobuoyTask_OnExecute
-    {
-        /// <summary>
-        /// Flag checked by AddEngageTask prefix to skip DelayingPlayerFire.
-        /// True while inside a sonobuoy drop that has already sent its own
-        /// network message — the AddEngageTask from OnExecute should run
-        /// immediately without being flagged for delay.
-        /// </summary>
-        internal static bool InsideSonobuoyDrop;
-
-        // DropSonobuoyTask inherits ExtActionTask which has protected _baseObject
-        private static readonly FieldInfo _baseObjField =
-            AccessTools.Field(typeof(DropSonobuoyTask), "_baseObject");
-        // BBParameter<GeoPosition> _bearingPosition — the drop location
-        private static readonly FieldInfo _bearingPosField =
-            AccessTools.Field(typeof(DropSonobuoyTask), "_bearingPosition");
-        // BBParameter<AmmunitionType> _ammunitionType — the sonobuoy type
-        private static readonly FieldInfo _ammoTypeField =
-            AccessTools.Field(typeof(DropSonobuoyTask), "_ammunitionType");
-
-        static bool Prefix(DropSonobuoyTask __instance)
-        {
-            if (!NetworkManager.Instance.IsConnected) return true;
-            if (OrderHandler.ApplyingFromNetwork) return true;
-
-            var baseObj = _baseObjField?.GetValue(__instance) as ObjectBase;
-            if (baseObj == null) return true;
-
-            // PvP: suppress enemy drops (their side syncs to us)
-            if (Plugin.Instance.CfgPvP.Value
-                && baseObj._taskforce != Globals._playerTaskforce)
-                return false;
-
-            // Extract BBParameter values via reflection
-            var bearingPosParam = _bearingPosField?.GetValue(__instance);
-            var ammoTypeParam = _ammoTypeField?.GetValue(__instance);
-            if (bearingPosParam == null || ammoTypeParam == null) return true;
-
-            // BBParameter<T>.value
-            var geo = (GeoPosition)AccessTools.Property(
-                bearingPosParam.GetType(), "value").GetValue(bearingPosParam);
-            var ammoObj = AccessTools.Property(
-                ammoTypeParam.GetType(), "value").GetValue(ammoTypeParam);
-            string ammoName = ammoObj?.GetType().GetProperty("Name")?.GetValue(ammoObj)?.ToString() ?? "";
-
-            if (string.IsNullOrEmpty(ammoName))
-            {
-                Plugin.Log.LogWarning("[Sonobuoy] Could not extract ammo name — skipping network sync");
-                return true;
-            }
-
-            var msg = new PlayerOrderMessage
-            {
-                SourceEntityId = baseObj.UniqueID,
-                Order          = OrderType.DropSonobuoy,
-                AmmoId         = ammoName,
-                DestX          = (float)geo._longitude,
-                DestY          = (float)geo._height,
-                DestZ          = (float)geo._latitude,
-            };
-            NetworkManager.Instance.SendToOther(msg);
-            Plugin.Log.LogInfo($"[Sonobuoy] Sent drop: unit={baseObj.UniqueID} ammo={ammoName}");
-
-            InsideSonobuoyDrop = true;  // Prevent DelayingPlayerFire in AddEngageTask
-            return true;                // Let original OnExecute run!
-        }
-
-        static void Postfix() => InsideSonobuoyDrop = false;
-    }
+    // NOTE: DropSonobuoyTask.OnExecute() cannot be patched by Harmony (protected
+    // override on a NodeCanvas ActionTask — patch silently fails to apply).
+    // Sonobuoy sync is handled in AddEngageTask above by detecting "ssq" ammo names.
 
     // ── Phase 3: Additional command replication ─────────────────────────────
 
