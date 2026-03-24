@@ -49,6 +49,9 @@ namespace SeapowerMultiplayer
         private bool _foldProjectiles, _foldMissileState, _foldFlightOps;
         private bool _foldFireAuth, _foldCombatEvents, _foldDrift;
 
+        // Toggle for showing/hiding sync health section panels
+        private bool _syncPanelsVisible = true;
+
         // TF dropdown state
         private byte? _tfDropdownOpenFor; // which player's dropdown is open, null = none
 
@@ -754,13 +757,10 @@ namespace SeapowerMultiplayer
         {
             bool isPvP = Plugin.Instance.CfgPvP.Value;
 
-            // Master header with overall status
+            // Master header — foldout toggle for all sync panels
             var overall = ComputeOverallStatus();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("\u2500\u2500 Sync Health \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
-            GUILayout.FlexibleSpace();
-            GUILayout.Label(overall.ToString(), StatusStyle(overall));
-            GUILayout.EndHorizontal();
+            _syncPanelsVisible = DrawSectionHeader("Sync Health", _syncPanelsVisible, overall);
+            if (!_syncPanelsVisible) return;
 
             // Summary line
             GUILayout.Label($"RTT: {NetworkManager.Instance.LastRttMs} ms   Orders: {OrderDelayQueue.PendingCount} queued", _dimLabelStyle);
