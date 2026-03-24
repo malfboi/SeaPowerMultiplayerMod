@@ -24,8 +24,25 @@ namespace SeapowerMultiplayer
         private GUIStyle? _criticalStyle;
         private GUIStyle? _elevatedStyle;
         private GUIStyle? _sectionHeaderStyle;
+        private GUIStyle? _sectionTitleStyle;
         private GUIStyle? _dimLabelStyle;
+        private GUIStyle? _separatorStyle;
+        private GUIStyle? _popupBoxStyle;
+        private GUIStyle? _teamLabelStyle;
+        private GUIStyle? _dropdownBoxStyle;
+        private GUIStyle? _collapseButtonStyle;
         private bool _stylesInit = false;
+
+        // Procedural background textures (created once in InitStyles)
+        private Texture2D? _panelBgTex;
+        private Texture2D? _sectionBgTex;
+        private Texture2D? _btnNormalTex;
+        private Texture2D? _btnHoverTex;
+        private Texture2D? _btnActiveTex;
+        private Texture2D? _sepTex;
+        private Texture2D? _alertBgTex;
+        private Texture2D? _dropdownBgTex;
+        private Texture2D? _sectionTitleBgTex;
 
         // Cached unit counts (refreshed every 0.5s instead of every OnGUI frame)
         private float _unitCountTimer;
@@ -37,7 +54,7 @@ namespace SeapowerMultiplayer
         private static readonly FieldInfo _launchPlatformField =
             AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
 
-        private const int PanelWidth  = 280;
+        private const int PanelWidth  = 310;
         private const int Margin     = 10;
 
         // Auto-sized panel: track content height from previous frame
@@ -50,10 +67,13 @@ namespace SeapowerMultiplayer
         private bool _foldFireAuth, _foldCombatEvents, _foldDrift;
 
         // Toggle for showing/hiding sync health section panels
-        private bool _syncPanelsVisible = true;
+        private bool _syncPanelsVisible = false;
 
         // TF dropdown state
         private byte? _tfDropdownOpenFor; // which player's dropdown is open, null = none
+
+        // Panel expand/collapse state (clickable header toggle)
+        private bool _panelExpanded = true;
 
         // Overall sync status
         private enum SyncStatus { OK, Degraded, Issues }
@@ -124,45 +144,135 @@ namespace SeapowerMultiplayer
         {
             if (_stylesInit) return;
 
-            _boxStyle = new GUIStyle(GUI.skin.box)
+            // ── Procedural background textures ──────────────────────────────
+            _panelBgTex      = MakeRoundedTex(64, 64, new Color(0.055f, 0.08f,  0.130f, 0.68f), 8);
+            _sectionBgTex    = MakeRoundedTex(32, 32, new Color(0.095f, 0.135f, 0.205f, 0.55f), 4);
+            _sectionTitleBgTex = MakeRoundedTex(32, 32, new Color(0.10f, 0.16f, 0.255f, 0.52f), 4);
+            _btnNormalTex    = MakeRoundedTex(32, 32, new Color(0.13f,  0.195f, 0.315f, 0.62f), 4);
+            _btnHoverTex     = MakeRoundedTex(32, 32, new Color(0.19f,  0.275f, 0.430f, 0.75f), 4);
+            _btnActiveTex    = MakeRoundedTex(32, 32, new Color(0.25f,  0.375f, 0.560f, 0.85f), 4);
+            _sepTex          = MakeTex(4, 4, new Color(0.22f,  0.32f,  0.460f, 0.40f));
+            _alertBgTex      = MakeRoundedTex(64, 64, new Color(0.10f,  0.065f, 0.065f, 0.78f), 8);
+            _dropdownBgTex   = MakeRoundedTex(32, 32, new Color(0.07f,  0.10f,  0.155f, 0.72f), 6);
+
+            // ── Panel / box (main container) ─────────────────────────────────
+            _boxStyle = new GUIStyle()
             {
                 padding = new RectOffset(10, 10, 10, 10),
+                border  = new RectOffset(8, 8, 8, 8),
+                normal  = { background = _panelBgTex },
             };
 
+            // ── Vote popup box (alert style) ─────────────────────────────────
+            _popupBoxStyle = new GUIStyle()
+            {
+                padding = new RectOffset(14, 14, 12, 12),
+                border  = new RectOffset(8, 8, 8, 8),
+                normal  = { background = _alertBgTex },
+            };
+
+            // ── Title / version header ───────────────────────────────────────
             _headerStyle = new GUIStyle(GUI.skin.label)
             {
                 fontStyle = FontStyle.Bold,
-                fontSize  = 13,
-                normal    = { textColor = new Color(0.9f, 0.9f, 0.9f) },
+                fontSize  = 14,
+                padding   = new RectOffset(0, 0, 2, 2),
+                normal    = { textColor = new Color(0.82f, 0.91f, 1.00f) },
             };
 
+            // ── Regular body label ───────────────────────────────────────────
             _labelStyle = new GUIStyle(GUI.skin.label)
             {
                 fontSize = 11,
-                normal   = { textColor = new Color(0.85f, 0.85f, 0.85f) },
+                normal   = { textColor = new Color(0.78f, 0.85f, 0.92f) },
             };
 
-            _warningStyle  = MakeBoldLabel(new Color(1f, 0.7f, 0.2f));
-            _successStyle  = MakeBoldLabel(new Color(0.3f, 1f, 0.4f));
-            _elevatedStyle = MakeBoldLabel(new Color(1f, 1f, 0.3f));
-            _criticalStyle = MakeBoldLabel(new Color(1f, 0.3f, 0.3f));
+            // ── Dim / secondary text ─────────────────────────────────────────
+            _dimLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 10,
+                normal   = { textColor = new Color(0.46f, 0.52f, 0.62f) },
+            };
 
+            // ── Section divider title (Network / Players / Time Control) ─────
+            _sectionTitleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontStyle = FontStyle.Bold,
+                fontSize  = 11,
+                padding   = new RectOffset(6, 6, 4, 4),
+                margin    = new RectOffset(0, 0, 2, 2),
+                normal    = { textColor  = new Color(0.50f, 0.80f, 0.98f),
+                              background = _sectionTitleBgTex },
+            };
+
+            // ── Foldout section header (Sync Health subsections) ─────────────
             _sectionHeaderStyle = new GUIStyle(GUI.skin.label)
             {
                 fontStyle = FontStyle.Bold,
                 fontSize  = 11,
-                normal    = { textColor = new Color(0.75f, 0.85f, 0.95f) },
+                padding   = new RectOffset(4, 4, 3, 3),
+                normal    = { textColor  = new Color(0.48f, 0.76f, 0.96f),
+                              background = _sectionBgTex },
             };
 
-            _dimLabelStyle = new GUIStyle(GUI.skin.label)
+            // ── Team label (BLUE TEAM / RED TEAM) ────────────────────────────
+            _teamLabelStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 10,
-                normal   = { textColor = new Color(0.6f, 0.6f, 0.6f) },
+                fontStyle = FontStyle.Bold,
+                fontSize  = 10,
+                padding   = new RectOffset(4, 4, 3, 3),
+                normal    = { textColor = new Color(0.46f, 0.52f, 0.62f) },
             };
 
+            // ── Status / badge text ──────────────────────────────────────────
+            _warningStyle  = MakeBoldLabel(new Color(1.00f, 0.72f, 0.15f)); // Amber
+            _successStyle  = MakeBoldLabel(new Color(0.28f, 0.95f, 0.48f)); // Green
+            _elevatedStyle = MakeBoldLabel(new Color(1.00f, 1.00f, 0.28f)); // Yellow
+            _criticalStyle = MakeBoldLabel(new Color(1.00f, 0.28f, 0.28f)); // Red
+
+            // ── Buttons ──────────────────────────────────────────────────────
             _buttonStyle = new GUIStyle(GUI.skin.button)
             {
-                fontSize = 11,
+                fontSize    = 11,
+                fontStyle   = FontStyle.Bold,
+                fixedHeight = 24,
+                padding     = new RectOffset(8, 8, 4, 4),
+                border      = new RectOffset(4, 4, 4, 4),
+                normal      = { background = _btnNormalTex,
+                                textColor  = new Color(0.80f, 0.88f, 0.98f) },
+                hover       = { background = _btnHoverTex,
+                                textColor  = new Color(0.92f, 0.96f, 1.00f) },
+                active      = { background = _btnActiveTex,
+                                textColor  = new Color(1.00f, 1.00f, 1.00f) },
+            };
+
+            // ── Thin horizontal separator ────────────────────────────────────
+            _separatorStyle = new GUIStyle()
+            {
+                fixedHeight = 1,
+                margin      = new RectOffset(0, 0, 5, 5),
+                normal      = { background = _sepTex },
+            };
+
+            // ── TF dropdown box ─────────────────────────────────────────────
+            _dropdownBoxStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(4, 4, 4, 4),
+                border  = new RectOffset(6, 6, 6, 6),
+                normal  = { background = _dropdownBgTex },
+            };
+
+            // ── Collapse/expand toggle button (compact, no bg) ────────────
+            _collapseButtonStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize    = 16,
+                fontStyle   = FontStyle.Bold,
+                fixedWidth  = 24,
+                fixedHeight = 22,
+                alignment   = TextAnchor.MiddleCenter,
+                padding     = new RectOffset(0, 0, 0, 0),
+                normal      = { textColor = new Color(0.50f, 0.70f, 0.92f) },
+                hover       = { textColor = new Color(0.75f, 0.90f, 1.00f) },
             };
 
             _stylesInit = true;
@@ -174,6 +284,62 @@ namespace SeapowerMultiplayer
             fontStyle = FontStyle.Bold,
             normal    = { textColor = color },
         };
+
+        private static Texture2D MakeTex(int width, int height, Color col)
+        {
+            var pix = new Color[width * height];
+            for (int i = 0; i < pix.Length; i++) pix[i] = col;
+            var tex = new Texture2D(width, height);
+            tex.SetPixels(pix);
+            tex.Apply();
+            return tex;
+        }
+
+        /// <summary>
+        /// Creates a texture with rounded corners. The <paramref name="radius"/> controls
+        /// corner curvature (in pixels). Pixels outside the rounded rect are fully transparent.
+        /// </summary>
+        private static Texture2D MakeRoundedTex(int width, int height, Color fill, int radius)
+        {
+            var tex = new Texture2D(width, height, TextureFormat.ARGB32, false);
+            var clear = new Color(0, 0, 0, 0);
+            int r2 = radius * radius;
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    // Determine the closest corner center for SDF
+                    int cx = x < radius ? radius : (x >= width  - radius ? width  - 1 - radius : x);
+                    int cy = y < radius ? radius : (y >= height - radius ? height - 1 - radius : y);
+                    int dx = x - cx;
+                    int dy = y - cy;
+                    float dist2 = dx * dx + dy * dy;
+
+                    if (dist2 <= r2)
+                    {
+                        // Inside the rounded rect — apply slight AA at the edge
+                        float dist = Mathf.Sqrt(dist2);
+                        float edge = Mathf.Clamp01(radius - dist + 0.5f);
+                        tex.SetPixel(x, y, new Color(fill.r, fill.g, fill.b, fill.a * edge));
+                    }
+                    else
+                    {
+                        tex.SetPixel(x, y, clear);
+                    }
+                }
+            }
+            tex.Apply();
+            return tex;
+        }
+
+        // Draws a full-width styled section title bar (Network, Players, etc.)
+        private void DrawSectionTitle(string icon, string title)
+        {
+            GUILayout.Space(2);
+            GUILayout.Label($"{icon}  {title}", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Box("", _separatorStyle!, GUILayout.ExpandWidth(true));
+        }
 
         private void OnGUI()
         {
@@ -196,6 +362,18 @@ namespace SeapowerMultiplayer
                 _scrollPos = GUILayout.BeginScrollView(_scrollPos);
 
             DrawHeader();
+
+            // If panel is collapsed, only show the header
+            if (!_panelExpanded)
+            {
+                // Measure actual content height for next frame
+                if (Event.current.type == EventType.Repaint)
+                    _contentHeight = GUILayoutUtility.GetLastRect().yMax;
+
+                GUILayout.EndArea();
+                return;
+            }
+
             GUILayout.Space(4);
             DrawConnection();
             GUILayout.Space(6);
@@ -227,22 +405,26 @@ namespace SeapowerMultiplayer
         {
             if (!TimeSyncManager.HasPendingProposal) return;
 
-            const float popupWidth = 300f;
-            const float popupHeight = 100f;
-            float px = (Screen.width - popupWidth) / 2f;
+            const float popupWidth  = 320f;
+            const float popupHeight = 110f;
+            float px = (Screen.width  - popupWidth)  / 2f;
             float py = (Screen.height - popupHeight) / 2f;
 
-            GUILayout.BeginArea(new Rect(px, py, popupWidth, popupHeight), _boxStyle);
+            GUILayout.BeginArea(new Rect(px, py, popupWidth, popupHeight), _popupBoxStyle);
 
             bool isHost = Plugin.Instance.CfgIsHost.Value;
             string who = isHost ? "Client" : "Host";
-            GUILayout.Label($"{who} wants: {TimeSyncManager.ProposalDescription}", _warningStyle);
-            GUILayout.Space(4);
+
+            GUILayout.Label($"\u23f1  Time Change Request", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Space(6);
+            GUILayout.Label($"{who} proposes:  {TimeSyncManager.ProposalDescription}", _warningStyle);
+            GUILayout.Space(8);
 
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Agree", _buttonStyle))
+            if (GUILayout.Button("\u2714  Agree", _buttonStyle))
                 TimeSyncManager.AcceptProposal();
-            if (GUILayout.Button("Decline", _buttonStyle))
+            GUILayout.Space(6);
+            if (GUILayout.Button("\u2716  Decline", _buttonStyle))
                 TimeSyncManager.DeclineProposal();
             GUILayout.EndHorizontal();
 
@@ -254,12 +436,27 @@ namespace SeapowerMultiplayer
         private void DrawHeader()
         {
             GUILayout.BeginHorizontal();
+
+            // Collapse/expand toggle icon
+            string collapseIcon = _panelExpanded ? "\u25bc" : "\u25b6";
+            if (GUILayout.Button(collapseIcon, _collapseButtonStyle))
+                _panelExpanded = !_panelExpanded;
+
+            // Show overall sync status dot in header (green/yellow/red)
+            if (NetworkManager.Instance.IsConnected)
+            {
+                var overall = ComputeOverallStatus();
+                GUILayout.Label("\u25cf", StatusStyle(overall), GUILayout.Width(14));
+            }
+
             GUILayout.Label($"SeaPower MP  v{PluginInfo.PLUGIN_VERSION}", _headerStyle);
             GUILayout.FlexibleSpace();
             if (Plugin.Instance.CfgPvP.Value)
                 GUILayout.Label("PvP", _warningStyle);
-            GUILayout.Label("[Ctrl+F9]", _labelStyle);
             GUILayout.EndHorizontal();
+
+            if (_panelExpanded)
+                GUILayout.Box("", _separatorStyle!, GUILayout.ExpandWidth(true));
         }
 
         // ── Connection section ────────────────────────────────────────────────
@@ -282,7 +479,7 @@ namespace SeapowerMultiplayer
             string statusStr;
             Color statusCol;
 
-            GUILayout.Label("\u2500\u2500 Network \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
+            DrawSectionTitle("\u2302", "NETWORK");
 
             // Mode + status
             string modeStr   = isHost ? "HOST" : "CLIENT";
@@ -305,16 +502,17 @@ namespace SeapowerMultiplayer
 
             GUILayout.BeginHorizontal();
             GUILayout.Label($"Mode: {modeStr}", _labelStyle, GUILayout.Width(100));
+            GUILayout.FlexibleSpace();
             var prevColor = GUI.color;
             GUI.color = statusCol;
-            GUILayout.Label(statusStr, _labelStyle);
+            GUILayout.Label($"\u25cf  {statusStr}", _labelStyle);
             GUI.color = prevColor;
             GUILayout.EndHorizontal();
 
             // Ping
             if (isConnected)
             {
-                GUILayout.Label($"Ping: {NetworkManager.Instance.LastRttMs} ms", _labelStyle);
+                GUILayout.Label($"  Ping: {NetworkManager.Instance.LastRttMs} ms", _dimLabelStyle);
             }
             else
             {
@@ -379,13 +577,11 @@ namespace SeapowerMultiplayer
         {
             bool isConnected = NetworkManager.Instance.IsConnected;
             bool inLobby     = SteamLobbyManager.InLobby;
-
-            GUILayout.Label("\u2500\u2500 Network \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
-
-            // Mode + status
             string modeStr;
-            Color statusCol;
+            Color  statusCol;
             string statusStr;
+
+            DrawSectionTitle("\u2302", "NETWORK");
 
             if (isConnected)
             {
@@ -408,15 +604,16 @@ namespace SeapowerMultiplayer
 
             GUILayout.BeginHorizontal();
             GUILayout.Label($"Mode: {modeStr}", _labelStyle, GUILayout.Width(160));
+            GUILayout.FlexibleSpace();
             var prevColor = GUI.color;
             GUI.color = statusCol;
-            GUILayout.Label(statusStr, _labelStyle);
+            GUILayout.Label($"\u25cf  {statusStr}", _labelStyle);
             GUI.color = prevColor;
             GUILayout.EndHorizontal();
 
             if (isConnected)
             {
-                GUILayout.Label($"Ping: {NetworkManager.Instance.LastRttMs} ms", _labelStyle);
+                GUILayout.Label($"  Ping: {NetworkManager.Instance.LastRttMs} ms", _dimLabelStyle);
             }
             else if (inLobby)
             {
@@ -484,7 +681,7 @@ namespace SeapowerMultiplayer
 
         private void DrawPlayerList()
         {
-            GUILayout.Label("\u2500\u2500 Players \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
+            DrawSectionTitle("\u2694", "PLAYERS");
 
             bool isHost = NetworkManager.Instance.IsHost;
             bool isSteam = Plugin.Instance.CfgTransport.Value == "Steam";
@@ -519,14 +716,22 @@ namespace SeapowerMultiplayer
             }
 
             // Blue team
-            GUILayout.Label("BLUE TEAM", _sectionHeaderStyle);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("\u25cf", _sectionHeaderStyle, GUILayout.Width(14));
+            GUILayout.Label("BLUE TEAM", _teamLabelStyle);
+            GUILayout.EndHorizontal();
+            GUILayout.Box("", _separatorStyle!, GUILayout.ExpandWidth(true));
             foreach (var p in bluePlayers)
                 DrawPlayerEntry(p, isHost);
 
             GUILayout.Space(4);
 
             // Red team
-            GUILayout.Label("RED TEAM", _sectionHeaderStyle);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("\u25cf", _criticalStyle!, GUILayout.Width(14));
+            GUILayout.Label("RED TEAM", _teamLabelStyle);
+            GUILayout.EndHorizontal();
+            GUILayout.Box("", _separatorStyle!, GUILayout.ExpandWidth(true));
             foreach (var p in redPlayers)
                 DrawPlayerEntry(p, isHost);
         }
@@ -534,19 +739,22 @@ namespace SeapowerMultiplayer
         private void DrawPlayerEntry(PlayerInfo p, bool isHost)
         {
             string tfLabel = p.AssignedTfNames.Count == 0
-                ? "All"
+                ? "All Forces"
                 : $"{p.AssignedTfNames.Count} TF{(p.AssignedTfNames.Count > 1 ? "s" : "")}";
             string readyStr = p.IsReady ? " \u2713" : "";
             string localStr = p.PlayerId == PlayerRegistry.LocalPlayerId ? " (you)" : "";
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"  {p.DisplayName}{localStr}{readyStr}", _labelStyle, GUILayout.Width(100));
+            // Row 1: name + ready indicator
+            GUILayout.Label($"  {p.DisplayName}{localStr}{readyStr}", _labelStyle);
 
             if (isHost)
             {
+                // Row 2: force assignment + swap team
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(12);
+
                 // TF dropdown button
-                string btnText = $"TF: {tfLabel}";
-                if (GUILayout.Button(btnText, _buttonStyle, GUILayout.Width(100)))
+                if (GUILayout.Button(tfLabel, _buttonStyle, GUILayout.Width(120)))
                 {
                     if (_tfDropdownOpenFor == p.PlayerId)
                         _tfDropdownOpenFor = null;
@@ -554,20 +762,24 @@ namespace SeapowerMultiplayer
                         _tfDropdownOpenFor = p.PlayerId;
                 }
 
-                // Team swap button
-                string teamIcon = p.TeamSide == 0 ? "\u2192R" : "\u2192B";
-                if (GUILayout.Button(teamIcon, _buttonStyle, GUILayout.Width(30)))
+                GUILayout.Space(4);
+
+                // Team swap button — clear label with color hint
+                string swapLabel = p.TeamSide == 0 ? "\u21e8 Move to Red" : "\u21e8 Move to Blue";
+                if (GUILayout.Button(swapLabel, _buttonStyle))
                 {
                     PlayerRegistry.HostAssignTeam(p.PlayerId, (byte)(p.TeamSide == 0 ? 1 : 0));
                     _tfDropdownOpenFor = null;
                 }
+
+                GUILayout.EndHorizontal();
             }
             else
             {
-                GUILayout.Label($"TF: {tfLabel}", _dimLabelStyle, GUILayout.Width(100));
+                GUILayout.Label($"    {tfLabel}", _dimLabelStyle);
             }
 
-            GUILayout.EndHorizontal();
+            GUILayout.Space(2);
 
             // Draw dropdown list if open for this player
             if (isHost && _tfDropdownOpenFor == p.PlayerId)
@@ -578,7 +790,7 @@ namespace SeapowerMultiplayer
         {
             var options = PlayerRegistry.GetTeamGroups(p.TeamSide);
 
-            GUILayout.BeginVertical(GUI.skin.box, GUILayout.MaxWidth(PanelWidth - Margin * 2));
+            GUILayout.BeginVertical(_dropdownBoxStyle!, GUILayout.MaxWidth(PanelWidth - Margin * 2));
 
             // "All" option (clears selections)
             bool isAll = p.AssignedTfNames.Count == 0;
@@ -608,7 +820,7 @@ namespace SeapowerMultiplayer
 
         private void DrawTimeControls()
         {
-            GUILayout.Label("\u2500\u2500 Time Control \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500", _labelStyle);
+            DrawSectionTitle("\u23f1", "TIME CONTROL");
 
             float tc      = GameTime.TimeCompression;
             bool  paused  = GameTime.IsPaused();
@@ -743,12 +955,14 @@ namespace SeapowerMultiplayer
 
         private bool DrawSectionHeader(string label, bool foldout, SyncStatus status)
         {
+            string arrow  = foldout ? "\u25bc" : "\u25b6";
+            string dot    = status == SyncStatus.OK ? "\u25cf" : status == SyncStatus.Degraded ? "\u25cf" : "\u25cf";
+            GUIStyle dotStyle = StatusStyle(status);
+
             GUILayout.BeginHorizontal();
-            string arrow = foldout ? "\u25be" : "\u25b8";
-            if (GUILayout.Button($"{arrow} {label}", _sectionHeaderStyle))
+            if (GUILayout.Button($" {arrow}  {label}", _sectionHeaderStyle!, GUILayout.ExpandWidth(true)))
                 foldout = !foldout;
-            GUILayout.FlexibleSpace();
-            GUILayout.Label(status.ToString(), StatusStyle(status));
+            GUILayout.Label(dot, dotStyle, GUILayout.Width(16));
             GUILayout.EndHorizontal();
             return foldout;
         }
@@ -759,11 +973,12 @@ namespace SeapowerMultiplayer
 
             // Master header — foldout toggle for all sync panels
             var overall = ComputeOverallStatus();
-            _syncPanelsVisible = DrawSectionHeader("Sync Health", _syncPanelsVisible, overall);
+            DrawSectionTitle("\u21bb", "SYNC HEALTH");
+            _syncPanelsVisible = DrawSectionHeader("Details", _syncPanelsVisible, overall);
             if (!_syncPanelsVisible) return;
 
             // Summary line
-            GUILayout.Label($"RTT: {NetworkManager.Instance.LastRttMs} ms   Orders: {OrderDelayQueue.PendingCount} queued", _dimLabelStyle);
+            GUILayout.Label($"  RTT: {NetworkManager.Instance.LastRttMs} ms  \u00b7  Orders queued: {OrderDelayQueue.PendingCount}", _dimLabelStyle);
 
             GUILayout.Space(2);
 
