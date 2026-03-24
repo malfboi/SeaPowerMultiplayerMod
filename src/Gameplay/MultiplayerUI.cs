@@ -75,6 +75,9 @@ namespace SeapowerMultiplayer
         // Panel expand/collapse state (clickable header toggle)
         private bool _panelExpanded = true;
 
+        // Scroll hysteresis — prevents flicker when content is near the boundary
+        private bool _scrollActive = false;
+
         // Overall sync status
         private enum SyncStatus { OK, Degraded, Issues }
 
@@ -351,24 +354,41 @@ namespace SeapowerMultiplayer
             if (!_visible) return;
 
             float x = Screen.width - PanelWidth - Margin;
-            // Cap panel height to screen height minus margins, scroll if needed
             float maxHeight = Screen.height - Margin * 2;
-            float panelHeight = Mathf.Min(_contentHeight + 20f, maxHeight); // +20 for box padding
-            bool needsScroll = _contentHeight + 20f > maxHeight;
+            // Hysteresis: enter scroll at maxHeight, exit only when content shrinks 30px below
+            bool needsScroll = _scrollActive
+                ? _contentHeight > maxHeight - 30f
+                : _contentHeight > maxHeight;
+            _scrollActive = needsScroll;
 
-            GUILayout.BeginArea(new Rect(x, Margin, PanelWidth, panelHeight), _boxStyle);
+            // Outer area is just for positioning — transparent, full available height
+            GUILayout.BeginArea(new Rect(x, Margin, PanelWidth, maxHeight));
 
             if (needsScroll)
-                _scrollPos = GUILayout.BeginScrollView(_scrollPos);
+            {
+                _scrollPos = GUILayout.BeginScrollView(_scrollPos, false, false,
+                    GUIStyle.none, GUI.skin.verticalScrollbar, _boxStyle!,
+                    GUILayout.MaxHeight(maxHeight));
+                // Inner group so we can measure true content height (not clipped by scroll)
+                GUILayout.BeginVertical();
+            }
+            else
+            {
+                // Styled vertical group auto-sizes to content — no stale height
+                GUILayout.BeginVertical(_boxStyle);
+            }
 
             DrawHeader();
 
             // If panel is collapsed, only show the header
             if (!_panelExpanded)
             {
-                // Measure actual content height for next frame
+                GUILayout.EndVertical();
                 if (Event.current.type == EventType.Repaint)
-                    _contentHeight = GUILayoutUtility.GetLastRect().yMax;
+                    _contentHeight = GUILayoutUtility.GetLastRect().height;
+
+                if (needsScroll)
+                    GUILayout.EndScrollView();
 
                 GUILayout.EndArea();
                 return;
@@ -389,12 +409,13 @@ namespace SeapowerMultiplayer
             if (NetworkManager.Instance.IsConnected)
                 DrawSyncHealth();
 
+            // End the inner vertical — GetLastRect gives true content height
+            GUILayout.EndVertical();
+            if (Event.current.type == EventType.Repaint)
+                _contentHeight = GUILayoutUtility.GetLastRect().height;
+
             if (needsScroll)
                 GUILayout.EndScrollView();
-
-            // Measure actual content height for next frame
-            if (Event.current.type == EventType.Repaint)
-                _contentHeight = GUILayoutUtility.GetLastRect().yMax;
 
             GUILayout.EndArea();
         }
