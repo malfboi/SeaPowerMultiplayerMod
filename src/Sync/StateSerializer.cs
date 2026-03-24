@@ -949,6 +949,28 @@ namespace SeapowerMultiplayer
                         unit.InsertEngageTask(msg.AmmoId, target, targetPos, msg.ShotsToFire,
                                               priority, true, false, false);
 
+                        // Co-op client: immediately zero any reaction delay that InsertEngageTask
+                        // may have set synchronously. HandleEngageTasks.Postfix also zeroes each
+                        // frame, but this catches delays applied during InsertEngageTask itself
+                        // before the next HandleEngageTasks call.
+                        // NOTE: _sensorPreLaunchAligned is intentionally NOT forced here.
+                        // activatePreLaunchGuidance() (WeaponSystemLauncher.OnUpdate line 384)
+                        // sets it and starts FCR tracking; isAimedAtObject() is bypassed by
+                        // Patch_WeaponSystem_IsAimedAtObject instead.
+                        if (!Plugin.Instance.CfgPvP.Value && !Plugin.Instance.CfgIsHost.Value
+                            && unit._obp != null)
+                        {
+                            foreach (var ws in unit._obp._weaponSystems)
+                            {
+                                if (ws._executingEngageTask && ws._engageDelay > 0f)
+                                {
+                                    Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms IMMEDIATE_ZERO_DELAY " +
+                                        $"unit={unit.UniqueID} wasDelay={ws._engageDelay:F3}s");
+                                    ws._engageDelay = 0f;
+                                }
+                            }
+                        }
+
                         // Log weapon system state AFTER inserting
                         string wsStateAfter = "";
                         if (unit._obp != null)

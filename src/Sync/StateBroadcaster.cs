@@ -18,7 +18,7 @@ namespace SeapowerMultiplayer
         private const float LogInterval = 1.0f;
         private static readonly FieldInfo _launchPlatformField =
             AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
-        private static readonly WaitForSeconds _waitBroadcastCoop = new(0.5f);  // 2 Hz
+        private static readonly WaitForSeconds _waitBroadcastCoop = new(0.2f);  // 5 Hz — increased from 2 Hz to reduce AI visual lag in co-op
         private static readonly WaitForSeconds _waitBroadcastPvP  = new(0.1f);  // 10 Hz — tighter sync for carrier flight ops
 
         private void Start()

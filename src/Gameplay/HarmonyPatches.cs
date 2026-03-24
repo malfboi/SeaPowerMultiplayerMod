@@ -172,6 +172,13 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(Vessel), nameof(Vessel.setTelegraph))]
     public static class Patch_Vessel_SetTelegraph
     {
+        // Deduplication: the game calls setTelegraph() hundreds of times internally
+        // (task processing, alignment loops) when a single UI speed change occurs.
+        // Without this cache, every call would be broadcast as a separate network order.
+        private static readonly Dictionary<int, int> _lastSentTelegraph = new();
+        [System.ThreadStatic] private static bool _shouldSync;
+        internal static void ClearCache() => _lastSentTelegraph.Clear();
+
         static PlayerOrderMessage Msg(Vessel v, int telegraph) => new PlayerOrderMessage
         {
             SourceEntityId = v.UniqueID,
@@ -179,11 +186,21 @@ namespace SeapowerMultiplayer
             Speed          = telegraph,
         };
 
-        static bool Prefix(Vessel __instance, int telegraph) =>
-            OrderSyncHelper.Prefix(__instance, Msg(__instance, telegraph));
+        static bool Prefix(Vessel __instance, int telegraph)
+        {
+            _shouldSync = false;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (_lastSentTelegraph.TryGetValue(__instance.UniqueID, out int last) && last == telegraph) return true;
+            _lastSentTelegraph[__instance.UniqueID] = telegraph;
+            _shouldSync = true;
+            return OrderSyncHelper.Prefix(__instance, Msg(__instance, telegraph));
+        }
 
-        static void Postfix(Vessel __instance, int telegraph) =>
+        static void Postfix(Vessel __instance, int telegraph)
+        {
+            if (!_shouldSync) return;
             OrderSyncHelper.Postfix(__instance, Msg(__instance, telegraph));
+        }
     }
 
     // NOTE: Patch_Vessel_SetRudderAngle removed.
@@ -737,14 +754,106 @@ namespace SeapowerMultiplayer
 
             foreach (var ws in __instance._obp._weaponSystems)
             {
-                if (ws._executingEngageTask && ws._isAutoEngaging && ws._engageDelay > 0f)
+                // PvP: wait for _isAutoEngaging (weapon aligned) before zeroing — safe because
+                // all enemy auto-engage tasks come from the network.
+                // Co-op: zero as soon as _executingEngageTask is true, without waiting for
+                // _isAutoEngaging. _engageDelay is a post-assignment reaction time; alignment
+                // is a separate mechanical process that still runs. Zeroing early avoids a
+                // 0-2s reaction wait stacking on top of the alignment time on the client.
+                bool shouldZero = isPvP
+                    ? ws._executingEngageTask && ws._isAutoEngaging && ws._engageDelay > 0f
+                    : ws._executingEngageTask && ws._engageDelay > 0f;
+
+                if (shouldZero)
                 {
                     Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
                         $"unit={__instance.UniqueID} name={__instance.name} " +
-                        $"wasDelay={ws._engageDelay:F3}s");
+                        $"autoEngaging={ws._isAutoEngaging} wasDelay={ws._engageDelay:F3}s");
                     ws._engageDelay = 0f;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Co-op client: skip rail/launcher alignment for units the client is not authoritative
+    /// for (i.e. enemy AI units receiving AutoFireWeapon orders from the host).
+    ///
+    /// When the host broadcasts AutoFireWeapon, the client calls InsertEngageTask which starts
+    /// the WeaponSystem state machine: OpeningSystem → AligningLauncher → PreLaunchDelay → Launch.
+    /// Rail alignment (AligningLauncher) takes ~100-200ms of real time as the mount physically
+    /// slews to the target bearing. The host's weapon was already aligned before it broadcast
+    /// the order, so the client lags by alignment time + network latency.
+    ///
+    /// Returning true here makes the alignment check succeed immediately every frame, so the
+    /// state machine exits AligningLauncher on the very next update. _engageDelay is then
+    /// zeroed by Patch_ObjectBase_HandleEngageTasks.Postfix, and the weapon fires.
+    ///
+    /// The visual rail-rotation animation is skipped on the client for these units, which is
+    /// an acceptable tradeoff: the client is spectating the host's authoritative simulation.
+    /// PvP and co-op host paths are completely unaffected.
+    /// </summary>
+    [HarmonyPatch(typeof(WeaponSystem), "alignToTarget",
+        typeof(Vector3), typeof(bool), typeof(int), typeof(bool))]
+    public static class Patch_WeaponSystem_AlignToTarget
+    {
+        static bool Prefix(WeaponSystem __instance, ref bool __result)
+        {
+            // Only applies in co-op mode on the client
+            if (Plugin.Instance.CfgPvP.Value) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (SessionManager.SceneLoading) return true;
+
+            var unit = __instance._baseObject;
+            if (unit == null) return true;
+
+            // Skip only for units the client is NOT authoritative for — enemy AI whose
+            // orders come from the host. Player-assigned units animate normally.
+            if (PlayerRegistry.IsLocallyAuthoritative(unit)) return true;
+
+            // Report alignment as complete — skips AligningLauncher state this frame
+            __result = true;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Co-op client: skip the pre-launch FCR sensor alignment gate for non-authoritative units.
+    ///
+    /// WeaponSystemLauncher.OnUpdate (line 525) calls base.isAimedAtObject() to check whether
+    /// the fire control radar is physically slewed onto the target before permitting launch.
+    /// On the co-op client the host's units have their AI suppressed, so the FCR sensor is not
+    /// actively tracking; this causes the check to fail repeatedly and block launch until the
+    /// FCR physically slews to the target (potentially 100-300ms extra delay per shot).
+    ///
+    /// Returning true immediately mirrors the host's state where the FCR was already aimed
+    /// before the AutoFireWeapon order was sent. activatePreLaunchGuidance() is still called
+    /// each frame (because _sensorPreLaunchAligned was reset by the failed check), so the FCR
+    /// does eventually acquire the target for mid-course guidance — we just don't block on it.
+    ///
+    /// isAimedAtObject may be declared in BaseSystem (WeaponSystem's parent); AccessTools.Method
+    /// searches inherited methods and Harmony will patch whichever class declares it.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_WeaponSystem_IsAimedAtObject
+    {
+        static System.Reflection.MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(WeaponSystem), "isAimedAtObject");
+
+        static bool Prefix(WeaponSystem __instance, ref bool __result)
+        {
+            if (Plugin.Instance.CfgPvP.Value) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (SessionManager.SceneLoading) return true;
+
+            var unit = __instance._baseObject;
+            if (unit == null) return true;
+            if (PlayerRegistry.IsLocallyAuthoritative(unit)) return true;
+
+            __result = true;
+            return false;
         }
     }
 

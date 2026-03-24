@@ -85,6 +85,7 @@ namespace SeapowerMultiplayer
             CombatEventHandler.ClearDeathWatch();
             Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
+            Patch_Vessel_SetTelegraph.ClearCache();
             PlayerRegistry.Reset();
             _transport?.Stop();
             _transport = null;
