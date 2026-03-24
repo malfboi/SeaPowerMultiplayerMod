@@ -102,7 +102,7 @@ namespace SeapowerMultiplayer
                 }
             }
 
-            // No local match yet — queue for when the local projectile spawns
+            // No local match yet — queue the host ID, then try to force-spawn immediately
             if (!_pendingHostSpawns.TryGetValue(key, out var hostList))
             {
                 hostList = new List<PendingEntry>();
@@ -114,6 +114,11 @@ namespace SeapowerMultiplayer
                 SourceUnitId = sourceUnitId,
                 EnqueueTime = now,
             });
+
+            // Force-spawn a local missile directly from the unit's container so that
+            // OnLocalSpawn (triggered by CommonLaunchSettings Postfix) matches instantly
+            // instead of waiting for the engage-task pipeline (which can stall or fail).
+            TryForceSpawn(sourceUnitId, ammoName);
         }
 
         /// <summary>
@@ -156,6 +161,88 @@ namespace SeapowerMultiplayer
                 SourceUnitId = sourceUnitId,
                 EnqueueTime = now,
             });
+        }
+
+        /// <summary>
+        /// Directly launch a missile from an available container on the source unit,
+        /// bypassing all engage-task checks (target detection, ammo channel limits, etc.).
+        /// Called after queueing a host spawn entry so OnLocalSpawn can immediately match it.
+        /// </summary>
+        private static bool TryForceSpawn(int sourceUnitId, string ammoName)
+        {
+            var unit = StateSerializer.FindById(sourceUnitId);
+            if (unit == null || unit._obp == null)
+            {
+                Plugin.Log.LogWarning($"[ForceSpawn] Unit {sourceUnitId} not found for ammo={ammoName}");
+                return false;
+            }
+
+            // First pass: non-empty containers (fast path — no reload needed)
+            foreach (var ws in unit._obp._weaponSystems)
+            {
+                var launcher = ws as WeaponSystemLauncher;
+                if (launcher == null) continue;
+
+                for (int i = 0; i < launcher._containers.Count; i++)
+                {
+                    var container = launcher._containers[i];
+                    if (container.IsEmpty() || container._weapons.Count == 0) continue;
+
+                    var weapon = container._weapons[0];
+                    if (weapon?._ap?._ammunitionFileName != ammoName) continue;
+
+                    launcher.launch(i, null, unit.transform.position, Vector3.zero);
+                    Plugin.Log.LogInfo($"[ForceSpawn] Force-spawned ammo={ammoName} unit={sourceUnitId} container={i}");
+                    return true;
+                }
+            }
+
+            // Second pass: empty containers whose last-loaded ammo matches.
+            // This handles the reload-cycle gap: the container was fired (now empty) and hasn't
+            // finished reloading yet, but the host already fired another missile of the same type.
+            // We force-load one round directly so the match can proceed.
+            foreach (var ws in unit._obp._weaponSystems)
+            {
+                var launcher = ws as WeaponSystemLauncher;
+                if (launcher == null) continue;
+
+                // Magazine is shared across all containers in the launcher system
+                var magazine = launcher._vwp?._associatedMagazine;
+
+                for (int i = 0; i < launcher._containers.Count; i++)
+                {
+                    var container = launcher._containers[i];
+                    if (!container.IsEmpty()) continue;
+
+                    // _loadedAmmunition is set from the last load (magazine or non-magazine).
+                    // _initialAmmunition is set for non-magazine containers only.
+                    var ammoRef = container._loadedAmmunition ?? container._initialAmmunition;
+                    if (ammoRef?._ap?._ammunitionFileName != ammoName) continue;
+
+                    bool loaded = false;
+                    if (magazine != null)
+                    {
+                        // Magazine-based: temporarily top up by 1 so container.load() succeeds,
+                        // then load decrements it back — net effect: weapon created, magazine unchanged.
+                        magazine.increaseAmmunitionCount(ammoRef._ap._ammunitionFileName, 1);
+                        container.load(ammoRef);
+                        loaded = !container.IsEmpty();
+                    }
+                    else if (container._initialAmmunition != null)
+                    {
+                        loaded = container.LoadAmmo(1) > 0;
+                    }
+
+                    if (!loaded) continue;
+
+                    launcher.launch(i, null, unit.transform.position, Vector3.zero);
+                    Plugin.Log.LogInfo($"[ForceSpawn] Force-loaded+spawned ammo={ammoName} unit={sourceUnitId} container={i}");
+                    return true;
+                }
+            }
+
+            Plugin.Log.LogWarning($"[ForceSpawn] No loaded container for ammo={ammoName} unit={sourceUnitId}");
+            return false;
         }
 
         /// <summary>
@@ -274,7 +361,7 @@ namespace SeapowerMultiplayer
         private static void FindClosestUnmapped<T>(Vector3 hostPos, ref ObjectBase? bestMatch, ref float bestDist)
             where T : ObjectBase
         {
-            foreach (var p in Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
             {
                 if (p.IsDestroyed) continue;
                 if (_localToHost.ContainsKey(p.UniqueID)) continue;
