@@ -269,7 +269,9 @@ namespace SeapowerMultiplayer
                 case MessageType.ProjectileSpawn:
                 {
                     var msg = ProjectileSpawnMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnHostSpawnReceived(msg.HostProjectileId, msg.SourceUnitId, msg.AmmoName));
+                    _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnHostSpawnReceived(
+                        msg.HostProjectileId, msg.SourceUnitId, msg.AmmoName,
+                        msg.TargetEntityId, msg.TargetX, msg.TargetY, msg.TargetZ));
                     break;
                 }
 

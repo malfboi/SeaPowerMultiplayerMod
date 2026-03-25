@@ -919,13 +919,19 @@ namespace SeapowerMultiplayer
                     {
                         long recvMs = AIAutoFireState.DiagMs;
 
-                        // PvP: authorize enemy ship to spawn weapons from this order
+                        // PvP: authorize enemy ship to spawn weapons from this order.
+                        // The actual missile launch is handled by TryForceSpawn when the
+                        // ProjectileSpawnMessage arrives (at the correct time — when the remote
+                        // side actually fires). We skip InsertEngageTask to prevent the puppet
+                        // from firing too early (engage task with _engageDelay=0 fires before
+                        // the remote side's reaction delay expires).
                         if (Plugin.Instance.CfgPvP.Value
                             && unit._taskforce != Globals._playerTaskforce)
                         {
                             PvPFireAuth.Authorize(unit.UniqueID, msg.ShotsToFire);
                             Patch_ObjectBase_HandleEngageTasks.MarkNetworkOrdered(unit.UniqueID);
                             Plugin.Log.LogInfo($"[PvPAuth] AutoFire: authorized {msg.ShotsToFire} shots for unit {unit.UniqueID} ({unit.name}), total auth now={PvPFireAuth.ActiveAuthForUnit(unit.UniqueID)}");
+                            break; // TryForceSpawn via ProjectileSpawnMessage fires at the right time
                         }
 
                         ObjectBase? target = null;

@@ -67,11 +67,13 @@ namespace SeapowerMultiplayer
         // ── Spawn-time matching ───────────────────────────────────────────────
 
         /// <summary>
-        /// Called on client when a ProjectileSpawnMessage arrives from the host.
-        /// If a local projectile from the same source unit + ammo type is already waiting, match immediately.
-        /// Otherwise queue the host ID for when the local projectile spawns.
+        /// Called when a ProjectileSpawnMessage arrives (on either side in PvP, or on the client in co-op).
+        /// Attempts to match against an already-spawned local missile, or queues for later matching.
+        /// Then calls TryForceSpawn so a local missile is spawned immediately for ID-mapping purposes.
+        /// In PvP the spawn message includes target info so TryForceSpawn fires at the correct target.
         /// </summary>
-        public static void OnHostSpawnReceived(int hostProjectileId, int sourceUnitId, string ammoName)
+        public static void OnHostSpawnReceived(int hostProjectileId, int sourceUnitId, string ammoName,
+            int targetEntityId = 0, float targetX = 0f, float targetY = 0f, float targetZ = 0f)
         {
             // Already mapped? (e.g. IDs happen to align)
             if (_hostToLocal.ContainsKey(hostProjectileId)) return;
@@ -115,10 +117,33 @@ namespace SeapowerMultiplayer
                 EnqueueTime = now,
             });
 
+            // Resolve target from the message for guided missiles.
+            // In PvP, coordinates in the spawn message are geo-encoded (same as AutoFireWeapon orders).
+            ObjectBase? targetObject = null;
+            Vector3 targetPos = Vector3.zero;
+            bool hasTarget = false;
+            if (targetEntityId > 0 || targetX != 0f || targetY != 0f || targetZ != 0f)
+            {
+                hasTarget = true;
+                if (targetEntityId > 0)
+                    targetObject = StateSerializer.FindById(targetEntityId) ?? FindByHostId(targetEntityId);
+                if (Plugin.Instance.CfgPvP.Value)
+                {
+                    var geo = new GeoPosition { _longitude = targetX, _latitude = targetZ, _height = targetY };
+                    UnityEngine.Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                    targetPos = new Vector3(local.x, targetY, local.y);
+                }
+                else
+                {
+                    targetPos = new Vector3(targetX, targetY, targetZ);
+                }
+            }
+
             // Force-spawn a local missile directly from the unit's container so that
-            // OnLocalSpawn (triggered by CommonLaunchSettings Postfix) matches instantly
-            // instead of waiting for the engage-task pipeline (which can stall or fail).
-            TryForceSpawn(sourceUnitId, ammoName);
+            // OnLocalSpawn (triggered by CommonLaunchSettings Postfix) matches instantly.
+            // In PvP, this fires at the correct time (spawn message sent at fire time) with
+            // the correct target, replacing the too-early engage-task puppet fire.
+            TryForceSpawn(sourceUnitId, ammoName, hasTarget ? targetObject : null, hasTarget ? targetPos : (Vector3?)null);
         }
 
         /// <summary>
@@ -167,8 +192,11 @@ namespace SeapowerMultiplayer
         /// Directly launch a missile from an available container on the source unit,
         /// bypassing all engage-task checks (target detection, ammo channel limits, etc.).
         /// Called after queueing a host spawn entry so OnLocalSpawn can immediately match it.
+        /// If targetObject/targetPosition are provided the missile is guided; otherwise it
+        /// flies toward the unit's own position (acceptable for non-guided weapons or dummies).
         /// </summary>
-        private static bool TryForceSpawn(int sourceUnitId, string ammoName)
+        private static bool TryForceSpawn(int sourceUnitId, string ammoName,
+            ObjectBase? targetObject = null, Vector3? targetPosition = null)
         {
             var unit = StateSerializer.FindById(sourceUnitId);
             if (unit == null || unit._obp == null)
@@ -176,6 +204,10 @@ namespace SeapowerMultiplayer
                 Plugin.Log.LogWarning($"[ForceSpawn] Unit {sourceUnitId} not found for ammo={ammoName}");
                 return false;
             }
+
+            // Use provided target position, or fall back to launcher position (for non-guided).
+            var launchTarget = targetObject;
+            var launchPos    = targetPosition ?? unit.transform.position;
 
             // First pass: non-empty containers (fast path — no reload needed)
             foreach (var ws in unit._obp._weaponSystems)
@@ -191,7 +223,7 @@ namespace SeapowerMultiplayer
                     var weapon = container._weapons[0];
                     if (weapon?._ap?._ammunitionFileName != ammoName) continue;
 
-                    launcher.launch(i, null, unit.transform.position, Vector3.zero);
+                    launcher.launch(i, launchTarget, launchPos, Vector3.zero);
                     Plugin.Log.LogInfo($"[ForceSpawn] Force-spawned ammo={ammoName} unit={sourceUnitId} container={i}");
                     return true;
                 }
@@ -216,17 +248,26 @@ namespace SeapowerMultiplayer
 
                     // _loadedAmmunition is set from the last load (magazine or non-magazine).
                     // _initialAmmunition is set for non-magazine containers only.
+                    // If both are null (first-use, never loaded), fall through to the magazine
+                    // dictionary lookup below rather than skipping this container.
                     var ammoRef = container._loadedAmmunition ?? container._initialAmmunition;
-                    if (ammoRef?._ap?._ammunitionFileName != ammoName) continue;
+                    if (ammoRef != null && ammoRef._ap._ammunitionFileName != ammoName) continue;
 
                     bool loaded = false;
+                    bool isFirstUse = (ammoRef == null);
                     if (magazine != null)
                     {
                         // Magazine-based: temporarily top up by 1 so container.load() succeeds,
                         // then load decrements it back — net effect: weapon created, magazine unchanged.
-                        magazine.increaseAmmunitionCount(ammoRef._ap._ammunitionFileName, 1);
-                        container.load(ammoRef);
-                        loaded = !container.IsEmpty();
+                        // If ammoRef is still null (container never loaded), look it up from the magazine
+                        // dictionary directly so we handle the first-use case at the start of an engagement.
+                        var loadAmmo = ammoRef ?? magazine.getAmmunitionByName(ammoName);
+                        if (loadAmmo != null)
+                        {
+                            magazine.increaseAmmunitionCount(loadAmmo._ap._ammunitionFileName, 1);
+                            container.load(loadAmmo);
+                            loaded = !container.IsEmpty();
+                        }
                     }
                     else if (container._initialAmmunition != null)
                     {
@@ -235,8 +276,7 @@ namespace SeapowerMultiplayer
 
                     if (!loaded) continue;
 
-                    launcher.launch(i, null, unit.transform.position, Vector3.zero);
-                    Plugin.Log.LogInfo($"[ForceSpawn] Force-loaded+spawned ammo={ammoName} unit={sourceUnitId} container={i}");
+                    launcher.launch(i, launchTarget, launchPos, Vector3.zero);
                     return true;
                 }
             }

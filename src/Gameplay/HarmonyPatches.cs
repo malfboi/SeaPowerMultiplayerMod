@@ -1882,7 +1882,7 @@ namespace SeapowerMultiplayer
         internal static readonly Dictionary<int, float> ProjectileSpawnTimes = new();
         internal static void ClearSpawnTimes() => ProjectileSpawnTimes.Clear();
 
-        static void Postfix(WeaponBase __instance)
+        static void Postfix(WeaponBase __instance, ObjectBase targetObject, Vector3 targetPosition)
         {
             // Record spawn time for self-hit grace period (always, even if not connected)
             ProjectileSpawnTimes[__instance.UniqueID] = Time.time;
@@ -1925,12 +1925,19 @@ namespace SeapowerMultiplayer
                 }
                 else if (launcher != null)
                 {
-                    // Own projectile — send spawn ID + ammo name to other player
+                    // Own projectile — send spawn ID + ammo name + target to other player.
+                    // The receiver uses target info so TryForceSpawn fires at the correct target.
+                    // Coordinates are geo (floating-origin safe).
+                    var geo = Utils.worldPositionFromUnityToLongLat(targetPosition, Globals._currentCenterTile);
                     var spawnMsg = new ProjectileSpawnMessage
                     {
                         HostProjectileId = projectileId,
                         SourceUnitId     = sourceUnitId,
                         AmmoName         = ammoName,
+                        TargetEntityId   = targetObject?.UniqueID ?? 0,
+                        TargetX          = (float)geo._longitude,
+                        TargetY          = (float)geo._height,
+                        TargetZ          = (float)geo._latitude,
                     };
                     NetworkManager.Instance.SendToOther(spawnMsg, DeliveryMethod.ReliableOrdered);
                     Plugin.Log.LogInfo($"[Spawn] PvP own projectile: id={projectileId} source={sourceUnitId} ammo={ammoName}");
@@ -1938,12 +1945,16 @@ namespace SeapowerMultiplayer
             }
             else if (Plugin.Instance.CfgIsHost.Value)
             {
-                // Co-op host: broadcast spawn ID to client
+                // Co-op host: broadcast spawn ID + target to client
                 var msg = new ProjectileSpawnMessage
                 {
                     HostProjectileId = projectileId,
                     SourceUnitId     = sourceUnitId,
                     AmmoName         = ammoName,
+                    TargetEntityId   = targetObject?.UniqueID ?? 0,
+                    TargetX          = targetPosition.x,
+                    TargetY          = targetPosition.y,
+                    TargetZ          = targetPosition.z,
                 };
                 NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
                 Plugin.Log.LogInfo($"[Spawn] Host projectile: id={projectileId} source={sourceUnitId} ammo={ammoName}");
