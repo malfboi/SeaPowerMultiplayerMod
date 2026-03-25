@@ -244,14 +244,13 @@ namespace SeapowerMultiplayer
             }
         }
 
-        // ── PvP pending spawn cleanup (purges stale FIFO entries) ─────────
+        // ── Pending spawn cleanup (purges stale FIFO entries) ─────────────
         private IEnumerator PendingSpawnCleanupLoop()
         {
             var wait = new WaitForSeconds(1f);
             while (true)
             {
                 yield return wait;
-                if (!Plugin.Instance.CfgPvP.Value) continue;
                 if (!NetworkManager.Instance.IsConnected) continue;
                 ProjectileIdMapper.PurgeStaleEntries();
             }

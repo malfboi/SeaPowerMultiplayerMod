@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using LiteNetLib;
 using SeapowerMultiplayer.Messages;
 using UnityEngine;
@@ -58,6 +59,15 @@ namespace SeapowerMultiplayer
 
         // ── Infinite hard-sync loop suppression ─────────────────────────────
         private static int _lastHardSyncUnitDelta = -1;
+
+        // ── Cumulative breach detection ─────────────────────────────────────
+        private static readonly Queue<float> _breachTimestamps = new();
+
+        // ── Projectile spawn health tracking ────────────────────────────────
+        private static int _lastCheckedSpawnFailures;
+        private static int _lastCheckedSpawnSuccesses;
+        private static float _lastSpawnHealthCheckTime;
+        private const float SpawnHealthCheckInterval = 15f;  // check every 15s
 
         // ── Defaults ─────────────────────────────────────────────────────────
         private const float DefaultLerpFactor = 0.1f;
@@ -164,6 +174,9 @@ namespace SeapowerMultiplayer
                 _previousTier = DriftLevel;
             }
 
+            // Check projectile spawn health
+            CheckSpawnHealth();
+
             // Check hard sync triggers
             CheckHardSync();
         }
@@ -221,7 +234,34 @@ namespace SeapowerMultiplayer
             if (_hardSyncBreachStart < 0f)
             {
                 _hardSyncBreachStart = Time.time;
-                Plugin.Log.LogWarning($"[DriftDetector] Hard sync breach started — {reason}. Must persist for {confirmSec:F1}s to trigger.");
+
+                // Record breach timestamp for cumulative detection
+                _breachTimestamps.Enqueue(Time.time);
+                float window = Plugin.Instance.CfgHardSyncBreachWindowSec.Value;
+                while (_breachTimestamps.Count > 0 && Time.time - _breachTimestamps.Peek() > window)
+                    _breachTimestamps.Dequeue();
+
+                int threshold = Plugin.Instance.CfgHardSyncBreachCountThreshold.Value;
+                if (_breachTimestamps.Count >= threshold)
+                {
+                    // Cumulative breach threshold reached — trigger immediately
+                    int breachCount = _breachTimestamps.Count;
+                    HardSyncRequested = true;
+                    _lastHardSyncTime = Time.time;
+                    _hardSyncBreachStart = -1f;
+                    _lastHardSyncUnitDelta = UnitCountDelta;
+                    _breachTimestamps.Clear();
+
+                    Plugin.Log.LogWarning($"[DriftDetector] HARD SYNC TRIGGERED by cumulative breaches — {breachCount} breaches in {window:F0}s window (threshold={threshold}). Current: {reason}");
+                    Plugin.Log.LogWarning($"[DriftDetector]   Metrics: AvgDrift={AvgPositionDrift:F1}, MaxDrift={MaxPositionDrift:F1}, SpeedDrift={SpeedDriftAvg:F1}, UnitDelta={UnitCountDelta}, Tier={DriftLevel}, Trend={DriftTrend:F1}");
+                    NetworkManager.Instance.SendToServer(new GameEventMessage
+                    {
+                        EventType = GameEventType.HardSyncRequest,
+                    }, DeliveryMethod.ReliableOrdered);
+                    return;
+                }
+
+                Plugin.Log.LogWarning($"[DriftDetector] Hard sync breach started — {reason}. Must persist for {confirmSec:F1}s to trigger. (cumulative: {_breachTimestamps.Count}/{threshold} in {window:F0}s window)");
                 return;
             }
 
@@ -239,6 +279,28 @@ namespace SeapowerMultiplayer
                 {
                     EventType = GameEventType.HardSyncRequest,
                 }, DeliveryMethod.ReliableOrdered);
+            }
+        }
+
+        private static void CheckSpawnHealth()
+        {
+            if (Time.unscaledTime - _lastSpawnHealthCheckTime < SpawnHealthCheckInterval)
+                return;
+            _lastSpawnHealthCheckTime = Time.unscaledTime;
+
+            int currentFailures = ProjectileIdMapper.SpawnFailureCount;
+            int currentSuccesses = ProjectileIdMapper.SpawnSuccessCount;
+            int newFailures = currentFailures - _lastCheckedSpawnFailures;
+            int newSuccesses = currentSuccesses - _lastCheckedSpawnSuccesses;
+            _lastCheckedSpawnFailures = currentFailures;
+            _lastCheckedSpawnSuccesses = currentSuccesses;
+
+            // If 3+ spawn failures occurred in the last check interval with no successes,
+            // that's a sign of serious simulation divergence — inject a synthetic breach
+            if (newFailures >= 3 && newSuccesses == 0)
+            {
+                Plugin.Log.LogWarning($"[DriftDetector] Projectile spawn health POOR: {newFailures} failures, {newSuccesses} successes in last {SpawnHealthCheckInterval}s — injecting synthetic breach");
+                _breachTimestamps.Enqueue(Time.time);
             }
         }
 
@@ -266,6 +328,10 @@ namespace SeapowerMultiplayer
             _hardSyncBreachStart = -1f;
             _previousTier = DriftTier.Normal;
             _lastHardSyncUnitDelta = -1;
+            _breachTimestamps.Clear();
+            _lastCheckedSpawnFailures = 0;
+            _lastCheckedSpawnSuccesses = 0;
+            _lastSpawnHealthCheckTime = 0f;
             // Don't reset _lastHardSyncTime — preserve cooldown across resets
         }
     }

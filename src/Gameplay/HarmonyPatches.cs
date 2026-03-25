@@ -1299,11 +1299,11 @@ namespace SeapowerMultiplayer
 
         private static float GetMinInterval(OrderType order) => order switch
         {
-            OrderType.SensorToggle    => 2f,
+            OrderType.SensorToggle    => 10f,
             OrderType.RemoveWaypoints => 2f,
             OrderType.DeleteWaypoint  => 1f,
             OrderType.SetSpeed        => 0.5f,
-            OrderType.SetEMCON        => 2f,
+            OrderType.SetEMCON        => 10f,
             _                         => 0f,
         };
 

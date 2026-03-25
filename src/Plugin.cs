@@ -34,6 +34,8 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<int>   CfgHardSyncUnitDelta = null!;
         internal ConfigEntry<float> CfgHardSyncConfirmSec = null!;
         internal ConfigEntry<float> CfgHardSyncCooldown = null!;
+        internal ConfigEntry<float> CfgHardSyncBreachWindowSec = null!;
+        internal ConfigEntry<int>   CfgHardSyncBreachCountThreshold = null!;
 
         private Harmony _harmony = null!;
         private int _sceneReadyFrames;
@@ -61,6 +63,8 @@ namespace SeapowerMultiplayer
             CfgHardSyncUnitDelta  = Config.Bind("DriftCorrection", "HardSyncUnitDelta",  2,    "Unit count difference for hard sync trigger");
             CfgHardSyncConfirmSec = Config.Bind("DriftCorrection", "HardSyncConfirmSec", 25f,   "Seconds breach must persist before hard sync");
             CfgHardSyncCooldown   = Config.Bind("DriftCorrection", "HardSyncCooldown",   30f,  "Cooldown seconds between hard syncs");
+            CfgHardSyncBreachWindowSec      = Config.Bind("DriftCorrection", "HardSyncBreachWindowSec",      60f,  "Rolling window (seconds) for counting breach events");
+            CfgHardSyncBreachCountThreshold = Config.Bind("DriftCorrection", "HardSyncBreachCountThreshold", 3,    "Number of breaches within the window that trigger immediate hard sync");
 
             // Attach helper MonoBehaviours to this same GameObject
             gameObject.AddComponent<StateBroadcaster>();

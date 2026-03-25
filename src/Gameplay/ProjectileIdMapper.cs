@@ -72,12 +72,16 @@ namespace SeapowerMultiplayer
             _logThrottle.Clear();
             ClearSceneCache();
             StalePurgedCount = 0;
+            SpawnSuccessCount = 0;
+            SpawnFailureCount = 0;
         }
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
         public static int MappedCount => _hostToLocal.Count;
         public static int StalePurgedCount { get; private set; }
+        public static int SpawnSuccessCount { get; private set; }
+        public static int SpawnFailureCount { get; private set; }
         public static int PendingHostCount => _pendingHostTotal;
         public static int PendingLocalCount => _pendingLocalTotal;
 
@@ -115,6 +119,7 @@ namespace SeapowerMultiplayer
                     localQueue.Dequeue();
                     _pendingLocalTotal--;
                     Register(hostProjectileId, localId);
+                    SpawnSuccessCount++;
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (host msg arrived second): host {hostProjectileId} → local {localId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
                 }
@@ -159,6 +164,7 @@ namespace SeapowerMultiplayer
                     hostQueue.Dequeue();
                     _pendingHostTotal--;
                     Register(entry.Id, localProjectileId);
+                    SpawnSuccessCount++;
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (local spawned second): host {entry.Id} → local {localProjectileId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
                 }
@@ -191,7 +197,10 @@ namespace SeapowerMultiplayer
             {
                 var stale = queue.Dequeue();
                 if (isHostQueue)
+                {
                     _pendingHostTotal--;
+                    SpawnFailureCount++;
+                }
                 else
                     _pendingLocalTotal--;
                 StalePurgedCount++;
@@ -349,12 +358,17 @@ namespace SeapowerMultiplayer
         {
             // On client: reassign the local projectile's UniqueID to match the host's.
             // After this, FindById(hostId) works directly — no mapping lookup needed.
+            // Save/restore _UID to prevent SetUniqueId from polluting the game's global
+            // entity counter — without this, the client's counter jumps to the host's ID
+            // range, causing subsequent entity spawns to get wildly divergent IDs.
             if (NetworkManager.Instance.IsConnectedClient && hostId != localId)
             {
                 var obj = StateSerializer.FindById(localId);
                 if (obj != null)
                 {
+                    int prevUid = Singleton<SceneCreator>.Instance._UID;
                     obj.SetUniqueId(hostId);
+                    Singleton<SceneCreator>.Instance._UID = prevUid;
                     Plugin.Log.LogDebug($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
                     return;  // No mapping needed — IDs now match
                 }
