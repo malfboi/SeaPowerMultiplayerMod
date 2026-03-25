@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using SeaPower;
 using UnityEngine;
 
@@ -41,6 +42,19 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<(int, string), List<PendingEntry>> _pendingHostSpawns  = new();
         private static readonly Dictionary<(int, string), List<PendingEntry>> _pendingLocalSpawns = new();
 
+        // Scene projectile cache (avoids repeated FindObjectsByType calls per frame)
+        private static Missile[] _cachedMissiles;
+        private static Torpedo[] _cachedTorpedoes;
+        private static bool _cacheValid;
+
+        // Failed match tracking (stops retrying after MaxMatchAttempts)
+        private static readonly Dictionary<int, int> _failedMatchAttempts = new();
+        private const int MaxMatchAttempts = 20;
+
+        // Log throttling (suppresses duplicate warnings per host projectile ID)
+        private static readonly Dictionary<int, (float lastLogTime, int suppressedCount)> _logThrottle = new();
+        private const float LogThrottleInterval = 10f;
+
         /// <summary>Call on session load / disconnect to reset all mappings.</summary>
         public static void Clear()
         {
@@ -48,6 +62,9 @@ namespace SeapowerMultiplayer
             _localToHost.Clear();
             _pendingHostSpawns.Clear();
             _pendingLocalSpawns.Clear();
+            _failedMatchAttempts.Clear();
+            _logThrottle.Clear();
+            ClearSceneCache();
             StalePurgedCount = 0;
         }
 
@@ -186,6 +203,22 @@ namespace SeapowerMultiplayer
             list.RemoveRange(0, staleCount);
         }
 
+        /// <summary>Cache scene projectiles to avoid repeated FindObjectsByType calls.</summary>
+        public static void CacheSceneProjectiles()
+        {
+            _cachedMissiles = Object.FindObjectsByType<Missile>(FindObjectsSortMode.None);
+            _cachedTorpedoes = Object.FindObjectsByType<Torpedo>(FindObjectsSortMode.None);
+            _cacheValid = true;
+        }
+
+        /// <summary>Clear the scene projectile cache.</summary>
+        public static void ClearSceneCache()
+        {
+            _cachedMissiles = null;
+            _cachedTorpedoes = null;
+            _cacheValid = false;
+        }
+
         /// <summary>
         /// Periodic cleanup called from StateBroadcaster at 1Hz.
         /// Purges stale entries from both pending queues.
@@ -240,17 +273,17 @@ namespace SeapowerMultiplayer
         /// </summary>
         public static void UpdateMapping(int hostId, Vector3 hostPos)
         {
-            // Already mapped (likely via spawn-time matching)?
+            // Already mapped, PvP mode, or exceeded match attempts?
             if (_hostToLocal.ContainsKey(hostId)) return;
-
-            // PvP: skip proximity matching (spawn-time matching is sufficient)
             if (Plugin.Instance.CfgPvP.Value) return;
+            if (_failedMatchAttempts.TryGetValue(hostId, out var attempts) && attempts >= MaxMatchAttempts) return;
 
             // Try direct ID match first
             var direct = StateSerializer.FindById(hostId);
             if (direct != null && !direct.IsDestroyed && (direct is Missile || direct is Torpedo))
             {
                 Register(hostId, hostId);
+                _failedMatchAttempts.Remove(hostId);
                 return;
             }
 
@@ -263,20 +296,39 @@ namespace SeapowerMultiplayer
             if (bestMatch != null && bestDist < 2000f)
             {
                 Register(hostId, bestMatch.UniqueID);
+                _failedMatchAttempts.Remove(hostId);
                 Plugin.Log.LogDebug($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                return;
             }
-            else
+
+            // Track failed match attempt
+            _failedMatchAttempts[hostId] = (_failedMatchAttempts.TryGetValue(hostId, out var prev) ? prev : 0) + 1;
+
+            // Throttle log warnings (suppress duplicates, show count every LogThrottleInterval)
+            if (_logThrottle.TryGetValue(hostId, out var throttle) && Time.unscaledTime - throttle.lastLogTime < LogThrottleInterval)
             {
-                Plugin.Log.LogWarning($"[IdMapper] No local match for host projectile {hostId} at ({hostPos.x:F0},{hostPos.y:F0},{hostPos.z:F0}) bestDist={bestDist:F0}");
+                _logThrottle[hostId] = (throttle.lastLogTime, throttle.suppressedCount + 1);
+                return;
             }
+            string suffix = (throttle.suppressedCount > 0) ? $" (suppressed {throttle.suppressedCount} similar)" : "";
+            Plugin.Log.LogWarning($"[IdMapper] No local match for host projectile {hostId} at ({hostPos.x:F0},{hostPos.y:F0},{hostPos.z:F0}) bestDist={bestDist:F0}{suffix}");
+            _logThrottle[hostId] = (Time.unscaledTime, 0);
         }
 
         private static void FindClosestUnmapped<T>(Vector3 hostPos, ref ObjectBase? bestMatch, ref float bestDist)
             where T : ObjectBase
         {
-            foreach (var p in Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            IEnumerable<ObjectBase> projectiles;
+            if (_cacheValid && typeof(T) == typeof(Missile))
+                projectiles = _cachedMissiles;
+            else if (_cacheValid && typeof(T) == typeof(Torpedo))
+                projectiles = _cachedTorpedoes;
+            else
+                projectiles = Object.FindObjectsByType<T>(FindObjectsSortMode.None);
+
+            foreach (var p in projectiles)
             {
-                if (p.IsDestroyed) continue;
+                if (p == null || p.IsDestroyed) continue;
                 if (_localToHost.ContainsKey(p.UniqueID)) continue;
                 float dist = Vector3.Distance(p.transform.position, hostPos);
                 if (dist < bestDist)

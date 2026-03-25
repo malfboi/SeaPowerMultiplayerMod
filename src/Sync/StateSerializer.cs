@@ -562,41 +562,49 @@ namespace SeapowerMultiplayer
                 // Co-op: client-only projectile sync (unchanged)
                 if (isHost) return;
 
-                _currProjectileIds.Clear();
-                foreach (var proj in msg.Projectiles)
+                ProjectileIdMapper.CacheSceneProjectiles();
+                try
                 {
-                    _currProjectileIds.Add(proj.EntityId);
-
-                    var projWorldPos = new Vector3(proj.X, proj.Y, proj.Z);
-                    ProjectileIdMapper.UpdateMapping(proj.EntityId, projWorldPos);
-
-                    var p = ProjectileIdMapper.FindByHostId(proj.EntityId);
-                    if (p == null) continue;
-
-                    _projectileTargets[proj.EntityId] = new ProjectileTarget
+                    _currProjectileIds.Clear();
+                    foreach (var proj in msg.Projectiles)
                     {
-                        LocalId  = p.UniqueID,
-                        Position = projWorldPos,
-                        Heading  = proj.Heading,
-                    };
-                }
+                        _currProjectileIds.Add(proj.EntityId);
 
-                foreach (int id in _prevProjectileIds)
+                        var projWorldPos = new Vector3(proj.X, proj.Y, proj.Z);
+                        ProjectileIdMapper.UpdateMapping(proj.EntityId, projWorldPos);
+
+                        var p = ProjectileIdMapper.FindByHostId(proj.EntityId);
+                        if (p == null) continue;
+
+                        _projectileTargets[proj.EntityId] = new ProjectileTarget
+                        {
+                            LocalId  = p.UniqueID,
+                            Position = projWorldPos,
+                            Heading  = proj.Heading,
+                        };
+                    }
+
+                    foreach (int id in _prevProjectileIds)
+                    {
+                        if (_currProjectileIds.Contains(id)) continue;
+                        _projectileTargets.Remove(id);
+                        var obj = ProjectileIdMapper.FindByHostId(id);
+                        if (obj == null || obj.IsDestroyed) continue;
+
+                        CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
+                        ProjectileIdMapper.OnProjectileDestroyed(obj.UniqueID);
+                        ProjectilesDestroyedByTimeout++;
+                        Plugin.Log.LogDebug($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
+                    }
+
+                    var temp = _prevProjectileIds;
+                    _prevProjectileIds = _currProjectileIds;
+                    _currProjectileIds = temp;
+                }
+                finally
                 {
-                    if (_currProjectileIds.Contains(id)) continue;
-                    _projectileTargets.Remove(id);
-                    var obj = ProjectileIdMapper.FindByHostId(id);
-                    if (obj == null || obj.IsDestroyed) continue;
-
-                    CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
-                    ProjectileIdMapper.OnProjectileDestroyed(obj.UniqueID);
-                    ProjectilesDestroyedByTimeout++;
-                    Plugin.Log.LogDebug($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
+                    ProjectileIdMapper.ClearSceneCache();
                 }
-
-                var temp = _prevProjectileIds;
-                _prevProjectileIds = _currProjectileIds;
-                _currProjectileIds = temp;
             }
         }
 
@@ -730,14 +738,27 @@ namespace SeapowerMultiplayer
                 _projectileTargets.Remove(id);
         }
 
+        private static int _cachedLocalUnitCount;
+        private static float _lastUnitCountTime;
+        private const float UnitCountCacheInterval = 1f;
+
         private static int CountLocalUnits(Taskforce filterTf = null)
         {
+            if (filterTf == null && Time.unscaledTime - _lastUnitCountTime < UnitCountCacheInterval)
+                return _cachedLocalUnitCount;
+
             int count = 0;
             CountType<Vessel>(filterTf, ref count);
             CountType<Submarine>(filterTf, ref count);
             CountType<Aircraft>(filterTf, ref count);
             CountType<Helicopter>(filterTf, ref count);
             CountType<LandUnit>(filterTf, ref count);
+
+            if (filterTf == null)
+            {
+                _cachedLocalUnitCount = count;
+                _lastUnitCountTime = Time.unscaledTime;
+            }
             return count;
         }
 
@@ -825,6 +846,11 @@ namespace SeapowerMultiplayer
         /// </summary>
         internal static bool ApplyingFromNetwork;
 
+        private static readonly Dictionary<(int, Messages.OrderType), (float lastLogTime, int suppressedCount)> _logThrottle = new();
+        private const float LogInterval = 10f;
+
+        public static void ClearLogThrottle() => _logThrottle.Clear();
+
         public static void Apply(PlayerOrderMessage msg)
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
@@ -835,7 +861,18 @@ namespace SeapowerMultiplayer
                 Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found (order={msg.Order})");
                 return;
             }
-            Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}");
+
+            var logKey = (msg.SourceEntityId, msg.Order);
+            if (_logThrottle.TryGetValue(logKey, out var throttle) && Time.unscaledTime - throttle.lastLogTime < LogInterval)
+            {
+                _logThrottle[logKey] = (throttle.lastLogTime, throttle.suppressedCount + 1);
+            }
+            else
+            {
+                string suffix = (throttle.suppressedCount > 0) ? $" (suppressed {throttle.suppressedCount} similar)" : "";
+                Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}{suffix}");
+                _logThrottle[logKey] = (Time.unscaledTime, 0);
+            }
 
             ApplyingFromNetwork = true;
             OrderDeduplicator.UpdateCache(msg); // track received values so local patches won't re-send

@@ -23,7 +23,7 @@ namespace SeapowerMultiplayer
 
         private void Start()
         {
-            StartCoroutine(LogLoop());
+            // StartCoroutine(LogLoop());  // debug logging disabled
             StartCoroutine(BroadcastLoop());
             StartCoroutine(DamageCorrectionLoop());
             StartCoroutine(WaypointFlushLoop());

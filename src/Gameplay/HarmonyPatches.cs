@@ -1279,6 +1279,17 @@ namespace SeapowerMultiplayer
         }
 
         private static readonly Dictionary<(int, OrderType, int), Fingerprint> _cache = new();
+        private static readonly Dictionary<(int, OrderType, int), float> _lastSendTime = new();
+
+        private static float GetMinInterval(OrderType order) => order switch
+        {
+            OrderType.SensorToggle    => 2f,
+            OrderType.RemoveWaypoints => 2f,
+            OrderType.DeleteWaypoint  => 1f,
+            OrderType.SetSpeed        => 0.5f,
+            OrderType.SetEMCON        => 2f,
+            _                         => 0f,
+        };
 
         /// <summary>
         /// Returns true if the order differs from the last-sent value (should send).
@@ -1291,8 +1302,6 @@ namespace SeapowerMultiplayer
                 case OrderType.FireWeapon:
                 case OrderType.AutoFireWeapon:
                 case OrderType.CeaseFire:
-                case OrderType.RemoveWaypoints:
-                case OrderType.DeleteWaypoint:
                 case OrderType.DropSonobuoy:
                 case OrderType.SubmarineMast:
                     return true;
@@ -1304,17 +1313,29 @@ namespace SeapowerMultiplayer
             if (_cache.TryGetValue(key, out var last) && last.Matches(fp))
                 return false;
 
+            float minInterval = GetMinInterval(msg.Order);
+            if (minInterval > 0f && _lastSendTime.TryGetValue(key, out var lastTime) &&
+                Time.unscaledTime - lastTime < minInterval)
+                return false;
+
             _cache[key] = fp;
+            _lastSendTime[key] = Time.unscaledTime;
             return true;
         }
 
         /// <summary>Update cache without checking (for network-received orders).</summary>
         internal static void UpdateCache(PlayerOrderMessage msg)
         {
-            _cache[MakeKey(msg)] = MakeFingerprint(msg);
+            var key = MakeKey(msg);
+            _cache[key] = MakeFingerprint(msg);
+            _lastSendTime[key] = Time.unscaledTime;
         }
 
-        internal static void Clear() => _cache.Clear();
+        internal static void Clear()
+        {
+            _cache.Clear();
+            _lastSendTime.Clear();
+        }
 
         private static (int, OrderType, int) MakeKey(PlayerOrderMessage msg)
         {
@@ -1483,18 +1504,21 @@ namespace SeapowerMultiplayer
             {
                 if (OrderHandler.ApplyingFromNetwork) return;
                 if (unit.UniqueID == 0) return;
+                if (SessionManager.SceneLoading) return;
 
                 var msg = OrderSyncHelper.SensorMsg(unit, 2, active);
 
                 if (Plugin.Instance.CfgIsHost.Value)
                 {
-                    if (NetworkManager.Instance != null && NetworkManager.Instance.IsConnected)
+                    if (NetworkManager.Instance != null && NetworkManager.Instance.IsConnected &&
+                        OrderDeduplicator.ShouldSend(msg))
                         NetworkManager.Instance.BroadcastToClients(msg);
                 }
                 else
                 {
                     if (TaskforceAssignmentManager.ClientMayControl(unit) &&
-                        NetworkManager.Instance != null)
+                        NetworkManager.Instance != null &&
+                        OrderDeduplicator.ShouldSend(msg))
                         NetworkManager.Instance.SendToServer(msg);
                 }
             });
