@@ -1786,6 +1786,11 @@ namespace SeapowerMultiplayer
         private static readonly HashSet<int> _sentMissileImpacts = new();
         internal static void ClearMissileImpacts() => _sentMissileImpacts.Clear();
 
+        private static int _suppressedPvpHitCount;
+        private static float _lastSuppressedPvpHitLogTime;
+        private static int _suppressedHitCount;
+        private static float _lastSuppressedHitLogTime;
+
         private static readonly FieldInfo _blastzoneWeaponField =
             AccessTools.Field(typeof(Blastzone), "_weapon");
         private static readonly FieldInfo _launchPlatformField =
@@ -1821,7 +1826,13 @@ namespace SeapowerMultiplayer
             {
                 if (hitObject._taskforce != SeaPower.Globals._playerTaskforce)
                 {
-                    Plugin.Log.LogInfo($"[Combat] PvP: Suppressed OnHitUnit for enemy unit {hitObject.UniqueID}");
+                    _suppressedPvpHitCount++;
+                    if (Time.unscaledTime - _lastSuppressedPvpHitLogTime > 10f)
+                    {
+                        Plugin.Log.LogInfo($"[Combat] PvP: Suppressed {_suppressedPvpHitCount} OnHitUnit for enemy units");
+                        _suppressedPvpHitCount = 0;
+                        _lastSuppressedPvpHitLogTime = Time.unscaledTime;
+                    }
                     return false;
                 }
                 return true;
@@ -1830,7 +1841,13 @@ namespace SeapowerMultiplayer
             // Co-op: only host runs combat
             if (CombatSyncHelper.ShouldSuppress())
             {
-                Plugin.Log.LogInfo($"[Combat] Suppressed OnHitUnit for {hitObject.UniqueID} on client");
+                _suppressedHitCount++;
+                if (Time.unscaledTime - _lastSuppressedHitLogTime > 10f)
+                {
+                    Plugin.Log.LogInfo($"[Combat] Suppressed {_suppressedHitCount} OnHitUnit calls on client");
+                    _suppressedHitCount = 0;
+                    _lastSuppressedHitLogTime = Time.unscaledTime;
+                }
                 return false;
             }
             return true;

@@ -56,6 +56,9 @@ namespace SeapowerMultiplayer
         // ── Tier transition tracking ────────────────────────────────────────
         private static DriftTier _previousTier = DriftTier.Normal;
 
+        // ── Infinite hard-sync loop suppression ─────────────────────────────
+        private static int _lastHardSyncUnitDelta = -1;
+
         // ── Defaults ─────────────────────────────────────────────────────────
         private const float DefaultLerpFactor = 0.1f;
         private const float DefaultDriftThreshold = 5f;
@@ -188,6 +191,16 @@ namespace SeapowerMultiplayer
                 return;
             }
 
+            // Suppress infinite loop: if only unit count is breached (no position drift)
+            // and the delta is identical to what caused the last hard sync, skip.
+            // This prevents repeated hard syncs when a counting bug persists after reload.
+            if (unitBreached && !driftBreached && UnitCountDelta == _lastHardSyncUnitDelta)
+            {
+                Plugin.Log.LogWarning($"[DriftDetector] Hard sync SUPPRESSED — unit delta {UnitCountDelta} is identical to last hard sync trigger. Possible counting bug; avoiding infinite loop.");
+                _hardSyncBreachStart = -1f;
+                return;
+            }
+
             // Cooldown check
             if (Time.time - _lastHardSyncTime < cooldown)
             {
@@ -218,6 +231,7 @@ namespace SeapowerMultiplayer
                 HardSyncRequested = true;
                 _lastHardSyncTime = Time.time;
                 _hardSyncBreachStart = -1f;
+                _lastHardSyncUnitDelta = UnitCountDelta;
 
                 Plugin.Log.LogWarning($"[DriftDetector] HARD SYNC TRIGGERED after {elapsed:F1}s breach — {reason}");
                 Plugin.Log.LogWarning($"[DriftDetector]   Metrics: AvgDrift={AvgPositionDrift:F1}, MaxDrift={MaxPositionDrift:F1}, SpeedDrift={SpeedDriftAvg:F1}, UnitDelta={UnitCountDelta}, Tier={DriftLevel}, Trend={DriftTrend:F1}");
@@ -251,6 +265,7 @@ namespace SeapowerMultiplayer
             _unitCount = 0;
             _hardSyncBreachStart = -1f;
             _previousTier = DriftTier.Normal;
+            _lastHardSyncUnitDelta = -1;
             // Don't reset _lastHardSyncTime — preserve cooldown across resets
         }
     }

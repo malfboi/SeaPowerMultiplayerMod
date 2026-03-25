@@ -103,6 +103,7 @@ namespace SeapowerMultiplayer
         }
 
         private bool _loggedWaitingForSceneCreator;
+        private int _sceneReadyPollCount;
 
         private void Update()
         {
@@ -152,7 +153,9 @@ namespace SeapowerMultiplayer
 
                 if (scExists && !loadDone && _sceneReadyFrames == 0)
                 {
-                    Log.LogInfo("[SceneReady] SceneCreator exists, IsLoadingDone=false, waiting...");
+                    _sceneReadyPollCount++;
+                    if (_sceneReadyPollCount == 1 || _sceneReadyPollCount % 60 == 0)
+                        Log.LogInfo($"[SceneReady] SceneCreator exists, IsLoadingDone=false, waiting... (poll #{_sceneReadyPollCount})");
                 }
 
                 if (loadDone)
@@ -163,6 +166,9 @@ namespace SeapowerMultiplayer
                     if (_sceneReadyFrames >= SceneSettleFrames)
                     {
                         Log.LogInfo("[SceneReady] Settle complete, calling OnSceneReady()");
+                        if (_sceneReadyPollCount > 1)
+                            Log.LogInfo($"[SceneReady] Loading complete after {_sceneReadyPollCount} polls");
+                        _sceneReadyPollCount = 0;
                         _sceneReadyFrames = 0;
                         _loggedWaitingForSceneCreator = false;
                         SessionManager.OnSceneReady();

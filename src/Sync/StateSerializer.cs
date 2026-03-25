@@ -888,6 +888,9 @@ namespace SeapowerMultiplayer
         /// </summary>
         internal static bool ApplyingFromNetwork;
 
+        private static int _orderNotFoundCount;
+        private static float _lastOrderNotFoundLogTime;
+
         private static readonly Dictionary<(int, Messages.OrderType), (float lastLogTime, int suppressedCount)> _logThrottle = new();
         private const float LogInterval = 10f;
 
@@ -900,7 +903,13 @@ namespace SeapowerMultiplayer
             var unit = StateSerializer.FindById(msg.SourceEntityId);
             if (unit == null)
             {
-                Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found (order={msg.Order})");
+                _orderNotFoundCount++;
+                if (Time.unscaledTime - _lastOrderNotFoundLogTime > 10f)
+                {
+                    Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found (order={msg.Order}) — {_orderNotFoundCount} total missed");
+                    _orderNotFoundCount = 0;
+                    _lastOrderNotFoundLogTime = Time.unscaledTime;
+                }
                 return;
             }
 

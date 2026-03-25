@@ -54,6 +54,7 @@ namespace SeapowerMultiplayer
 
             // Reset sync health counters on host side too
             UnitRegistry.Clear();
+            UnitRegistry.PopulateFromScene();
             CombatEventHandler.ResetCounters();
             MissileStateSyncHandler.ResetCounters();
             StateApplier.ResetOrphanTracking();
