@@ -28,7 +28,12 @@ namespace SeapowerMultiplayer.Messages
     {
         public MessageType Type => MessageType.MissileStateSync;
 
-        public List<MissileStateEntry> Entries = new();
+        public List<MissileStateEntry> Entries = new(32);
+
+        public void Reset()
+        {
+            Entries.Clear();
+        }
 
         public void Serialize(NetDataWriter w)
         {

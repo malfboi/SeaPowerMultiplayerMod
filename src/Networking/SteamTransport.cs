@@ -20,6 +20,7 @@ namespace SeapowerMultiplayer.Transport
 
         private const int MaxMessages = 64;
         private readonly IntPtr[] _messagePointers = new IntPtr[MaxMessages];
+        private readonly byte[] _receiveBuffer = new byte[512 * 1024]; // 512KB
 
         // ── Fragmentation ────────────────────────────────────────────────────
         // SteamNetworkingSockets has a ~512KB per-message limit. Session sync
@@ -191,7 +192,7 @@ namespace SeapowerMultiplayer.Transport
             }
         }
 
-        private void SendRaw(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
+        private unsafe void SendRaw(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
         {
             int flags = delivery switch
             {
@@ -202,18 +203,12 @@ namespace SeapowerMultiplayer.Transport
                 _ => Constants.k_nSteamNetworkingSend_Reliable,
             };
 
-            GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
-            try
+            fixed (byte* ptr = data)
             {
-                IntPtr ptr = handle.AddrOfPinnedObject();
                 EResult result = SteamNetworkingSockets.SendMessageToConnection(
-                    conn, ptr, (uint)length, flags, out _);
+                    conn, (IntPtr)ptr, (uint)length, flags, out _);
                 if (result != EResult.k_EResultOK)
                     Log.LogError($"[SteamTransport] Send failed: {result}, size={length}");
-            }
-            finally
-            {
-                handle.Free();
             }
         }
 
@@ -225,8 +220,17 @@ namespace SeapowerMultiplayer.Transport
             {
                 var msg = SteamNetworkingMessage_t.FromIntPtr(_messagePointers[i]);
                 int length = msg.m_cbSize;
-                byte[] data = new byte[length];
-                Marshal.Copy(msg.m_pData, data, 0, length);
+                byte[] data;
+                if (length <= _receiveBuffer.Length)
+                {
+                    Marshal.Copy(msg.m_pData, _receiveBuffer, 0, length);
+                    data = _receiveBuffer;
+                }
+                else
+                {
+                    data = new byte[length];
+                    Marshal.Copy(msg.m_pData, data, 0, length);
+                }
 
                 SteamNetworkingMessage_t.Release(_messagePointers[i]);
 

@@ -1,6 +1,4 @@
 using System.Collections;
-using System.Reflection;
-using HarmonyLib;
 using LiteNetLib;
 using SeaPower;
 using SeapowerMultiplayer.Messages;
@@ -16,10 +14,9 @@ namespace SeapowerMultiplayer
     public class StateBroadcaster : MonoBehaviour
     {
         private const float LogInterval = 1.0f;
-        private static readonly FieldInfo _launchPlatformField =
-            AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
         private static readonly WaitForSeconds _waitBroadcastCoop = new(0.5f);  // 2 Hz
         private static readonly WaitForSeconds _waitBroadcastPvP  = new(0.1f);  // 10 Hz — tighter sync for carrier flight ops
+        private static readonly MissileStateSyncMessage _pooledMissileMsg = new();
 
         private void Start()
         {
@@ -50,20 +47,21 @@ namespace SeapowerMultiplayer
 
         private static void LogAllVessels()
         {
-            LogUnits<Vessel>    ("Vessel");
-            LogUnits<Submarine> ("Submarine");
-            LogUnits<Aircraft>  ("Aircraft");
-            LogUnits<Helicopter>("Helicopter");
-            LogUnits<LandUnit>  ("LandUnit");
+            LogUnits("Vessel",     UnitRegistry.Vessels);
+            LogUnits("Submarine",  UnitRegistry.Submarines);
+            LogUnits("Aircraft",   UnitRegistry.AircraftList);
+            LogUnits("Helicopter", UnitRegistry.Helicopters);
+            LogUnits("LandUnit",   UnitRegistry.LandUnits);
         }
 
-        private static void LogUnits<T>(string label) where T : ObjectBase
+        private static void LogUnits<T>(string label, System.Collections.Generic.IReadOnlyList<T> units) where T : ObjectBase
         {
-            var units = Object.FindObjectsByType<T>(FindObjectsSortMode.None);
-            if (units.Length == 0) return;
-            Plugin.Log.LogInfo($"[{label}] count={units.Length}");
-            foreach (var u in units)
+            if (units.Count == 0) return;
+            Plugin.Log.LogInfo($"[{label}] count={units.Count}");
+            for (int i = 0; i < units.Count; i++)
             {
+                var u = units[i];
+                if (u == null) continue;
                 var pos = u.transform.position;
                 Plugin.Log.LogInfo(
                     $"  uid={u.UniqueID}" +
@@ -160,15 +158,16 @@ namespace SeapowerMultiplayer
 
         private static void BroadcastDamageCorrections(bool isPvP)
         {
-            SendCorrections<Vessel>(isPvP);
-            SendCorrections<Submarine>(isPvP);
+            SendCorrections(isPvP, UnitRegistry.Vessels);
+            SendCorrections(isPvP, UnitRegistry.Submarines);
         }
 
-        private static void SendCorrections<T>(bool isPvP) where T : ObjectBase
+        private static void SendCorrections<T>(bool isPvP, System.Collections.Generic.IReadOnlyList<T> units) where T : ObjectBase
         {
-            foreach (var unit in Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            for (int i = 0; i < units.Count; i++)
             {
-                if (unit.IsDestroyed) continue;
+                var unit = units[i];
+                if (unit == null || unit.IsDestroyed) continue;
                 var comps = unit.Compartments;
                 if (comps == null) continue;
 
@@ -199,17 +198,19 @@ namespace SeapowerMultiplayer
                 var playerTf = SeaPower.Globals._playerTaskforce;
                 if (playerTf == null) continue;
 
-                var missiles = Object.FindObjectsByType<Missile>(FindObjectsSortMode.None);
-                if (missiles.Length == 0) continue;
+                var missiles = UnitRegistry.Missiles;
+                if (missiles.Count == 0) continue;
 
-                var msg = new MissileStateSyncMessage();
+                var msg = _pooledMissileMsg;
+                msg.Reset();
 
-                foreach (var m in missiles)
+                for (int i = 0; i < missiles.Count; i++)
                 {
-                    if (m.IsDestroyed) continue;
+                    var m = missiles[i];
+                    if (m == null || m.IsDestroyed) continue;
 
                     // Owner authority: send state for missiles launched by my units
-                    var launcher = _launchPlatformField?.GetValue(m) as ObjectBase;
+                    var launcher = StateSerializer.GetLaunchPlatform(m);
                     if (launcher == null || launcher._taskforce != playerTf) continue;
 
                     // Encode position as absolute GeoPosition (floating-origin safe)

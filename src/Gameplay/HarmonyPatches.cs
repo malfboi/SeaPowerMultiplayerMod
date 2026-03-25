@@ -13,6 +13,22 @@ using VesselStates;
 
 namespace SeapowerMultiplayer
 {
+    // ── UnitRegistry lifecycle hooks ────────────────────────────────────────
+    // Harmony patches ObjectBase.Awake (non-virtual, public) and OnDestroy (private)
+    // to maintain the UnitRegistry without per-frame FindObjectsByType calls.
+
+    [HarmonyPatch(typeof(ObjectBase), "Awake")]
+    public static class Patch_ObjectBase_Register
+    {
+        static void Postfix(ObjectBase __instance) => UnitRegistry.Register(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), "OnDestroy")]
+    public static class Patch_ObjectBase_Unregister
+    {
+        static void Postfix(ObjectBase __instance) => UnitRegistry.Unregister(__instance);
+    }
+
     // ── Client physics: targeted null-guard patches ────────────────────────
     //
     // After save-file load, SpeedCommand.Value is null (only set when

@@ -76,40 +76,47 @@ namespace SeapowerMultiplayer
             _ownVessels = _ownSubs = _ownAir = _ownLand = _ownMissiles = _ownTorps = 0;
             _enemyVessels = _enemySubs = _enemyAir = _enemyLand = _enemyMissiles = _enemyTorps = 0;
 
-            foreach (var v in Object.FindObjectsByType<Vessel>(FindObjectsSortMode.None))
+            foreach (var v in UnitRegistry.Vessels)
             {
+                if (v == null) continue;
                 if (isPvP && playerTf != null && v._taskforce == playerTf) _ownVessels++;
                 else _enemyVessels++;
             }
-            foreach (var s in Object.FindObjectsByType<Submarine>(FindObjectsSortMode.None))
+            foreach (var s in UnitRegistry.Submarines)
             {
+                if (s == null) continue;
                 if (isPvP && playerTf != null && s._taskforce == playerTf) _ownSubs++;
                 else _enemySubs++;
             }
-            foreach (var a in Object.FindObjectsByType<Aircraft>(FindObjectsSortMode.None))
+            foreach (var a in UnitRegistry.AircraftList)
             {
+                if (a == null) continue;
                 if (isPvP && playerTf != null && a._taskforce == playerTf) _ownAir++;
                 else _enemyAir++;
             }
-            foreach (var h in Object.FindObjectsByType<Helicopter>(FindObjectsSortMode.None))
+            foreach (var h in UnitRegistry.Helicopters)
             {
+                if (h == null) continue;
                 if (isPvP && playerTf != null && h._taskforce == playerTf) _ownAir++;
                 else _enemyAir++;
             }
-            foreach (var l in Object.FindObjectsByType<LandUnit>(FindObjectsSortMode.None))
+            foreach (var l in UnitRegistry.LandUnits)
             {
+                if (l == null) continue;
                 if (isPvP && playerTf != null && l._taskforce == playerTf) _ownLand++;
                 else _enemyLand++;
             }
-            foreach (var m in Object.FindObjectsByType<Missile>(FindObjectsSortMode.None))
+            foreach (var m in UnitRegistry.Missiles)
             {
-                var launcher = _launchPlatformField?.GetValue(m) as ObjectBase;
+                if (m == null) continue;
+                var launcher = StateSerializer.GetLaunchPlatform(m);
                 if (isPvP && playerTf != null && launcher != null && launcher._taskforce == playerTf) _ownMissiles++;
                 else _enemyMissiles++;
             }
-            foreach (var t in Object.FindObjectsByType<Torpedo>(FindObjectsSortMode.None))
+            foreach (var t in UnitRegistry.Torpedoes)
             {
-                var launcher = _launchPlatformField?.GetValue(t) as ObjectBase;
+                if (t == null) continue;
+                var launcher = StateSerializer.GetLaunchPlatform(t);
                 if (isPvP && playerTf != null && launcher != null && launcher._taskforce == playerTf) _ownTorps++;
                 else _enemyTorps++;
             }
@@ -220,14 +227,9 @@ namespace SeapowerMultiplayer
                 {
                     _lastLockedUnitId = lockedId;
                     UnitLockManager.SetRemoteLockedUnit(null);
-                    foreach (var obj in UnityEngine.Object.FindObjectsOfType<SeaPower.ObjectBase>())
-                    {
-                        if (obj.UniqueID == lockedId)
-                        {
-                            UnitLockManager.SetRemoteLockedUnit(obj);
-                            break;
-                        }
-                    }
+                    var found = StateSerializer.FindById(lockedId);
+                    if (found != null)
+                        UnitLockManager.SetRemoteLockedUnit(found);
                 }
 
                 var lockedUnit = UnitLockManager.RemoteLockedUnit;

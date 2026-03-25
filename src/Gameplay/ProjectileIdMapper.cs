@@ -38,9 +38,13 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<int, int> _hostToLocal = new(); // hostId → localId
         private static readonly Dictionary<int, int> _localToHost = new(); // localId → hostId
 
-        // Spawn-time matching lists (per source unit + ammo type, FIFO with stale-skipping)
-        private static readonly Dictionary<(int, string), List<PendingEntry>> _pendingHostSpawns  = new();
-        private static readonly Dictionary<(int, string), List<PendingEntry>> _pendingLocalSpawns = new();
+        // Spawn-time matching queues (per source unit + ammo type, FIFO with stale-skipping)
+        private static readonly Dictionary<(int, string), Queue<PendingEntry>> _pendingHostSpawns  = new();
+        private static readonly Dictionary<(int, string), Queue<PendingEntry>> _pendingLocalSpawns = new();
+
+        // Running totals for pending counts (avoids iterating all queues)
+        private static int _pendingHostTotal;
+        private static int _pendingLocalTotal;
 
         // Scene projectile cache (avoids repeated FindObjectsByType calls per frame)
         private static Missile[] _cachedMissiles;
@@ -62,6 +66,8 @@ namespace SeapowerMultiplayer
             _localToHost.Clear();
             _pendingHostSpawns.Clear();
             _pendingLocalSpawns.Clear();
+            _pendingHostTotal = 0;
+            _pendingLocalTotal = 0;
             _failedMatchAttempts.Clear();
             _logThrottle.Clear();
             ClearSceneCache();
@@ -72,14 +78,8 @@ namespace SeapowerMultiplayer
 
         public static int MappedCount => _hostToLocal.Count;
         public static int StalePurgedCount { get; private set; }
-        public static int PendingHostCount
-        {
-            get { int t = 0; foreach (var q in _pendingHostSpawns.Values) t += q.Count; return t; }
-        }
-        public static int PendingLocalCount
-        {
-            get { int t = 0; foreach (var q in _pendingLocalSpawns.Values) t += q.Count; return t; }
-        }
+        public static int PendingHostCount => _pendingHostTotal;
+        public static int PendingLocalCount => _pendingLocalTotal;
 
         // ── Spawn-time matching ───────────────────────────────────────────────
 
@@ -106,13 +106,14 @@ namespace SeapowerMultiplayer
 
             // Check if a local projectile from this source + ammo is waiting for a match
             // Skip stale entries first
-            if (_pendingLocalSpawns.TryGetValue(key, out var localList))
+            if (_pendingLocalSpawns.TryGetValue(key, out var localQueue))
             {
-                SkipStaleEntries(localList, now, revokeAuth: false);
-                if (localList.Count > 0)
+                SkipStaleEntries(localQueue, now, revokeAuth: false, isHostQueue: false);
+                if (localQueue.Count > 0)
                 {
-                    int localId = localList[0].Id;
-                    localList.RemoveAt(0);
+                    int localId = localQueue.Peek().Id;
+                    localQueue.Dequeue();
+                    _pendingLocalTotal--;
                     Register(hostProjectileId, localId);
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (host msg arrived second): host {hostProjectileId} → local {localId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
@@ -120,17 +121,18 @@ namespace SeapowerMultiplayer
             }
 
             // No local match yet — queue for when the local projectile spawns
-            if (!_pendingHostSpawns.TryGetValue(key, out var hostList))
+            if (!_pendingHostSpawns.TryGetValue(key, out var hostQueue))
             {
-                hostList = new List<PendingEntry>();
-                _pendingHostSpawns[key] = hostList;
+                hostQueue = new Queue<PendingEntry>();
+                _pendingHostSpawns[key] = hostQueue;
             }
-            hostList.Add(new PendingEntry
+            hostQueue.Enqueue(new PendingEntry
             {
                 Id = hostProjectileId,
                 SourceUnitId = sourceUnitId,
                 EnqueueTime = now,
             });
+            _pendingHostTotal++;
         }
 
         /// <summary>
@@ -148,13 +150,14 @@ namespace SeapowerMultiplayer
 
             // Check if a host spawn from this source + ammo is waiting for a match
             // Skip stale entries first
-            if (_pendingHostSpawns.TryGetValue(key, out var hostList))
+            if (_pendingHostSpawns.TryGetValue(key, out var hostQueue))
             {
-                SkipStaleEntries(hostList, now, revokeAuth: true);
-                if (hostList.Count > 0)
+                SkipStaleEntries(hostQueue, now, revokeAuth: true, isHostQueue: true);
+                if (hostQueue.Count > 0)
                 {
-                    var entry = hostList[0];
-                    hostList.RemoveAt(0);
+                    var entry = hostQueue.Peek();
+                    hostQueue.Dequeue();
+                    _pendingHostTotal--;
                     Register(entry.Id, localProjectileId);
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (local spawned second): host {entry.Id} → local {localProjectileId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
@@ -162,52 +165,51 @@ namespace SeapowerMultiplayer
             }
 
             // No host match yet — queue for when the host message arrives
-            if (!_pendingLocalSpawns.TryGetValue(key, out var localList))
+            if (!_pendingLocalSpawns.TryGetValue(key, out var localQueue))
             {
-                localList = new List<PendingEntry>();
-                _pendingLocalSpawns[key] = localList;
+                localQueue = new Queue<PendingEntry>();
+                _pendingLocalSpawns[key] = localQueue;
             }
-            localList.Add(new PendingEntry
+            localQueue.Enqueue(new PendingEntry
             {
                 Id = localProjectileId,
                 SourceUnitId = sourceUnitId,
                 EnqueueTime = now,
             });
+            _pendingLocalTotal++;
         }
 
         /// <summary>
-        /// Remove stale entries from the front of a pending list.
-        /// revokeAuth should be true for host spawn lists (their auth was never consumed),
-        /// false for local spawn lists (their auth was already consumed via ConsumeAuth).
+        /// Remove stale entries from the front of a pending queue.
+        /// revokeAuth should be true for host spawn queues (their auth was never consumed),
+        /// false for local spawn queues (their auth was already consumed via ConsumeAuth).
+        /// isHostQueue indicates which running counter to decrement.
         /// </summary>
-        private static void SkipStaleEntries(List<PendingEntry> list, float now, bool revokeAuth)
+        private static void SkipStaleEntries(Queue<PendingEntry> queue, float now, bool revokeAuth, bool isHostQueue)
         {
-            // Find the first non-stale entry
-            int staleCount = 0;
-            while (staleCount < list.Count && (now - list[staleCount].EnqueueTime) > StaleTimeout)
-                staleCount++;
-
-            if (staleCount == 0) return;
-
-            // Log and revoke auth for each stale entry
-            for (int i = 0; i < staleCount; i++)
+            while (queue.Count > 0 && (now - queue.Peek().EnqueueTime) > StaleTimeout)
             {
-                var stale = list[i];
+                var stale = queue.Dequeue();
+                if (isHostQueue)
+                    _pendingHostTotal--;
+                else
+                    _pendingLocalTotal--;
                 StalePurgedCount++;
                 if (revokeAuth && Plugin.Instance.CfgPvP.Value)
                     PvPFireAuth.Revoke(stale.SourceUnitId, 1);
                 Plugin.Log.LogWarning($"[IdMapper] Purged stale pending entry: id={stale.Id} source={stale.SourceUnitId} age={now - stale.EnqueueTime:F1}s");
             }
-
-            // Batch remove for O(n) instead of O(n^2)
-            list.RemoveRange(0, staleCount);
         }
 
         /// <summary>Cache scene projectiles to avoid repeated FindObjectsByType calls.</summary>
         public static void CacheSceneProjectiles()
         {
-            _cachedMissiles = Object.FindObjectsByType<Missile>(FindObjectsSortMode.None);
-            _cachedTorpedoes = Object.FindObjectsByType<Torpedo>(FindObjectsSortMode.None);
+            var missileList = UnitRegistry.Missiles;
+            _cachedMissiles = new Missile[missileList.Count];
+            for (int i = 0; i < missileList.Count; i++) _cachedMissiles[i] = missileList[i];
+            var torpedoList = UnitRegistry.Torpedoes;
+            _cachedTorpedoes = new Torpedo[torpedoList.Count];
+            for (int i = 0; i < torpedoList.Count; i++) _cachedTorpedoes[i] = torpedoList[i];
             _cacheValid = true;
         }
 
@@ -227,10 +229,10 @@ namespace SeapowerMultiplayer
         {
             float now = Time.unscaledTime;
 
-            foreach (var list in _pendingHostSpawns.Values)
-                SkipStaleEntries(list, now, revokeAuth: true);
-            foreach (var list in _pendingLocalSpawns.Values)
-                SkipStaleEntries(list, now, revokeAuth: false);
+            foreach (var queue in _pendingHostSpawns.Values)
+                SkipStaleEntries(queue, now, revokeAuth: true, isHostQueue: true);
+            foreach (var queue in _pendingLocalSpawns.Values)
+                SkipStaleEntries(queue, now, revokeAuth: false, isHostQueue: false);
         }
 
         // ── Lookup ────────────────────────────────────────────────────────────
@@ -323,8 +325,12 @@ namespace SeapowerMultiplayer
                 projectiles = _cachedMissiles;
             else if (_cacheValid && typeof(T) == typeof(Torpedo))
                 projectiles = _cachedTorpedoes;
+            else if (typeof(T) == typeof(Missile))
+                projectiles = UnitRegistry.Missiles;
+            else if (typeof(T) == typeof(Torpedo))
+                projectiles = UnitRegistry.Torpedoes;
             else
-                projectiles = Object.FindObjectsByType<T>(FindObjectsSortMode.None);
+                projectiles = UnitRegistry.All;
 
             foreach (var p in projectiles)
             {

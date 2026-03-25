@@ -11,6 +11,7 @@ namespace SeapowerMultiplayer.Transport
         private NetManager? _net;
         private NetPeer? _serverPeer;
         private bool _isHost;
+        private readonly byte[] _receiveBuffer = new byte[512 * 1024]; // 512KB
 
         private static ManualLogSource Log => Plugin.Log;
 
@@ -113,8 +114,17 @@ namespace SeapowerMultiplayer.Transport
         {
             // Copy the data out before the reader is recycled (AutoRecycle = true)
             int length = reader.AvailableBytes;
-            byte[] data = new byte[length];
-            Buffer.BlockCopy(reader.RawData, reader.Position, data, 0, length);
+            byte[] data;
+            if (length <= _receiveBuffer.Length)
+            {
+                Buffer.BlockCopy(reader.RawData, reader.Position, _receiveBuffer, 0, length);
+                data = _receiveBuffer;
+            }
+            else
+            {
+                data = new byte[length];
+                Buffer.BlockCopy(reader.RawData, reader.Position, data, 0, length);
+            }
             OnDataReceived?.Invoke(data, length);
         }
 

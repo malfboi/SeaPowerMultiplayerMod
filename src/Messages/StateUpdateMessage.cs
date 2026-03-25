@@ -23,8 +23,16 @@ namespace SeapowerMultiplayer.Messages
 
         public long  Timestamp;
         public float GameSeconds;  // total seconds since midnight (Hour*3600 + Minutes*60 + Seconds)
-        public List<UnitState>       Units       = new();
-        public List<ProjectileState> Projectiles = new();
+        public List<UnitState>       Units       = new(64);
+        public List<ProjectileState> Projectiles = new(32);
+
+        public void Reset()
+        {
+            Timestamp = 0;
+            GameSeconds = 0;
+            Units.Clear();
+            Projectiles.Clear();
+        }
 
         public void Serialize(NetDataWriter w)
         {

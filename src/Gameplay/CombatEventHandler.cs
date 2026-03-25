@@ -16,6 +16,17 @@ namespace SeapowerMultiplayer
         /// <summary>True while applying a combat event from network. Guards Harmony patches.</summary>
         internal static bool ApplyingFromNetwork;
 
+        // ── Incremental dead-unit tracking (D2) ─────────────────────────────
+        // Instead of scanning all scene objects each kill-resync tick, we maintain
+        // a set of own-side unit IDs confirmed dead and iterate that instead.
+        private static readonly HashSet<int> _confirmedDeadOwnUnits = new();
+
+        /// <summary>Record a dead own-side unit for periodic kill resync.</summary>
+        internal static void TrackDeadUnit(int unitId) => _confirmedDeadOwnUnits.Add(unitId);
+
+        /// <summary>Clear the dead-unit tracking set (call on scene load/reset).</summary>
+        internal static void ClearDeadUnitTracking() => _confirmedDeadOwnUnits.Clear();
+
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
         public static int EventsReceived { get; private set; }
@@ -26,7 +37,7 @@ namespace SeapowerMultiplayer
         // The attacker's "missile died" arrives before the missile reaches us.
         // Delay destruction so the local sim has time to resolve impact/damage.
         private const float PvpDestroyDelay = 3f;
-        private static readonly List<(int id, float destroyAt)> _delayedDestroys = new();
+        private static readonly Queue<(int id, float destroyAt)> _delayedDestroys = new();
 
         // ── PvP: deferred unit-death watch ───────────────────────────────────
         // When an enemy weapon hits our unit (OnHitUnit) without immediately killing it,
@@ -55,6 +66,7 @@ namespace SeapowerMultiplayer
         {
             _deathWatch.Clear();
             _lastKillResync = 0f;
+            _confirmedDeadOwnUnits.Clear();
         }
 
         /// <summary>Called from Plugin.Update() each frame.</summary>
@@ -63,12 +75,11 @@ namespace SeapowerMultiplayer
             float now = Time.unscaledTime;
 
             // Delayed projectile destroys
-            for (int i = _delayedDestroys.Count - 1; i >= 0; i--)
+            while (_delayedDestroys.Count > 0)
             {
-                var (id, destroyAt) = _delayedDestroys[i];
-                if (now < destroyAt) continue;
-
-                _delayedDestroys.RemoveAt(i);
+                var (id, destroyAt) = _delayedDestroys.Peek();
+                if (now < destroyAt) break;
+                _delayedDestroys.Dequeue();
                 var obj = StateSerializer.FindById(id);
                 if (obj == null || obj.IsDestroyed) continue;
 
@@ -101,6 +112,8 @@ namespace SeapowerMultiplayer
                             TargetEntityId = kvp.Key,
                             SourceEntityId = 0,
                         });
+                        // Track for incremental kill resync
+                        TrackDeadUnit(kvp.Key);
                         if (unit != null)
                         {
                             // Silence sensors so radar stops being a target immediately.
@@ -117,19 +130,18 @@ namespace SeapowerMultiplayer
                 foreach (var id in _deathWatchRemove) _deathWatch.Remove(id);
             }
 
-            // Periodic kill resync: re-broadcast all dead own-side units so the
-            // remote machine catches any UnitDestroyed it may have missed.
+            // Periodic kill resync: re-broadcast all confirmed dead own-side units so
+            // the remote machine catches any UnitDestroyed it may have missed.
+            // Uses the incremental _confirmedDeadOwnUnits set instead of scanning all objects.
             if (now - _lastKillResync > KillResyncInterval)
             {
                 _lastKillResync = now;
-                foreach (var obj in UnityEngine.Object.FindObjectsByType<ObjectBase>(UnityEngine.FindObjectsSortMode.None))
+                foreach (var deadId in _confirmedDeadOwnUnits)
                 {
-                    if (obj._taskforce != Globals._playerTaskforce) continue;
-                    if (!obj.IsDestroyed && !obj._externalDestructionNotified) continue;
                     CombatSyncHelper.Send(new CombatEventMessage
                     {
                         EventType      = CombatEventType.UnitDestroyed,
-                        TargetEntityId = obj.UniqueID,
+                        TargetEntityId = deadId,
                         SourceEntityId = 0,
                     });
                 }
@@ -176,6 +188,10 @@ namespace SeapowerMultiplayer
                 unit.setDestroyedFlag(false, TacView.TCEvent.Destroyed);
                 Log.LogInfo($"[Combat] Destroyed LandUnit {unit.UniqueID} ({unit.name}) via setDestroyedFlag");
             }
+
+            // Track own-side dead units for incremental kill resync (D2)
+            if (unit._taskforce == Globals._playerTaskforce)
+                TrackDeadUnit(unit.UniqueID);
 
             DisableSensors(unit);
         }
@@ -237,7 +253,7 @@ namespace SeapowerMultiplayer
                         // the delayed action becomes a no-op (IsDestroyed check).
                         if (Plugin.Instance.CfgPvP.Value)
                         {
-                            _delayedDestroys.Add((msg.TargetEntityId, Time.unscaledTime + PvpDestroyDelay));
+                            _delayedDestroys.Enqueue((msg.TargetEntityId, Time.unscaledTime + PvpDestroyDelay));
                             Log.LogDebug($"[Combat] PvP: Delaying ProjectileDestroyed for {msg.TargetEntityId} by {PvpDestroyDelay}s");
                             return;
                         }

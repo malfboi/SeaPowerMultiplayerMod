@@ -1,3 +1,5 @@
+using System.IO;
+using System.IO.Compression;
 using System.Text;
 using LiteNetLib.Utils;
 
@@ -44,29 +46,49 @@ namespace SeapowerMultiplayer.Messages
         }
 
         /// <summary>
-        /// Write a string as int32-length-prefixed UTF-8 bytes.
-        /// LiteNetLib's Put(string) uses ushort length (max 65535 bytes),
-        /// which is too small for save files.
+        /// Write a string as GZip-compressed UTF-8 bytes with int32 length headers.
+        /// Format: [uncompressed length (int)] [compressed length (int)] [compressed bytes (length-prefixed)]
         /// </summary>
         private static void PutLargeString(NetDataWriter w, string value)
         {
             if (string.IsNullOrEmpty(value))
             {
-                w.Put(0);
+                w.Put(0); // uncompressed length = 0
                 return;
             }
-            byte[] bytes = Encoding.UTF8.GetBytes(value);
-            w.Put(bytes.Length);
-            w.Put(bytes);
+            byte[] raw = Encoding.UTF8.GetBytes(value);
+            byte[] compressed;
+            using (var ms = new MemoryStream())
+            {
+                using (var gz = new GZipStream(ms, CompressionLevel.Fastest))
+                    gz.Write(raw, 0, raw.Length);
+                compressed = ms.ToArray();
+            }
+            w.Put(raw.Length);        // int32: uncompressed byte count
+            w.Put(compressed.Length); // int32: compressed byte count
+            w.Put(compressed);        // raw bytes (no length prefix — avoids ushort overflow)
         }
 
         private static string GetLargeString(NetDataReader r)
         {
-            int length = r.GetInt();
-            if (length <= 0) return "";
-            byte[] bytes = new byte[length];
-            r.GetBytes(bytes, length);
-            return Encoding.UTF8.GetString(bytes);
+            int uncompressedLen = r.GetInt();
+            if (uncompressedLen <= 0) return "";
+            int compressedLen = r.GetInt();
+            byte[] compressed = new byte[compressedLen];
+            r.GetBytes(compressed, compressedLen);
+            byte[] raw = new byte[uncompressedLen];
+            using (var ms = new MemoryStream(compressed))
+            using (var gz = new GZipStream(ms, CompressionMode.Decompress))
+            {
+                int offset = 0;
+                while (offset < uncompressedLen)
+                {
+                    int read = gz.Read(raw, offset, uncompressedLen - offset);
+                    if (read == 0) break;
+                    offset += read;
+                }
+            }
+            return Encoding.UTF8.GetString(raw, 0, uncompressedLen);
         }
     }
 }
