@@ -27,6 +27,7 @@ namespace SeapowerMultiplayer
     public static class ProjectileIdMapper
     {
         private const float StaleTimeout = 15f; // real seconds before a pending entry is considered stale
+        private const float HardSyncGracePeriod = 0.5f;  // seconds — defer reconciliation after hard sync (was 2.0f)
 
         private struct PendingEntry
         {
@@ -45,6 +46,8 @@ namespace SeapowerMultiplayer
         // Running totals for pending counts (avoids iterating all queues)
         private static int _pendingHostTotal;
         private static int _pendingLocalTotal;
+
+        private static float _hardSyncTime = -999f;
 
         // Scene projectile cache (avoids repeated FindObjectsByType calls per frame)
         private static Missile[] _cachedMissiles;
@@ -70,6 +73,11 @@ namespace SeapowerMultiplayer
         // Pending host IDs: tracks host IDs currently queued in _pendingHostSpawns
         private static readonly HashSet<int> _pendingHostIds = new();
 
+        private static bool IsInGracePeriod()
+        {
+            return (Time.unscaledTime - _hardSyncTime) < HardSyncGracePeriod;
+        }
+
         /// <summary>Call on session load / disconnect to reset all mappings.</summary>
         public static void Clear()
         {
@@ -85,10 +93,20 @@ namespace SeapowerMultiplayer
             _lockedHostIds.Clear();
             _hostOnlyProjectiles.Clear();
             _pendingHostIds.Clear();
+            // Fix #52: Only start a new grace period if not already in one
+            if (!IsInGracePeriod())
+            {
+                _hardSyncTime = Time.unscaledTime;
+            }
+            else
+            {
+                Plugin.Log.LogDebug("[IdMapper] Cleared — existing grace period still active, not resetting timer");
+            }
             ClearSceneCache();
             StalePurgedCount = 0;
             SpawnSuccessCount = 0;
             SpawnFailureCount = 0;
+            Plugin.Log.LogInfo($"[IdMapper] Cleared — grace period active for {HardSyncGracePeriod}s (reconciliation deferred, proximity matching active)");
         }
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
@@ -312,6 +330,9 @@ namespace SeapowerMultiplayer
             if (_lockedHostIds.Contains(hostId)) return;
             if (_pendingHostIds.Contains(hostId))
                 return;
+            // Fix #52: Grace period check REMOVED from here (was lines 325-326).
+            // Proximity matching now runs continuously — it's incremental and self-correcting.
+            // Grace period moved to OnReconciliationReceived() to prevent batch thrashing.
 
             // Try direct ID match first
             var direct = StateSerializer.FindById(hostId);
@@ -440,6 +461,17 @@ namespace SeapowerMultiplayer
         /// </summary>
         public static void OnReconciliationReceived(Messages.ProjectileReconciliationMessage msg)
         {
+            // Fix #52: Defer reconciliation during post-hard-sync grace period.
+            // Reconciliation uses batch position matching which can thrash during
+            // scene reload when entity positions are still settling.
+            // UpdateMapping() handles incremental matching during this window.
+            if (IsInGracePeriod())
+            {
+                Plugin.Log.LogDebug("[IdMapper] Reconciliation deferred — grace period active " +
+                    $"({HardSyncGracePeriod - (Time.unscaledTime - _hardSyncTime):F1}s remaining)");
+                return;
+            }
+
             var activeHostIds = new HashSet<int>(msg.Projectiles.Count);
 
             foreach (var entry in msg.Projectiles)
@@ -462,6 +494,7 @@ namespace SeapowerMultiplayer
                 if (bestMatch != null && bestDist < 200f)
                 {
                     Register(entry.HostId, bestMatch.UniqueID);
+                    _reassignmentCount.Remove(entry.HostId);
                     Plugin.Log.LogInfo($"[IdMapper] Reconciliation matched: host {entry.HostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
                 }
                 else

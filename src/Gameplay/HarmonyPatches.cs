@@ -1226,6 +1226,20 @@ namespace SeapowerMultiplayer
             // PvP: don't sync orders for weapons (missiles/torpedoes) — their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
+            // Fix #54 (enhanced Fix #49): Skip order routing for chaff/countermeasure entities.
+            // Primary check: ammunition type (covers initialized entities).
+            // Fallback check: class name (covers entities where _ap is null during spawn).
+            if (unit is WeaponBase wb)
+            {
+                if (wb._ap != null &&
+                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
+                    return true;
+
+                // Fallback: check by class name when _ap is not yet initialized
+                string typeName = unit.GetType().Name;
+                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
+                    return true;
+            }
             if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
                 && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
             if (Plugin.Instance.CfgIsHost.Value) return true;
@@ -1242,6 +1256,17 @@ namespace SeapowerMultiplayer
             if (OrderHandler.ApplyingFromNetwork) return;
             // PvP: don't sync orders for weapons (missiles/torpedoes)
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
+            // Fix #54 (enhanced Fix #49): Same chaff/noisemaker filter as Prefix
+            if (unit is WeaponBase wb2)
+            {
+                if (wb2._ap != null &&
+                    (wb2._ap._type == Ammunition.Type.Chaff || wb2._ap._type == Ammunition.Type.Noisemaker))
+                    return;
+
+                string typeName = unit.GetType().Name;
+                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
+                    return;
+            }
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
             if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate — skip broadcast
             NetworkManager.Instance.BroadcastToClients(msg);
@@ -1326,6 +1351,7 @@ namespace SeapowerMultiplayer
                 case OrderType.SubmarineMast:
                 case OrderType.SetAltitude:
                 case OrderType.ReturnToBase:
+                case OrderType.ClassifyContact:
                     return true;
             }
 
@@ -2547,6 +2573,196 @@ namespace SeapowerMultiplayer
             };
 
             OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OverrideRelationship))]
+    public static class Patch_Vehicle_OverrideRelationship
+    {
+        static void Postfix(Vehicle __instance, RelationsState forcedState)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            ObjectBase baseObj = __instance.BaseObject;
+            if (baseObj == null) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = baseObj.UniqueID,
+                Order          = OrderType.ClassifyContact,
+                Speed          = (float)forcedState,
+            };
+
+            OrderSyncHelper.Postfix(baseObj, msg);
+        }
+    }
+
+    /// <summary>
+    /// Fix #53: Correct priority inversion in Vehicle.CurrentRelationship().
+    /// The original method checks UnitTaskforce (auto-detection) BEFORE ForcedRelationState
+    /// (manual classification), meaning manual classifications are always shadowed.
+    /// This prefix checks ForcedRelationState first, returning it if present.
+    ///
+    /// Uses reflection to access Unity.Entities types (EntityManager, Entity,
+    /// ForcedRelationState) because the mod does not reference Unity.Entities.dll.
+    /// </summary>
+    [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.CurrentRelationship))]
+    public static class Patch_Vehicle_CurrentRelationship
+    {
+        // Cached reflection handles — resolved once on first call.
+        private static bool _reflectionResolved;
+        private static bool _reflectionFailed;
+        private static FieldInfo _vehicleEntityField;       // Vehicle.Entity
+        private static PropertyInfo _defaultWorldProp;      // World.DefaultGameObjectInjectionWorld
+        private static PropertyInfo _entityManagerProp;      // World.EntityManager
+        private static MethodInfo _hasComponentMethod;       // EntityManager.HasComponent<ForcedRelationState>(Entity)
+        private static MethodInfo _getComponentDataMethod;   // EntityManager.GetComponentData<ForcedRelationState>(Entity)
+        private static FieldInfo _forcedStateField;          // ForcedRelationState.ForcedState
+
+        private static void ResolveReflection()
+        {
+            if (_reflectionResolved) return;
+            _reflectionResolved = true;
+
+            try
+            {
+                // Vehicle.Entity field (type is Unity.Entities.Entity)
+                _vehicleEntityField = typeof(Vehicle).GetField("Entity",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                // Unity.Entities.World type
+                var worldType = Type.GetType("Unity.Entities.World, Unity.Entities");
+                if (worldType == null)
+                {
+                    // Try scanning loaded assemblies
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        worldType = asm.GetType("Unity.Entities.World");
+                        if (worldType != null) break;
+                    }
+                }
+
+                // ForcedRelationState type (in Seapower-Scripts)
+                var forcedRelationType = typeof(Vehicle).Assembly.GetType("SeaPower.ForcedRelationState");
+
+                if (worldType == null || forcedRelationType == null || _vehicleEntityField == null)
+                {
+                    _reflectionFailed = true;
+                    return;
+                }
+
+                // World.DefaultGameObjectInjectionWorld (static property)
+                _defaultWorldProp = worldType.GetProperty("DefaultGameObjectInjectionWorld",
+                    BindingFlags.Public | BindingFlags.Static);
+
+                // World.EntityManager (instance property)
+                _entityManagerProp = worldType.GetProperty("EntityManager",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (_defaultWorldProp == null || _entityManagerProp == null)
+                {
+                    _reflectionFailed = true;
+                    return;
+                }
+
+                // EntityManager is a struct type
+                var entityManagerType = _entityManagerProp.PropertyType;
+
+                // EntityManager.HasComponent<T>(Entity) — generic method
+                var hasComponentOpen = entityManagerType.GetMethod("HasComponent",
+                    new[] { _vehicleEntityField.FieldType });
+                if (hasComponentOpen != null && hasComponentOpen.IsGenericMethodDefinition)
+                {
+                    _hasComponentMethod = hasComponentOpen.MakeGenericMethod(forcedRelationType);
+                }
+                else
+                {
+                    // Search among all HasComponent methods for the right generic overload
+                    foreach (var m in entityManagerType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (m.Name != "HasComponent" || !m.IsGenericMethodDefinition) continue;
+                        var pars = m.GetParameters();
+                        if (pars.Length == 1 && pars[0].ParameterType == _vehicleEntityField.FieldType)
+                        {
+                            _hasComponentMethod = m.MakeGenericMethod(forcedRelationType);
+                            break;
+                        }
+                    }
+                }
+
+                // EntityManager.GetComponentData<T>(Entity) — generic method
+                foreach (var m in entityManagerType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (m.Name != "GetComponentData" || !m.IsGenericMethodDefinition) continue;
+                    var pars = m.GetParameters();
+                    if (pars.Length == 1 && pars[0].ParameterType == _vehicleEntityField.FieldType)
+                    {
+                        _getComponentDataMethod = m.MakeGenericMethod(forcedRelationType);
+                        break;
+                    }
+                }
+
+                // ForcedRelationState.ForcedState field
+                _forcedStateField = forcedRelationType.GetField("ForcedState",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (_hasComponentMethod == null || _getComponentDataMethod == null || _forcedStateField == null)
+                {
+                    _reflectionFailed = true;
+                }
+            }
+            catch (Exception)
+            {
+                _reflectionFailed = true;
+            }
+        }
+
+        static bool Prefix(Vehicle __instance, ref RelationsState __result)
+        {
+            // Destroyed objects -> Unknown
+            if (__instance.BaseObject != null && __instance.BaseObject.IsDestroyed)
+            {
+                __result = RelationsState.Unknown;
+                return false;
+            }
+
+            ResolveReflection();
+
+            if (_reflectionFailed)
+            {
+                // Cannot check ECS — fall through to original method
+                return true;
+            }
+
+            try
+            {
+                // Get the Entity value from the Vehicle instance
+                object entity = _vehicleEntityField.GetValue(__instance);
+
+                // Get World.DefaultGameObjectInjectionWorld
+                object world = _defaultWorldProp.GetValue(null);
+                if (world == null) return true;
+
+                // Get the EntityManager from the world
+                object entityManager = _entityManagerProp.GetValue(world);
+
+                // PRIORITY 1 (FIXED): Check manual classification first
+                bool hasForced = (bool)_hasComponentMethod.Invoke(entityManager, new[] { entity });
+                if (hasForced)
+                {
+                    object forcedComponent = _getComponentDataMethod.Invoke(entityManager, new[] { entity });
+                    __result = (RelationsState)_forcedStateField.GetValue(forcedComponent);
+                    return false;  // Skip original — manual classification takes priority
+                }
+            }
+            catch (Exception)
+            {
+                // If reflection fails at runtime, fall through to original
+            }
+
+            // PRIORITY 2: Fall through to original method for auto-detection
+            return true;
         }
     }
 }

@@ -23,6 +23,7 @@ namespace SeapowerMultiplayer.Messages
         DropSonobuoy   = 16,  // Helicopter sonobuoy drop (PvP sync)
         SetAltitude     = 17,  // Aircraft/Helicopter preset altitude
         ReturnToBase    = 18,  // Aircraft/Helicopter RTB
+        ClassifyContact = 19,  // Radar contact classification (hostile/friendly/neutral)
     }
 
     /// <summary>

@@ -150,6 +150,13 @@ namespace SeapowerMultiplayer
             {
                 var p = projectiles[i];
                 if (p == null || p.IsDestroyed) continue;
+
+                // Fix #50: Skip chaff/countermeasures — not worth serializing.
+                // Same pattern as Fix #40 (tracking) and Fix #49 (order routing).
+                if (p is WeaponBase wb && wb._ap != null &&
+                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
+                    continue;
+
                 var pos = p.transform.position;
                 msg.Projectiles.Add(new ProjectileState
                 {
@@ -397,6 +404,54 @@ namespace SeapowerMultiplayer
                 if (state.Kind == UnitType.Submarine)
                     hostPos.y = unit.transform.position.y;
 
+                // Fix #51: Aircraft position interpolation buffer (replaces Fix #46)
+                // Three-tier correction: accept, lerp, or snap based on divergence magnitude.
+                if (state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter)
+                {
+                    // Always sync DesiredAltitude so flight physics targets the right altitude
+                    if (state.DesiredAltitude > 0f)
+                        unit.DesiredAltitude.Value = state.DesiredAltitude;
+
+                    bool isOnDeck = state.Y < 2.0f;
+
+                    if (isOnDeck)
+                    {
+                        // On-deck/landing: snap precisely (taxiing, takeoff, landing)
+                        hostPos.y = state.Y;
+                    }
+                    else
+                    {
+                        float yDrift = Mathf.Abs(unit.transform.position.y - state.Y);
+                        float xzDrift = Vector2.Distance(
+                            new Vector2(unit.transform.position.x, unit.transform.position.z),
+                            new Vector2(hostPos.x, hostPos.z));
+
+                        // Tier 1: Accept zone (<50 units / ~11,000 feet)
+                        // Client position is close enough — local physics is accurate.
+                        // Keep client's local position entirely.
+                        if (yDrift < 50f && xzDrift < 50f)
+                        {
+                            hostPos = unit.transform.position;
+                        }
+                        // Tier 2: Smooth correction (50-500 units)
+                        // Moderate divergence — lerp toward host position over multiple frames.
+                        // LerpFactor 0.15 = ~15% correction per update at 2 Hz → smooth over ~3 updates.
+                        else if (yDrift < 500f && xzDrift < 500f)
+                        {
+                            hostPos = Vector3.Lerp(unit.transform.position, hostPos, 0.15f);
+                            hostPos.y = Mathf.Lerp(unit.transform.position.y, state.Y, 0.15f);
+                        }
+                        // Tier 3: Hard snap (>500 units)
+                        // Extreme divergence — snap immediately to re-establish sync.
+                        else
+                        {
+                            hostPos.y = state.Y;
+                            Plugin.Log.LogWarning($"[StateApplier] Aircraft {unit.name} drift " +
+                                $"Y={yDrift:F0} XZ={xzDrift:F0} exceeded 500, force-snapped");
+                        }
+                    }
+                }
+
                 if (isPvP)
                 {
                     // PvP hybrid: local physics simulates, owner's state provides corrections
@@ -448,7 +503,8 @@ namespace SeapowerMultiplayer
                     float drift = Vector3.Distance(unit.transform.position, hostPos);
                     float speedDrift = Mathf.Abs(unit._velocityInKnots - state.Speed);
                     float headingDrift = Mathf.Abs(Mathf.DeltaAngle(unit.transform.eulerAngles.y, state.Heading));
-                    DriftDetector.RecordUnit(drift, speedDrift, headingDrift);
+                    bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
+                    DriftDetector.RecordUnit(drift, speedDrift, headingDrift, isAircraft: isAir);
 
                     if (drift < driftThreshold) continue;
 
@@ -920,6 +976,12 @@ namespace SeapowerMultiplayer
 
         public static void ClearLogThrottle() => _logThrottle.Clear();
 
+        private static Vehicle FindVehicleForUnit(ObjectBase unit)
+        {
+            if (Globals._playerTaskforce == null) return null;
+            return Globals._playerTaskforce.PlottingTable?.VehicleForObject(unit);
+        }
+
         public static void Apply(PlayerOrderMessage msg)
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
@@ -945,7 +1007,14 @@ namespace SeapowerMultiplayer
             else
             {
                 string suffix = (throttle.suppressedCount > 0) ? $" (suppressed {throttle.suppressedCount} similar)" : "";
-                Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}{suffix}");
+
+                // Fix #47: Skip generic log for orders that have their own specific logging
+                if (msg.Order != Messages.OrderType.ReturnToBase
+                    && msg.Order != Messages.OrderType.SetAltitude
+                    && msg.Order != Messages.OrderType.ClassifyContact)
+                {
+                    Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}{suffix}");
+                }
                 _logThrottle[logKey] = (Time.unscaledTime, 0);
             }
 
@@ -1219,6 +1288,43 @@ namespace SeapowerMultiplayer
                         try { unit.setOrder(Order.Type.ReturnToBase, homeBase, displayOrderText: true); }
                         finally { OrderHandler.ApplyingFromNetwork = false; }
                         Plugin.Log.LogInfo($"[Order] Applied ReturnToBase for {unit?.name} (id={msg.SourceEntityId}): homeBase={homeBase?.name ?? "null"}");
+                        break;
+                    }
+
+                    case Messages.OrderType.ClassifyContact:
+                    {
+                        RelationsState classification = (RelationsState)(int)msg.Speed;
+
+                        Vehicle vehicle = FindVehicleForUnit(unit);
+                        if (vehicle != null)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { vehicle.OverrideRelationship(classification); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+
+                            // Fix #53: Force UI refresh for relationship change.
+                            // MapUnitViewModel subscribes to property changes but has no subscription
+                            // for relationship/classification changes. Trigger a property notification
+                            // to force the radar display to re-render with the new classification color.
+                            try
+                            {
+                                var onPropChanged = typeof(Vehicle).GetMethod("OnPropertyChanged",
+                                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                                onPropChanged?.Invoke(vehicle, new object[] { "CurrentRelationship" });
+                            }
+                            catch (Exception ex)
+                            {
+                                Plugin.Log.LogDebug($"[Order] ClassifyContact UI refresh failed (non-critical): {ex.Message}");
+                            }
+
+                            Plugin.Log.LogInfo($"[Order] Applied ClassifyContact for {unit.name} (id={msg.SourceEntityId}): " +
+                                              $"classification={classification}");
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning($"[Order] ClassifyContact: No Vehicle found for {unit.name} (id={msg.SourceEntityId}), " +
+                                                 $"classification={classification}");
+                        }
                         break;
                     }
 

@@ -41,12 +41,26 @@ namespace SeapowerMultiplayer
         public static float MaxDeltaSeen { get; private set; }
         public static bool HardSyncRequested { get; private set; }
 
+        // Fix #55: Category-specific drift averages
+        public static float AirAvgDrift { get; private set; }
+        public static float SurfaceAvgDrift { get; private set; }
+
         // ── Per-frame accumulators ───────────────────────────────────────────
         private static float _sumPosDrift;
         private static float _maxPosDrift;
         private static float _sumSpdDrift;
         private static float _sumHdgDrift;
         private static int _unitCount;
+
+        // Fix #55: Aircraft-specific accumulators
+        private static float _sumAirPosDrift;
+        private static float _maxAirPosDrift;
+        private static int _airUnitCount;
+
+        // Fix #55: Surface/sub-specific accumulators (used for hard sync triggers)
+        private static float _sumSurfacePosDrift;
+        private static float _maxSurfacePosDrift;
+        private static int _surfaceUnitCount;
 
         // ── EMA state ────────────────────────────────────────────────────────
         private const float EmaAlpha = 0.15f;
@@ -82,10 +96,19 @@ namespace SeapowerMultiplayer
             _sumSpdDrift = 0f;
             _sumHdgDrift = 0f;
             _unitCount = 0;
+
+            // Fix #55: Reset category accumulators
+            _sumAirPosDrift = 0f;
+            _maxAirPosDrift = 0f;
+            _airUnitCount = 0;
+            _sumSurfacePosDrift = 0f;
+            _maxSurfacePosDrift = 0f;
+            _surfaceUnitCount = 0;
         }
 
         /// <summary>Record drift for a single unit. Called per unit in Apply loop.</summary>
-        public static void RecordUnit(float posDrift, float speedDrift, float headingDrift)
+        public static void RecordUnit(float posDrift, float speedDrift, float headingDrift,
+            bool isAircraft = false)
         {
             _sumPosDrift += posDrift;
             if (posDrift > _maxPosDrift) _maxPosDrift = posDrift;
@@ -94,6 +117,20 @@ namespace SeapowerMultiplayer
             _unitCount++;
 
             if (posDrift > MaxDeltaSeen) MaxDeltaSeen = posDrift;
+
+            // Fix #55: Category-specific accumulation
+            if (isAircraft)
+            {
+                _sumAirPosDrift += posDrift;
+                if (posDrift > _maxAirPosDrift) _maxAirPosDrift = posDrift;
+                _airUnitCount++;
+            }
+            else
+            {
+                _sumSurfacePosDrift += posDrift;
+                if (posDrift > _maxSurfacePosDrift) _maxSurfacePosDrift = posDrift;
+                _surfaceUnitCount++;
+            }
         }
 
         /// <summary>Increment correction counter. Called from StateApplier when a correction is applied.</summary>
@@ -123,6 +160,10 @@ namespace SeapowerMultiplayer
                 SpeedDriftAvg = 0f;
                 HeadingDriftAvg = 0f;
             }
+
+            // Fix #55: Compute category averages
+            AirAvgDrift = _airUnitCount > 0 ? _sumAirPosDrift / _airUnitCount : 0f;
+            SurfaceAvgDrift = _surfaceUnitCount > 0 ? _sumSurfacePosDrift / _surfaceUnitCount : 0f;
 
             UnitCountDelta = Mathf.Abs(hostUnitCount - localUnitCount);
             ProjectileCountDelta = Mathf.Abs(hostProjectileCount - localProjectileCount);
@@ -170,7 +211,9 @@ namespace SeapowerMultiplayer
             if (DriftLevel != _previousTier)
             {
                 if (DriftLevel > _previousTier)
-                    Plugin.Log.LogWarning($"[DriftDetector] Tier ESCALATED: {_previousTier} → {DriftLevel} (AvgDrift={AvgPositionDrift:F1}, Lerp={EffectiveLerpFactor:F2}, SpeedCorrect={ShouldCorrectSpeed})");
+                    Plugin.Log.LogWarning($"[DriftDetector] Tier ESCALATED: {_previousTier} → {DriftLevel} " +
+                    $"(AvgDrift={AvgPositionDrift:F1}, Surface={SurfaceAvgDrift:F1}, Air={AirAvgDrift:F1}, " +
+                    $"Lerp={EffectiveLerpFactor:F2})");
                 else
                     Plugin.Log.LogInfo($"[DriftDetector] Tier de-escalated: {_previousTier} → {DriftLevel} (AvgDrift={AvgPositionDrift:F1})");
                 _previousTier = DriftLevel;
@@ -193,7 +236,11 @@ namespace SeapowerMultiplayer
             float confirmSec = Plugin.Instance.CfgHardSyncConfirmSec.Value;
             float cooldown = Plugin.Instance.CfgHardSyncCooldown.Value;
 
-            bool driftBreached = AvgPositionDrift > hardDrift;
+            // Fix #55: Use surface-only drift for hard sync trigger.
+            // Aircraft drift is handled by Fix #51's interpolation buffer.
+            // Only ships/submarines with genuine desync should trigger hard sync.
+            float effectiveDrift = _surfaceUnitCount > 0 ? SurfaceAvgDrift : AvgPositionDrift;
+            bool driftBreached = effectiveDrift > hardDrift;
             bool unitBreached = UnitCountDelta >= hardUnitDelta;
             bool triggered = driftBreached || unitBreached;
 
@@ -227,9 +274,9 @@ namespace SeapowerMultiplayer
             // Build reason string for logging (after cooldown check to avoid allocations)
             string reason;
             if (driftBreached && unitBreached)
-                reason = $"avg position drift {AvgPositionDrift:F1} > {hardDrift} AND unit count mismatch {UnitCountDelta} >= {hardUnitDelta}";
+                reason = $"avg position drift {effectiveDrift:F1} > {hardDrift} AND unit count mismatch {UnitCountDelta} >= {hardUnitDelta} (surface={SurfaceAvgDrift:F1}, air={AirAvgDrift:F1})";
             else if (driftBreached)
-                reason = $"avg position drift {AvgPositionDrift:F1} > {hardDrift} (threshold)";
+                reason = $"avg position drift {effectiveDrift:F1} > {hardDrift} (surface={SurfaceAvgDrift:F1}, air={AirAvgDrift:F1})";
             else
                 reason = $"unit count mismatch: local has {UnitCountDelta} more/fewer units than host (threshold={hardUnitDelta})";
 
@@ -328,6 +375,15 @@ namespace SeapowerMultiplayer
             _sumSpdDrift = 0f;
             _sumHdgDrift = 0f;
             _unitCount = 0;
+            // Fix #55: Reset category accumulators and properties
+            _sumAirPosDrift = 0f;
+            _maxAirPosDrift = 0f;
+            _airUnitCount = 0;
+            _sumSurfacePosDrift = 0f;
+            _maxSurfacePosDrift = 0f;
+            _surfaceUnitCount = 0;
+            AirAvgDrift = 0f;
+            SurfaceAvgDrift = 0f;
             _hardSyncBreachStart = -1f;
             _previousTier = DriftTier.Normal;
             _lastHardSyncUnitDelta = -1;
