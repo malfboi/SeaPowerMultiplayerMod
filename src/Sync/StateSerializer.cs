@@ -1188,6 +1188,40 @@ namespace SeapowerMultiplayer
                         break;
                     }
 
+                    case Messages.OrderType.SetAltitude:
+                    {
+                        int preset = (int)msg.Speed;
+                        bool updateAlt = msg.Heading > 0.5f;
+
+                        if (unit is Aircraft aircraft)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { aircraft.setPresetHeight(preset, updateAlt); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                        }
+                        else if (unit is Helicopter helicopter)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { helicopter.setPresetHeight(preset, updateAlt); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                        }
+                        Plugin.Log.LogInfo($"[Order] Applied SetAltitude for {unit?.name} (id={msg.SourceEntityId}): preset={preset}, updateWaypoints={updateAlt}");
+                        break;
+                    }
+
+                    case Messages.OrderType.ReturnToBase:
+                    {
+                        ObjectBase homeBase = null;
+                        if (msg.TargetEntityId != 0)
+                            homeBase = StateSerializer.FindById(msg.TargetEntityId);
+
+                        OrderHandler.ApplyingFromNetwork = true;
+                        try { unit.setOrder(Order.Type.ReturnToBase, homeBase, displayOrderText: true); }
+                        finally { OrderHandler.ApplyingFromNetwork = false; }
+                        Plugin.Log.LogInfo($"[Order] Applied ReturnToBase for {unit?.name} (id={msg.SourceEntityId}): homeBase={homeBase?.name ?? "null"}");
+                        break;
+                    }
+
                     default:
                         Plugin.Log.LogWarning($"[Order] unhandled: {msg.Order}");
                         break;

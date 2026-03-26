@@ -67,6 +67,9 @@ namespace SeapowerMultiplayer
         // Host-only projectile tracking (projectiles on host with no local counterpart)
         private static readonly HashSet<int> _hostOnlyProjectiles = new();
 
+        // Pending host IDs: tracks host IDs currently queued in _pendingHostSpawns
+        private static readonly HashSet<int> _pendingHostIds = new();
+
         /// <summary>Call on session load / disconnect to reset all mappings.</summary>
         public static void Clear()
         {
@@ -81,6 +84,7 @@ namespace SeapowerMultiplayer
             _reassignmentCount.Clear();
             _lockedHostIds.Clear();
             _hostOnlyProjectiles.Clear();
+            _pendingHostIds.Clear();
             ClearSceneCache();
             StalePurgedCount = 0;
             SpawnSuccessCount = 0;
@@ -152,6 +156,7 @@ namespace SeapowerMultiplayer
                 EnqueueTime = now,
             });
             _pendingHostTotal++;
+            _pendingHostIds.Add(hostProjectileId);
         }
 
         /// <summary>
@@ -177,6 +182,7 @@ namespace SeapowerMultiplayer
                     var entry = hostQueue.Peek();
                     hostQueue.Dequeue();
                     _pendingHostTotal--;
+                    _pendingHostIds.Remove(entry.Id);
                     Register(entry.Id, localProjectileId);
                     SpawnSuccessCount++;
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (local spawned second): host {entry.Id} → local {localProjectileId} (source unit {sourceUnitId}, ammo={ammoName})");
@@ -213,6 +219,7 @@ namespace SeapowerMultiplayer
                 if (isHostQueue)
                 {
                     _pendingHostTotal--;
+                    _pendingHostIds.Remove(stale.Id);
                     SpawnFailureCount++;
                 }
                 else
@@ -303,6 +310,8 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgPvP.Value) return;
             if (_failedMatchAttempts.TryGetValue(hostId, out var attempts) && attempts >= MaxMatchAttempts) return;
             if (_lockedHostIds.Contains(hostId)) return;
+            if (_pendingHostIds.Contains(hostId))
+                return;
 
             // Try direct ID match first
             var direct = StateSerializer.FindById(hostId);
@@ -319,11 +328,12 @@ namespace SeapowerMultiplayer
             FindClosestUnmapped<Missile>(hostPos, ref bestMatch, ref bestDist);
             FindClosestUnmapped<Torpedo>(hostPos, ref bestMatch, ref bestDist);
 
-            if (bestMatch != null && bestDist < 2000f)
+            if (bestMatch != null && bestDist < 300f)
             {
                 Register(hostId, bestMatch.UniqueID);
                 _failedMatchAttempts.Remove(hostId);
-                Plugin.Log.LogDebug($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                if (Plugin.Instance.CfgVerboseDebug.Value)
+                    Plugin.Log.LogDebug($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
                 return;
             }
 
@@ -371,6 +381,20 @@ namespace SeapowerMultiplayer
 
         private static void Register(int hostId, int localId)
         {
+            // Don't reassign a localId that is already mapped to a different locked hostId.
+            // This prevents reconciliation from corrupting locked assignments.
+            if (_localToHost.TryGetValue(localId, out int existingHostId) && existingHostId != hostId)
+            {
+                if (_lockedHostIds.Contains(existingHostId))
+                {
+                    if (Plugin.Instance.CfgVerboseDebug.Value)
+                        Plugin.Log.LogDebug($"[IdMapper] Skipped reassign local {localId}: already locked to host {existingHostId}");
+                    return;
+                }
+                // Clean up stale reverse mapping
+                _hostToLocal.Remove(existingHostId);
+            }
+
             // On client: reassign the local projectile's UniqueID to match the host's.
             // After this, FindById(hostId) works directly — no mapping lookup needed.
             // Save/restore _UID to prevent SetUniqueId from polluting the game's global
@@ -399,7 +423,8 @@ namespace SeapowerMultiplayer
                     int prevUid = Singleton<SceneCreator>.Instance._UID;
                     obj.SetUniqueId(hostId);
                     Singleton<SceneCreator>.Instance._UID = prevUid;
-                    Plugin.Log.LogDebug($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
+                    if (Plugin.Instance.CfgVerboseDebug.Value)
+                        Plugin.Log.LogDebug($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
                     return;  // No mapping needed — IDs now match
                 }
             }
@@ -434,7 +459,7 @@ namespace SeapowerMultiplayer
                 FindClosestUnmapped<SeaPower.Missile>(hostPos, ref bestMatch, ref bestDist);
                 FindClosestUnmapped<SeaPower.Torpedo>(hostPos, ref bestMatch, ref bestDist);
 
-                if (bestMatch != null && bestDist < 500f)
+                if (bestMatch != null && bestDist < 200f)
                 {
                     Register(entry.HostId, bestMatch.UniqueID);
                     Plugin.Log.LogInfo($"[IdMapper] Reconciliation matched: host {entry.HostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");

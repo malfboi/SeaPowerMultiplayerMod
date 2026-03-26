@@ -1134,10 +1134,11 @@ namespace SeapowerMultiplayer
             Order          = OrderType.CeaseFire,
         };
 
-        static bool Prefix(ObjectBase __instance)
+        static bool Prefix(ObjectBase __instance, bool report)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true;
+            if (!report) return true;
 
             // PvP: delay local execution so both sides cease at the same wall-clock time
             if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
@@ -1161,8 +1162,9 @@ namespace SeapowerMultiplayer
             return OrderSyncHelper.Prefix(__instance, Msg(__instance));
         }
 
-        static void Postfix(ObjectBase __instance)
+        static void Postfix(ObjectBase __instance, bool report)
         {
+            if (!report) return;
             // PvP: message already sent in Prefix
             if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected) return;
 
@@ -1322,6 +1324,8 @@ namespace SeapowerMultiplayer
                 case OrderType.CeaseFire:
                 case OrderType.DropSonobuoy:
                 case OrderType.SubmarineMast:
+                case OrderType.SetAltitude:
+                case OrderType.ReturnToBase:
                     return true;
             }
 
@@ -2005,6 +2009,13 @@ namespace SeapowerMultiplayer
             if (!NetworkManager.Instance.IsConnected) return;
             if (SessionManager.SceneLoading) return;
 
+            // Skip projectile tracking for chaff and countermeasures.
+            // These spawn in bursts, don't align between host/client,
+            // and have no gameplay sync value.
+            var ammoType = __instance._ap?._type ?? Ammunition.Type.Unknown;
+            if (ammoType == Ammunition.Type.Chaff || ammoType == Ammunition.Type.Noisemaker)
+                return;
+
             int projectileId = __instance.UniqueID;
             var launcher = _launchPlatformField.GetValue(__instance) as ObjectBase;
             int sourceUnitId = launcher?.UniqueID ?? 0;
@@ -2475,6 +2486,67 @@ namespace SeapowerMultiplayer
             var obj = __instance.Unit?.BaseObject as ObjectBase;
             if (obj != null && UnitLockManager.IsLockedByRemote(obj.UniqueID))
                 __result = "[BUSY]";
+        }
+    }
+
+    [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.setPresetHeight))]
+    public static class Patch_Aircraft_SetPresetHeight
+    {
+        static void Postfix(Aircraft __instance, int preset, bool updateAltForWaypoints)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.SetAltitude,
+                Speed          = (float)preset,
+                Heading        = updateAltForWaypoints ? 1f : 0f,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.setPresetHeight))]
+    public static class Patch_Helicopter_SetPresetHeight
+    {
+        static void Postfix(Helicopter __instance, int preset, bool updateAltForWaypoints)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.SetAltitude,
+                Speed          = (float)preset,
+                Heading        = updateAltForWaypoints ? 1f : 0f,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setOrder),
+        new[] { typeof(Order.Type), typeof(ObjectBase), typeof(bool) })]
+    public static class Patch_ObjectBase_SetOrder_RTB
+    {
+        static void Postfix(ObjectBase __instance, Order.Type type, ObjectBase targetObject, bool displayOrderText)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+            if (type != Order.Type.ReturnToBase) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.ReturnToBase,
+                TargetEntityId = targetObject?.UniqueID ?? 0,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
         }
     }
 }
