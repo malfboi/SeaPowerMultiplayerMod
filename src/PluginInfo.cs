@@ -4,6 +4,6 @@ namespace SeapowerMultiplayer
     {
         public const string PLUGIN_GUID    = "com.seapowermultiplayer.plugin";
         public const string PLUGIN_NAME    = "SeapowerMultiplayer";
-        public const string PLUGIN_VERSION = "0.1.3";
+        public const string PLUGIN_VERSION = "0.1.4";
     }
 }
