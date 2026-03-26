@@ -739,9 +739,10 @@ namespace SeapowerMultiplayer
             {
                 if (ws._executingEngageTask && ws._isAutoEngaging && ws._engageDelay > 0f)
                 {
-                    Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
-                        $"unit={__instance.UniqueID} name={__instance.name} " +
-                        $"wasDelay={ws._engageDelay:F3}s");
+                    if (Plugin.Instance.CfgVerboseDebug.Value)
+                        Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
+                            $"unit={__instance.UniqueID} name={__instance.name} " +
+                            $"wasDelay={ws._engageDelay:F3}s");
                     ws._engageDelay = 0f;
                 }
             }
@@ -881,10 +882,11 @@ namespace SeapowerMultiplayer
 
                 NetworkManager.Instance.SendToOther(order);
 
-                Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms SEND seq={diagSeq} " +
-                    $"unit={__instance.UniqueID} name={__instance.name} ammo={ammoId} " +
-                    $"targetLocal={targetObject?.UniqueID ?? 0} targetSent={targetId} targetName={targetObject?.name ?? "pos"} " +
-                    $"shots={shotsToFire} priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}");
+                if (Plugin.Instance.CfgVerboseDebug.Value)
+                    Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms SEND seq={diagSeq} " +
+                        $"unit={__instance.UniqueID} name={__instance.name} ammo={ammoId} " +
+                        $"targetLocal={targetObject?.UniqueID ?? 0} targetSent={targetId} targetName={targetObject?.name ?? "pos"} " +
+                        $"shots={shotsToFire} priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}");
                 return;
             }
 
@@ -1733,6 +1735,9 @@ namespace SeapowerMultiplayer
     [HarmonyPatch]
     public static class Patch_Blastzone_OnHitWeapon
     {
+        private static readonly HashSet<int> _sentInterceptions = new();
+        internal static void ClearInterceptions() => _sentInterceptions.Clear();
+
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(Blastzone), "OnHitWeapon");
 
@@ -1760,6 +1765,7 @@ namespace SeapowerMultiplayer
         {
             if (!CombatSyncHelper.ShouldBroadcast()) return;
             if (!hitObject._externalDestructionNotified) return; // interception RNG failed
+            if (!_sentInterceptions.Add(hitObject.UniqueID)) return; // dedup
 
             int sourceId = ____weapon != null ? ____weapon.UniqueID : 0;
             Plugin.Log.LogInfo($"[Combat] SAM intercept: target={hitObject.UniqueID} by={sourceId}");
@@ -2003,11 +2009,12 @@ namespace SeapowerMultiplayer
             var launcher = _launchPlatformField.GetValue(__instance) as ObjectBase;
             int sourceUnitId = launcher?.UniqueID ?? 0;
 
-            Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms PROJECTILE_SPAWN " +
-                $"projId={projectileId} projName={__instance.name} " +
-                $"launcherId={sourceUnitId} launcherName={launcher?.name ?? "?"} " +
-                $"isHost={Plugin.Instance.CfgIsHost.Value} " +
-                $"projType={__instance.GetType().Name}");
+            if (Plugin.Instance.CfgVerboseDebug.Value)
+                Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms PROJECTILE_SPAWN " +
+                    $"projId={projectileId} projName={__instance.name} " +
+                    $"launcherId={sourceUnitId} launcherName={launcher?.name ?? "?"} " +
+                    $"isHost={Plugin.Instance.CfgIsHost.Value} " +
+                    $"projType={__instance.GetType().Name}");
 
             bool isPvP = Plugin.Instance.CfgPvP.Value;
 

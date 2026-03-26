@@ -26,6 +26,9 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
 
+        // Debug config
+        internal ConfigEntry<bool> CfgVerboseDebug = null!;
+
         // Drift correction config
         internal ConfigEntry<float> CfgSoftSyncElevated = null!;
         internal ConfigEntry<float> CfgSoftSyncHigh = null!;
@@ -54,6 +57,10 @@ namespace SeapowerMultiplayer
             CfgPvP         = Config.Bind("Network", "PvP",          false,       "PvP=true: players control opposing sides. PvP=false: co-op, both players on same side with taskforce assignment.");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
+
+            // Debug
+            CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
+                "Enable verbose per-tick debug logging (Serialize counts, AutoFire diagnostics, Net received)");
 
             // Drift correction
             CfgSoftSyncElevated   = Config.Bind("DriftCorrection", "SoftSyncElevated",   20f,  "Avg drift threshold for Elevated tier");

@@ -78,6 +78,7 @@ namespace SeapowerMultiplayer
             PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+            Patch_Blastzone_OnHitWeapon.ClearInterceptions();
             CombatEventHandler.ClearDeathWatch();
             Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
@@ -176,6 +177,7 @@ namespace SeapowerMultiplayer
                 PvPFireAuth.Clear();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
                 Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+                Patch_Blastzone_OnHitWeapon.ClearInterceptions();
                 Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
                 FlightOpsHandler.Clear();
                 Patch_Compartments_CalculateWantedVelocityInKnots.ClearLogCache();
@@ -189,7 +191,8 @@ namespace SeapowerMultiplayer
             var reader = new NetDataReader(data, 0, length);
             var type = (MessageType)reader.GetByte();
 
-            if (type != MessageType.StateUpdate && type != MessageType.MissileStateSync)
+            if (type != MessageType.StateUpdate && type != MessageType.MissileStateSync
+                && type != MessageType.PlayerOrder && type != MessageType.DamageState)
                 Log.LogDebug($"[Net] Received {type}");
 
             switch (type)
@@ -207,17 +210,19 @@ namespace SeapowerMultiplayer
                     long enqueueMs = AIAutoFireState.DiagMs;
                     if (msg.Order == Messages.OrderType.AutoFireWeapon)
                     {
-                        Log.LogDebug($"[AutoFire DIAG] t={enqueueMs}ms ENQUEUE (bg thread) " +
-                            $"unit={msg.SourceEntityId} ammo={msg.AmmoId} target={msg.TargetEntityId} " +
-                            $"shots={msg.ShotsToFire}");
+                        if (Plugin.Instance.CfgVerboseDebug.Value)
+                            Log.LogDebug($"[AutoFire DIAG] t={enqueueMs}ms ENQUEUE (bg thread) " +
+                                $"unit={msg.SourceEntityId} ammo={msg.AmmoId} target={msg.TargetEntityId} " +
+                                $"shots={msg.ShotsToFire}");
                     }
                     _mainThreadQueue.Enqueue(() =>
                     {
                         if (msg.Order == Messages.OrderType.AutoFireWeapon)
                         {
                             long applyMs = AIAutoFireState.DiagMs;
-                            Log.LogDebug($"[AutoFire DIAG] t={applyMs}ms DEQUEUE (main thread, " +
-                                $"waited {applyMs - enqueueMs}ms) unit={msg.SourceEntityId} ammo={msg.AmmoId}");
+                            if (Plugin.Instance.CfgVerboseDebug.Value)
+                                Log.LogDebug($"[AutoFire DIAG] t={applyMs}ms DEQUEUE (main thread, " +
+                                    $"waited {applyMs - enqueueMs}ms) unit={msg.SourceEntityId} ammo={msg.AmmoId}");
                         }
                         OrderHandler.Apply(msg);
                     });
@@ -307,6 +312,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = AircraftRecoveryResponseMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => FlightOpsHandler.HandleRecoveryResponse(msg));
+                    break;
+                }
+
+                case MessageType.ProjectileReconciliation:
+                {
+                    var msg = ProjectileReconciliationMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnReconciliationReceived(msg));
                     break;
                 }
 

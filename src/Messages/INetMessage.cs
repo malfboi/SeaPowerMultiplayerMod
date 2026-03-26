@@ -18,6 +18,7 @@ namespace SeapowerMultiplayer.Messages
         ChaffLaunch,                // bidirectional: manual chaff deployment sync (PvP)
         AircraftRecoveryRequest,    // "I don't have aircraft X, send me its details"
         AircraftRecoveryResponse,   // "Here's how to spawn aircraft X"
+        ProjectileReconciliation,   // host → client: periodic active projectile list
     }
 
     public interface INetMessage

@@ -59,6 +59,14 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<int, (float lastLogTime, int suppressedCount)> _logThrottle = new();
         private const float LogThrottleInterval = 10f;
 
+        // Cycle detection: lock assignments after repeated reassignment
+        private static readonly Dictionary<int, int> _reassignmentCount = new(); // hostId → reassignment count
+        private static readonly HashSet<int> _lockedHostIds = new();             // hostIds locked from further remapping
+        private const int MaxReassignments = 3;
+
+        // Host-only projectile tracking (projectiles on host with no local counterpart)
+        private static readonly HashSet<int> _hostOnlyProjectiles = new();
+
         /// <summary>Call on session load / disconnect to reset all mappings.</summary>
         public static void Clear()
         {
@@ -70,6 +78,9 @@ namespace SeapowerMultiplayer
             _pendingLocalTotal = 0;
             _failedMatchAttempts.Clear();
             _logThrottle.Clear();
+            _reassignmentCount.Clear();
+            _lockedHostIds.Clear();
+            _hostOnlyProjectiles.Clear();
             ClearSceneCache();
             StalePurgedCount = 0;
             SpawnSuccessCount = 0;
@@ -84,6 +95,9 @@ namespace SeapowerMultiplayer
         public static int SpawnFailureCount { get; private set; }
         public static int PendingHostCount => _pendingHostTotal;
         public static int PendingLocalCount => _pendingLocalTotal;
+
+        /// <summary>Number of projectiles the host reports that have no local counterpart.</summary>
+        public static int HostOnlyCount => _hostOnlyProjectiles.Count;
 
         // ── Spawn-time matching ───────────────────────────────────────────────
 
@@ -288,6 +302,7 @@ namespace SeapowerMultiplayer
             if (_hostToLocal.ContainsKey(hostId)) return;
             if (Plugin.Instance.CfgPvP.Value) return;
             if (_failedMatchAttempts.TryGetValue(hostId, out var attempts) && attempts >= MaxMatchAttempts) return;
+            if (_lockedHostIds.Contains(hostId)) return;
 
             // Try direct ID match first
             var direct = StateSerializer.FindById(hostId);
@@ -366,6 +381,21 @@ namespace SeapowerMultiplayer
                 var obj = StateSerializer.FindById(localId);
                 if (obj != null)
                 {
+                    // Check cycle detection: has this host ID been reassigned too many times?
+                    int count = _reassignmentCount.TryGetValue(hostId, out var c) ? c + 1 : 1;
+                    _reassignmentCount[hostId] = count;
+
+                    if (count >= MaxReassignments)
+                    {
+                        // Lock this assignment to prevent infinite cycling
+                        _lockedHostIds.Add(hostId);
+                        Plugin.Log.LogWarning($"[IdMapper] Cycle detected: host {hostId} reassigned {count} times — locking assignment to local {localId}");
+                        // Still register the mapping so lookups work
+                        _hostToLocal[hostId] = localId;
+                        _localToHost[localId] = hostId;
+                        return;
+                    }
+
                     int prevUid = Singleton<SceneCreator>.Instance._UID;
                     obj.SetUniqueId(hostId);
                     Singleton<SceneCreator>.Instance._UID = prevUid;
@@ -377,6 +407,47 @@ namespace SeapowerMultiplayer
             // Fallback: keep mapping for host or if object not found yet
             _hostToLocal[hostId] = localId;
             _localToHost[localId] = hostId;
+        }
+
+        /// <summary>
+        /// Handle reconciliation message from host. Updates tracking of host-only
+        /// projectiles and attempts second-chance matching for unmapped entries.
+        /// </summary>
+        public static void OnReconciliationReceived(Messages.ProjectileReconciliationMessage msg)
+        {
+            var activeHostIds = new HashSet<int>(msg.Projectiles.Count);
+
+            foreach (var entry in msg.Projectiles)
+            {
+                activeHostIds.Add(entry.HostId);
+
+                // Already mapped? Good.
+                if (_hostToLocal.ContainsKey(entry.HostId)) continue;
+
+                // Already locked from cycling? Skip.
+                if (_lockedHostIds.Contains(entry.HostId)) continue;
+
+                // Try proximity match as a second chance
+                var hostPos = new UnityEngine.Vector3(entry.X, entry.Y, entry.Z);
+                ObjectBase bestMatch = null;
+                float bestDist = float.MaxValue;
+                FindClosestUnmapped<SeaPower.Missile>(hostPos, ref bestMatch, ref bestDist);
+                FindClosestUnmapped<SeaPower.Torpedo>(hostPos, ref bestMatch, ref bestDist);
+
+                if (bestMatch != null && bestDist < 500f)
+                {
+                    Register(entry.HostId, bestMatch.UniqueID);
+                    Plugin.Log.LogInfo($"[IdMapper] Reconciliation matched: host {entry.HostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                }
+                else
+                {
+                    // Track as host-only (no local counterpart)
+                    _hostOnlyProjectiles.Add(entry.HostId);
+                }
+            }
+
+            // Clean up host-only tracking: remove IDs no longer in host's active list
+            _hostOnlyProjectiles.RemoveWhere(id => !activeHostIds.Contains(id));
         }
 
         /// <summary>Remove mapping when a projectile is destroyed.</summary>

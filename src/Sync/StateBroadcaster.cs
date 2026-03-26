@@ -27,6 +27,7 @@ namespace SeapowerMultiplayer
             StartCoroutine(OrphanCleanupLoop());
             StartCoroutine(MissileStateSyncLoop());
             StartCoroutine(PendingSpawnCleanupLoop());
+            StartCoroutine(ProjectileReconciliationLoop());
         }
 
         private void Update()
@@ -74,10 +75,28 @@ namespace SeapowerMultiplayer
         // ── Phase 3: broadcast state to client ────────────────────────────────
         private IEnumerator BroadcastLoop()
         {
+            float nextBroadcast = 0f;
             while (true)
             {
-                yield return Plugin.Instance.CfgPvP.Value
-                    ? _waitBroadcastPvP : _waitBroadcastCoop;
+                yield return null; // run every frame, check timing manually
+
+                if (Time.unscaledTime < nextBroadcast) continue;
+
+                // PvP: fixed 10 Hz. Co-op: scale with time compression (2-10 Hz).
+                float interval;
+                if (Plugin.Instance.CfgPvP.Value)
+                {
+                    interval = 0.1f; // 10 Hz fixed for PvP
+                }
+                else
+                {
+                    float tc = Mathf.Max(1f, Time.timeScale);
+                    interval = Mathf.Max(0.1f, 0.5f / tc);
+                    // TC=1: 0.50s (2 Hz), TC=2: 0.25s (4 Hz), TC=3: 0.17s (6 Hz), TC=5: 0.10s (10 Hz)
+                }
+
+                nextBroadcast = Time.unscaledTime + interval;
+
                 if (NetworkManager.Instance.IsConnected)
                 {
                     try { BroadcastState(); }
@@ -253,6 +272,57 @@ namespace SeapowerMultiplayer
                 yield return wait;
                 if (!NetworkManager.Instance.IsConnected) continue;
                 ProjectileIdMapper.PurgeStaleEntries();
+            }
+        }
+
+        // ── Projectile reconciliation (host sends active list to client) ────
+        private IEnumerator ProjectileReconciliationLoop()
+        {
+            var wait = new WaitForSeconds(5f);
+            var msg = new Messages.ProjectileReconciliationMessage();
+            while (true)
+            {
+                yield return wait;
+                if (!Plugin.Instance.CfgIsHost.Value) continue;
+                if (Plugin.Instance.CfgPvP.Value) continue;
+                if (!NetworkManager.Instance.IsConnected) continue;
+                if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
+                if (SessionManager.SceneLoading) continue;
+
+                msg.Reset();
+
+                var missiles = UnitRegistry.Missiles;
+                for (int i = 0; i < missiles.Count; i++)
+                {
+                    var m = missiles[i];
+                    if (m == null || m.IsDestroyed) continue;
+                    var launcher = StateSerializer.GetLaunchPlatform(m);
+                    var pos = m.transform.position;
+                    msg.Projectiles.Add(new Messages.ProjectileReconciliationMessage.ActiveProjectile
+                    {
+                        HostId = m.UniqueID,
+                        SourceUnitId = launcher?.UniqueID ?? 0,
+                        X = pos.x, Y = pos.y, Z = pos.z,
+                    });
+                }
+
+                var torpedoes = UnitRegistry.Torpedoes;
+                for (int i = 0; i < torpedoes.Count; i++)
+                {
+                    var t = torpedoes[i];
+                    if (t == null || t.IsDestroyed) continue;
+                    var launcher = StateSerializer.GetLaunchPlatform(t);
+                    var pos = t.transform.position;
+                    msg.Projectiles.Add(new Messages.ProjectileReconciliationMessage.ActiveProjectile
+                    {
+                        HostId = t.UniqueID,
+                        SourceUnitId = launcher?.UniqueID ?? 0,
+                        X = pos.x, Y = pos.y, Z = pos.z,
+                    });
+                }
+
+                if (msg.Projectiles.Count > 0)
+                    NetworkManager.Instance.BroadcastToClients(msg, LiteNetLib.DeliveryMethod.ReliableOrdered);
             }
         }
 

@@ -27,6 +27,7 @@ namespace SeapowerMultiplayer
         public static float SpeedDriftAvg { get; private set; }
         public static float HeadingDriftAvg { get; private set; }
         public static int UnitCountDelta { get; private set; }
+        public static int ProjectileCountDelta { get; private set; }
         public static float DriftTrend { get; private set; }
         public static DriftTier DriftLevel { get; private set; } = DriftTier.Normal;
 
@@ -99,7 +100,7 @@ namespace SeapowerMultiplayer
         public static void RecordCorrection() => CorrectionCount++;
 
         /// <summary>Compute aggregates, determine tier, check hard sync. Called after unit loop.</summary>
-        public static void EndFrame(int localUnitCount, int hostUnitCount)
+        public static void EndFrame(int localUnitCount, int hostUnitCount, int localProjectileCount = 0, int hostProjectileCount = 0)
         {
             // PvP: puppets have no drift — skip entirely
             if (Plugin.Instance.CfgPvP.Value) return;
@@ -124,6 +125,7 @@ namespace SeapowerMultiplayer
             }
 
             UnitCountDelta = Mathf.Abs(hostUnitCount - localUnitCount);
+            ProjectileCountDelta = Mathf.Abs(hostProjectileCount - localProjectileCount);
 
             // Update EMA (~5s window at 2 Hz)
             DriftTrend = EmaAlpha * AvgPositionDrift + (1f - EmaAlpha) * DriftTrend;
@@ -312,6 +314,7 @@ namespace SeapowerMultiplayer
             SpeedDriftAvg = 0f;
             HeadingDriftAvg = 0f;
             UnitCountDelta = 0;
+            ProjectileCountDelta = 0;
             DriftTrend = 0f;
             DriftLevel = DriftTier.Normal;
             EffectiveLerpFactor = DefaultLerpFactor;

@@ -61,6 +61,7 @@ namespace SeapowerMultiplayer
             PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+            Patch_Blastzone_OnHitWeapon.ClearInterceptions();
             CombatEventHandler.ClearDeathWatch();
             Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
@@ -183,6 +184,7 @@ namespace SeapowerMultiplayer
                 PvPFireAuth.Clear();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
                 Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+                Patch_Blastzone_OnHitWeapon.ClearInterceptions();
                 Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
                 Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
                 Patch_Submarine_SetDepth.Reset();

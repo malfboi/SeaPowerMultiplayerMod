@@ -94,7 +94,10 @@ namespace SeapowerMultiplayer
                 AddRegistryOwnedProjectiles(msg, 1, UnitRegistry.Torpedoes, filterTaskforce);
             }
 
-            Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
+            msg.ProjectileCount = msg.Projectiles.Count;
+
+            if (Plugin.Instance.CfgVerboseDebug.Value)
+                Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
             return msg;
         }
 
@@ -482,7 +485,7 @@ namespace SeapowerMultiplayer
 
             // DriftDetector: skip for PvP (puppets have no drift)
             if (!isPvP)
-                DriftDetector.EndFrame(CountLocalUnits(), msg.Units.Count);
+                DriftDetector.EndFrame(CountLocalUnits(), msg.Units.Count, CountLocalProjectiles(), msg.ProjectileCount);
 
             // ── Game time drift correction (host is time authority) ──────────
             if (!isHost && msg.GameSeconds > 0f)
@@ -809,6 +812,27 @@ namespace SeapowerMultiplayer
             }
         }
 
+        private static int _cachedLocalProjectileCount;
+        private static float _lastProjectileCountTime;
+
+        private static int CountLocalProjectiles()
+        {
+            if (Time.unscaledTime - _lastProjectileCountTime < UnitCountCacheInterval)
+                return _cachedLocalProjectileCount;
+
+            int count = 0;
+            var missiles = UnitRegistry.Missiles;
+            for (int i = 0; i < missiles.Count; i++)
+                if (missiles[i] != null) count++;
+            var torpedoes = UnitRegistry.Torpedoes;
+            for (int i = 0; i < torpedoes.Count; i++)
+                if (torpedoes[i] != null) count++;
+
+            _cachedLocalProjectileCount = count;
+            _lastProjectileCountTime = Time.unscaledTime;
+            return count;
+        }
+
         /// <summary>
         /// PvP orphan cleanup: destroy local enemy units that the remote side is
         /// no longer reporting. Uses a grace period to handle packet loss.
@@ -1024,12 +1048,13 @@ namespace SeapowerMultiplayer
                                     $"autoEngaging={ws._isAutoEngaging} delay={ws._engageDelay:F3}s";
                             }
                         }
-                        Plugin.Log.LogDebug($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
-                            $"unit={unit.UniqueID} name={unit.name} ammo={msg.AmmoId} " +
-                            $"target={msg.TargetEntityId} targetFound={target != null} " +
-                            $"targetName={target?.name ?? "pos"} shots={msg.ShotsToFire} " +
-                            $"priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}" +
-                            $"{wsState}");
+                        if (Plugin.Instance.CfgVerboseDebug.Value)
+                            Plugin.Log.LogDebug($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
+                                $"unit={unit.UniqueID} name={unit.name} ammo={msg.AmmoId} " +
+                                $"target={msg.TargetEntityId} targetFound={target != null} " +
+                                $"targetName={target?.name ?? "pos"} shots={msg.ShotsToFire} " +
+                                $"priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}" +
+                                $"{wsState}");
 
                         unit.InsertEngageTask(msg.AmmoId, target, targetPos, msg.ShotsToFire,
                                               priority, true, false, false);
@@ -1047,7 +1072,7 @@ namespace SeapowerMultiplayer
                                 }
                             }
                         }
-                        if (wsStateAfter.Length > 0)
+                        if (wsStateAfter.Length > 0 && Plugin.Instance.CfgVerboseDebug.Value)
                             Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms POST_INSERT " +
                                 $"unit={unit.UniqueID}{wsStateAfter}");
                         break;
