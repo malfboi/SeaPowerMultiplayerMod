@@ -21,6 +21,9 @@ namespace SeapowerMultiplayer.Messages
         EditWaypoint    = 14,  // Move waypoint at index to new position (index in Speed, pos in DestX/Y/Z)
         AutoFireWeapon  = 15,  // AI auto-attack (host → client), Heading carries priority
         DropSonobuoy   = 16,  // Helicopter sonobuoy drop (PvP sync)
+        SetAltitude     = 17,  // Aircraft/Helicopter preset altitude
+        ReturnToBase    = 18,  // Aircraft/Helicopter RTB
+        ClassifyContact = 19,  // Radar contact classification (hostile/friendly/neutral)
     }
 
     /// <summary>

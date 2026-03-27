@@ -25,6 +25,13 @@ namespace SeapowerMultiplayer.Messages
         public float  TargetY;
         public float  TargetZ;
 
+        // Launch direction — the missile's transform.forward at the moment of launch.
+        // Used by TryForceSpawn to set the correct initial orientation so both sides
+        // create matching waypoints (StartAngle depends on transform.forward.y).
+        public float  LaunchDirX;
+        public float  LaunchDirY;
+        public float  LaunchDirZ;
+
         public void Serialize(NetDataWriter w)
         {
             w.Put(HostProjectileId);
@@ -34,6 +41,9 @@ namespace SeapowerMultiplayer.Messages
             w.Put(TargetX);
             w.Put(TargetY);
             w.Put(TargetZ);
+            w.Put(LaunchDirX);
+            w.Put(LaunchDirY);
+            w.Put(LaunchDirZ);
         }
 
         public static ProjectileSpawnMessage Deserialize(NetDataReader r) => new ProjectileSpawnMessage
@@ -45,6 +55,9 @@ namespace SeapowerMultiplayer.Messages
             TargetX          = r.GetFloat(),
             TargetY          = r.GetFloat(),
             TargetZ          = r.GetFloat(),
+            LaunchDirX       = r.GetFloat(),
+            LaunchDirY       = r.GetFloat(),
+            LaunchDirZ       = r.GetFloat(),
         };
     }
 }

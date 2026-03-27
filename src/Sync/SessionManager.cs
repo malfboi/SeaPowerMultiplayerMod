@@ -53,12 +53,15 @@ namespace SeapowerMultiplayer
             SceneLoading = false; // host isn't actually loading a scene
 
             // Reset sync health counters on host side too
+            UnitRegistry.Clear();
+            UnitRegistry.PopulateFromScene();
             CombatEventHandler.ResetCounters();
             MissileStateSyncHandler.ResetCounters();
             StateApplier.ResetOrphanTracking();
             PvPFireAuth.Clear();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+            Patch_Blastzone_OnHitWeapon.ClearInterceptions();
             CombatEventHandler.ClearDeathWatch();
             Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
             Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
@@ -175,11 +178,13 @@ namespace SeapowerMultiplayer
             try
             {
                 // Clear state and projectile ID mappings from previous session
+                UnitRegistry.Clear();
                 ProjectileIdMapper.Clear();
                 PvPDeathNotifications.Clear();
                 PvPFireAuth.Clear();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
                 Patch_Blastzone_OnHitUnit.ClearMissileImpacts();
+                Patch_Blastzone_OnHitWeapon.ClearInterceptions();
                 Patch_ObjectBase_NotifyDestroyed_PvP.Clear();
                 Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
                 Patch_Submarine_SetDepth.Reset();
@@ -354,14 +359,14 @@ namespace SeapowerMultiplayer
         private static void InitializeAllUnits()
         {
             int count = 0;
-            foreach (var v in Object.FindObjectsByType<Vessel>(FindObjectsSortMode.None))
-            { v.setInitialized(); count++; }
-            foreach (var s in Object.FindObjectsByType<Submarine>(FindObjectsSortMode.None))
-            { s.setInitialized(); count++; }
-            foreach (var a in Object.FindObjectsByType<Aircraft>(FindObjectsSortMode.None))
-            { a.setInitialized(); count++; }
-            foreach (var h in Object.FindObjectsByType<Helicopter>(FindObjectsSortMode.None))
-            { h.setInitialized(); count++; }
+            foreach (var v in UnitRegistry.Vessels)
+            { if (v != null) { v.setInitialized(); count++; } }
+            foreach (var s in UnitRegistry.Submarines)
+            { if (s != null) { s.setInitialized(); count++; } }
+            foreach (var a in UnitRegistry.AircraftList)
+            { if (a != null) { a.setInitialized(); count++; } }
+            foreach (var h in UnitRegistry.Helicopters)
+            { if (h != null) { h.setInitialized(); count++; } }
             Log.LogInfo($"[Session] Called setInitialized() on {count} units (_canUpdate=true)");
         }
 
@@ -450,6 +455,9 @@ namespace SeapowerMultiplayer
                 FlushEnemyEngageTasks();
             }
 
+            // Populate registry as fallback for units that spawned before Harmony patches were active
+            UnitRegistry.PopulateFromScene();
+
             InitializeAllUnits();
 
             // Restore sub-minute precision the save format drops
@@ -506,8 +514,9 @@ namespace SeapowerMultiplayer
         private static void FlushEnemyEngageTasks()
         {
             int flushed = 0;
-            foreach (var obj in Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
+            foreach (var obj in UnitRegistry.All)
             {
+                if (obj == null) continue;
                 if (obj._taskforce == Globals._playerTaskforce) continue;
                 if (obj.IsDestroyed) continue;
 
@@ -581,9 +590,9 @@ namespace SeapowerMultiplayer
 
             // Find first player vessel (prefer Vessel, fall back to any player unit)
             ObjectBase target = null;
-            foreach (var v in Object.FindObjectsByType<Vessel>(FindObjectsSortMode.None))
+            foreach (var v in UnitRegistry.Vessels)
             {
-                if (v._taskforce == Globals._playerTaskforce)
+                if (v != null && v._taskforce == Globals._playerTaskforce)
                 {
                     target = v;
                     break;
@@ -592,9 +601,9 @@ namespace SeapowerMultiplayer
             if (target == null)
             {
                 // Try submarines
-                foreach (var s in Object.FindObjectsByType<Submarine>(FindObjectsSortMode.None))
+                foreach (var s in UnitRegistry.Submarines)
                 {
-                    if (s._taskforce == Globals._playerTaskforce)
+                    if (s != null && s._taskforce == Globals._playerTaskforce)
                     {
                         target = s;
                         break;

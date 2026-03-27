@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using SeaPower;
 using UnityEngine;
 
@@ -26,6 +27,7 @@ namespace SeapowerMultiplayer
     public static class ProjectileIdMapper
     {
         private const float StaleTimeout = 15f; // real seconds before a pending entry is considered stale
+        private const float HardSyncGracePeriod = 0.5f;  // seconds — defer reconciliation after hard sync (was 2.0f)
 
         private struct PendingEntry
         {
@@ -37,9 +39,44 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<int, int> _hostToLocal = new(); // hostId → localId
         private static readonly Dictionary<int, int> _localToHost = new(); // localId → hostId
 
-        // Spawn-time matching lists (per source unit + ammo type, FIFO with stale-skipping)
-        private static readonly Dictionary<(int, string), List<PendingEntry>> _pendingHostSpawns  = new();
-        private static readonly Dictionary<(int, string), List<PendingEntry>> _pendingLocalSpawns = new();
+        // Spawn-time matching queues (per source unit + ammo type, FIFO with stale-skipping)
+        private static readonly Dictionary<(int, string), Queue<PendingEntry>> _pendingHostSpawns  = new();
+        private static readonly Dictionary<(int, string), Queue<PendingEntry>> _pendingLocalSpawns = new();
+
+        // Running totals for pending counts (avoids iterating all queues)
+        private static int _pendingHostTotal;
+        private static int _pendingLocalTotal;
+
+        private static float _hardSyncTime = -999f;
+
+        // Scene projectile cache (avoids repeated FindObjectsByType calls per frame)
+        private static Missile[] _cachedMissiles;
+        private static Torpedo[] _cachedTorpedoes;
+        private static bool _cacheValid;
+
+        // Failed match tracking (stops retrying after MaxMatchAttempts)
+        private static readonly Dictionary<int, int> _failedMatchAttempts = new();
+        private const int MaxMatchAttempts = 20;
+
+        // Log throttling (suppresses duplicate warnings per host projectile ID)
+        private static readonly Dictionary<int, (float lastLogTime, int suppressedCount)> _logThrottle = new();
+        private const float LogThrottleInterval = 10f;
+
+        // Cycle detection: lock assignments after repeated reassignment
+        private static readonly Dictionary<int, int> _reassignmentCount = new(); // hostId → reassignment count
+        private static readonly HashSet<int> _lockedHostIds = new();             // hostIds locked from further remapping
+        private const int MaxReassignments = 3;
+
+        // Host-only projectile tracking (projectiles on host with no local counterpart)
+        private static readonly HashSet<int> _hostOnlyProjectiles = new();
+
+        // Pending host IDs: tracks host IDs currently queued in _pendingHostSpawns
+        private static readonly HashSet<int> _pendingHostIds = new();
+
+        private static bool IsInGracePeriod()
+        {
+            return (Time.unscaledTime - _hardSyncTime) < HardSyncGracePeriod;
+        }
 
         /// <summary>Call on session load / disconnect to reset all mappings.</summary>
         public static void Clear()
@@ -48,21 +85,41 @@ namespace SeapowerMultiplayer
             _localToHost.Clear();
             _pendingHostSpawns.Clear();
             _pendingLocalSpawns.Clear();
+            _pendingHostTotal = 0;
+            _pendingLocalTotal = 0;
+            _failedMatchAttempts.Clear();
+            _logThrottle.Clear();
+            _reassignmentCount.Clear();
+            _lockedHostIds.Clear();
+            _hostOnlyProjectiles.Clear();
+            _pendingHostIds.Clear();
+            // Fix #52: Only start a new grace period if not already in one
+            if (!IsInGracePeriod())
+            {
+                _hardSyncTime = Time.unscaledTime;
+            }
+            else
+            {
+                Plugin.Log.LogDebug("[IdMapper] Cleared — existing grace period still active, not resetting timer");
+            }
+            ClearSceneCache();
             StalePurgedCount = 0;
+            SpawnSuccessCount = 0;
+            SpawnFailureCount = 0;
+            Plugin.Log.LogInfo($"[IdMapper] Cleared — grace period active for {HardSyncGracePeriod}s (reconciliation deferred, proximity matching active)");
         }
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
         public static int MappedCount => _hostToLocal.Count;
         public static int StalePurgedCount { get; private set; }
-        public static int PendingHostCount
-        {
-            get { int t = 0; foreach (var q in _pendingHostSpawns.Values) t += q.Count; return t; }
-        }
-        public static int PendingLocalCount
-        {
-            get { int t = 0; foreach (var q in _pendingLocalSpawns.Values) t += q.Count; return t; }
-        }
+        public static int SpawnSuccessCount { get; private set; }
+        public static int SpawnFailureCount { get; private set; }
+        public static int PendingHostCount => _pendingHostTotal;
+        public static int PendingLocalCount => _pendingLocalTotal;
+
+        /// <summary>Number of projectiles the host reports that have no local counterpart.</summary>
+        public static int HostOnlyCount => _hostOnlyProjectiles.Count;
 
         // ── Spawn-time matching ───────────────────────────────────────────────
 
@@ -73,7 +130,8 @@ namespace SeapowerMultiplayer
         /// In PvP the spawn message includes target info so TryForceSpawn fires at the correct target.
         /// </summary>
         public static void OnHostSpawnReceived(int hostProjectileId, int sourceUnitId, string ammoName,
-            int targetEntityId = 0, float targetX = 0f, float targetY = 0f, float targetZ = 0f)
+            int targetEntityId = 0, float targetX = 0f, float targetY = 0f, float targetZ = 0f,
+            float launchDirX = 0f, float launchDirY = 0f, float launchDirZ = 0f)
         {
             // Already mapped? (e.g. IDs happen to align)
             if (_hostToLocal.ContainsKey(hostProjectileId)) return;
@@ -91,35 +149,39 @@ namespace SeapowerMultiplayer
 
             // Check if a local projectile from this source + ammo is waiting for a match
             // Skip stale entries first
-            if (_pendingLocalSpawns.TryGetValue(key, out var localList))
+            if (_pendingLocalSpawns.TryGetValue(key, out var localQueue))
             {
-                SkipStaleEntries(localList, now, revokeAuth: false);
-                if (localList.Count > 0)
+                SkipStaleEntries(localQueue, now, revokeAuth: false, isHostQueue: false);
+                if (localQueue.Count > 0)
                 {
-                    int localId = localList[0].Id;
-                    localList.RemoveAt(0);
+                    int localId = localQueue.Peek().Id;
+                    localQueue.Dequeue();
+                    _pendingLocalTotal--;
                     Register(hostProjectileId, localId);
+                    SpawnSuccessCount++;
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (host msg arrived second): host {hostProjectileId} → local {localId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
                 }
             }
 
             // No local match yet — queue the host ID, then try to force-spawn immediately
-            if (!_pendingHostSpawns.TryGetValue(key, out var hostList))
+            if (!_pendingHostSpawns.TryGetValue(key, out var hostQueue))
             {
-                hostList = new List<PendingEntry>();
-                _pendingHostSpawns[key] = hostList;
+                hostQueue = new Queue<PendingEntry>();
+                _pendingHostSpawns[key] = hostQueue;
             }
-            hostList.Add(new PendingEntry
+            hostQueue.Enqueue(new PendingEntry
             {
                 Id = hostProjectileId,
                 SourceUnitId = sourceUnitId,
                 EnqueueTime = now,
             });
+            _pendingHostTotal++;
+            _pendingHostIds.Add(hostProjectileId);
 
             // Resolve target from the message for guided missiles.
             // In PvP, coordinates in the spawn message are geo-encoded (same as AutoFireWeapon orders).
-            ObjectBase? targetObject = null;
+            ObjectBase targetObject = null;
             Vector3 targetPos = Vector3.zero;
             bool hasTarget = false;
             if (targetEntityId > 0 || targetX != 0f || targetY != 0f || targetZ != 0f)
@@ -139,11 +201,20 @@ namespace SeapowerMultiplayer
                 }
             }
 
+            if (hasTarget)
+                Plugin.Log.LogInfo($"[IdMapper] Target resolution: entityId={targetEntityId} " +
+                    $"resolved={targetObject != null} " +
+                    (targetObject != null ? $"name={targetObject.name} " : "") +
+                    $"pos=({targetPos.x:F0},{targetPos.y:F0},{targetPos.z:F0})");
+
             // Force-spawn a local missile directly from the unit's container so that
             // OnLocalSpawn (triggered by CommonLaunchSettings Postfix) matches instantly.
             // In PvP, this fires at the correct time (spawn message sent at fire time) with
             // the correct target, replacing the too-early engage-task puppet fire.
-            TryForceSpawn(sourceUnitId, ammoName, hasTarget ? targetObject : null, hasTarget ? targetPos : (Vector3?)null);
+            Vector3? launchDir = (launchDirX != 0f || launchDirY != 0f || launchDirZ != 0f)
+                ? new Vector3(launchDirX, launchDirY, launchDirZ)
+                : (Vector3?)null;
+            TryForceSpawn(sourceUnitId, ammoName, hasTarget ? targetObject : null, hasTarget ? targetPos : (Vector3?)null, launchDir);
         }
 
         /// <summary>
@@ -161,31 +232,35 @@ namespace SeapowerMultiplayer
 
             // Check if a host spawn from this source + ammo is waiting for a match
             // Skip stale entries first
-            if (_pendingHostSpawns.TryGetValue(key, out var hostList))
+            if (_pendingHostSpawns.TryGetValue(key, out var hostQueue))
             {
-                SkipStaleEntries(hostList, now, revokeAuth: true);
-                if (hostList.Count > 0)
+                SkipStaleEntries(hostQueue, now, revokeAuth: true, isHostQueue: true);
+                if (hostQueue.Count > 0)
                 {
-                    var entry = hostList[0];
-                    hostList.RemoveAt(0);
+                    var entry = hostQueue.Peek();
+                    hostQueue.Dequeue();
+                    _pendingHostTotal--;
+                    _pendingHostIds.Remove(entry.Id);
                     Register(entry.Id, localProjectileId);
+                    SpawnSuccessCount++;
                     Plugin.Log.LogDebug($"[IdMapper] Spawn-matched (local spawned second): host {entry.Id} → local {localProjectileId} (source unit {sourceUnitId}, ammo={ammoName})");
                     return;
                 }
             }
 
             // No host match yet — queue for when the host message arrives
-            if (!_pendingLocalSpawns.TryGetValue(key, out var localList))
+            if (!_pendingLocalSpawns.TryGetValue(key, out var localQueue))
             {
-                localList = new List<PendingEntry>();
-                _pendingLocalSpawns[key] = localList;
+                localQueue = new Queue<PendingEntry>();
+                _pendingLocalSpawns[key] = localQueue;
             }
-            localList.Add(new PendingEntry
+            localQueue.Enqueue(new PendingEntry
             {
                 Id = localProjectileId,
                 SourceUnitId = sourceUnitId,
                 EnqueueTime = now,
             });
+            _pendingLocalTotal++;
         }
 
         /// <summary>
@@ -196,7 +271,7 @@ namespace SeapowerMultiplayer
         /// flies toward the unit's own position (acceptable for non-guided weapons or dummies).
         /// </summary>
         private static bool TryForceSpawn(int sourceUnitId, string ammoName,
-            ObjectBase? targetObject = null, Vector3? targetPosition = null)
+            ObjectBase targetObject = null, Vector3? targetPosition = null, Vector3? launchDir = null)
         {
             var unit = StateSerializer.FindById(sourceUnitId);
             if (unit == null || unit._obp == null)
@@ -223,7 +298,9 @@ namespace SeapowerMultiplayer
                     var weapon = container._weapons[0];
                     if (weapon?._ap?._ammunitionFileName != ammoName) continue;
 
+                    var weaponRef = weapon; // capture before launch() removes it from _weapons
                     launcher.launch(i, launchTarget, launchPos, Vector3.zero);
+                    ApplyLaunchDirection(weaponRef, launchDir, ammoName, sourceUnitId);
                     Plugin.Log.LogInfo($"[ForceSpawn] Force-spawned ammo={ammoName} unit={sourceUnitId} container={i}");
                     return true;
                 }
@@ -254,7 +331,6 @@ namespace SeapowerMultiplayer
                     if (ammoRef != null && ammoRef._ap._ammunitionFileName != ammoName) continue;
 
                     bool loaded = false;
-                    bool isFirstUse = (ammoRef == null);
                     if (magazine != null)
                     {
                         // Magazine-based: temporarily top up by 1 so container.load() succeeds,
@@ -276,7 +352,10 @@ namespace SeapowerMultiplayer
 
                     if (!loaded) continue;
 
+                    var weaponRef = container._weapons[0]; // capture before launch() removes it
                     launcher.launch(i, launchTarget, launchPos, Vector3.zero);
+                    ApplyLaunchDirection(weaponRef, launchDir, ammoName, sourceUnitId);
+                    Plugin.Log.LogInfo($"[ForceSpawn] Force-spawned (reload) ammo={ammoName} unit={sourceUnitId} container={i}");
                     return true;
                 }
             }
@@ -286,31 +365,70 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>
-        /// Remove stale entries from the front of a pending list.
-        /// revokeAuth should be true for host spawn lists (their auth was never consumed),
-        /// false for local spawn lists (their auth was already consumed via ConsumeAuth).
+        /// After launcher.launch(), the missile exists but faces the container's rest direction.
+        /// Rotate it to match the host's launch direction and rebuild waypoints so the flight
+        /// plan uses the correct StartAngle (derived from transform.forward.y).
+        /// weaponRef must be captured from container._weapons[0] BEFORE launch() removes it.
         /// </summary>
-        private static void SkipStaleEntries(List<PendingEntry> list, float now, bool revokeAuth)
+        private static void ApplyLaunchDirection(WeaponBase weaponRef, Vector3? launchDir,
+            string ammoName, int sourceUnitId)
         {
-            // Find the first non-stale entry
-            int staleCount = 0;
-            while (staleCount < list.Count && (now - list[staleCount].EnqueueTime) > StaleTimeout)
-                staleCount++;
+            if (!launchDir.HasValue || launchDir.Value == Vector3.zero) return;
+            if (weaponRef == null) return;
 
-            if (staleCount == 0) return;
+            weaponRef.transform.rotation = Quaternion.LookRotation(launchDir.Value);
 
-            // Log and revoke auth for each stale entry
-            for (int i = 0; i < staleCount; i++)
+            if (weaponRef is Missile missile)
             {
-                var stale = list[i];
+                missile.CreateWaypoints();
+                Plugin.Log.LogInfo($"[ForceSpawn] Applied launch direction ({launchDir.Value.x:F2},{launchDir.Value.y:F2},{launchDir.Value.z:F2}) and rebuilt waypoints for {ammoName} unit={sourceUnitId}");
+            }
+        }
+
+        /// <summary>
+        /// Remove stale entries from the front of a pending queue.
+        /// revokeAuth should be true for host spawn queues (their auth was never consumed),
+        /// false for local spawn queues (their auth was already consumed via ConsumeAuth).
+        /// isHostQueue indicates which running counter to decrement.
+        /// </summary>
+        private static void SkipStaleEntries(Queue<PendingEntry> queue, float now, bool revokeAuth, bool isHostQueue)
+        {
+            while (queue.Count > 0 && (now - queue.Peek().EnqueueTime) > StaleTimeout)
+            {
+                var stale = queue.Dequeue();
+                if (isHostQueue)
+                {
+                    _pendingHostTotal--;
+                    _pendingHostIds.Remove(stale.Id);
+                    SpawnFailureCount++;
+                }
+                else
+                    _pendingLocalTotal--;
                 StalePurgedCount++;
                 if (revokeAuth && Plugin.Instance.CfgPvP.Value)
                     PvPFireAuth.Revoke(stale.SourceUnitId, 1);
                 Plugin.Log.LogWarning($"[IdMapper] Purged stale pending entry: id={stale.Id} source={stale.SourceUnitId} age={now - stale.EnqueueTime:F1}s");
             }
+        }
 
-            // Batch remove for O(n) instead of O(n^2)
-            list.RemoveRange(0, staleCount);
+        /// <summary>Cache scene projectiles to avoid repeated FindObjectsByType calls.</summary>
+        public static void CacheSceneProjectiles()
+        {
+            var missileList = UnitRegistry.Missiles;
+            _cachedMissiles = new Missile[missileList.Count];
+            for (int i = 0; i < missileList.Count; i++) _cachedMissiles[i] = missileList[i];
+            var torpedoList = UnitRegistry.Torpedoes;
+            _cachedTorpedoes = new Torpedo[torpedoList.Count];
+            for (int i = 0; i < torpedoList.Count; i++) _cachedTorpedoes[i] = torpedoList[i];
+            _cacheValid = true;
+        }
+
+        /// <summary>Clear the scene projectile cache.</summary>
+        public static void ClearSceneCache()
+        {
+            _cachedMissiles = null;
+            _cachedTorpedoes = null;
+            _cacheValid = false;
         }
 
         /// <summary>
@@ -321,10 +439,10 @@ namespace SeapowerMultiplayer
         {
             float now = Time.unscaledTime;
 
-            foreach (var list in _pendingHostSpawns.Values)
-                SkipStaleEntries(list, now, revokeAuth: true);
-            foreach (var list in _pendingLocalSpawns.Values)
-                SkipStaleEntries(list, now, revokeAuth: false);
+            foreach (var queue in _pendingHostSpawns.Values)
+                SkipStaleEntries(queue, now, revokeAuth: true, isHostQueue: true);
+            foreach (var queue in _pendingLocalSpawns.Values)
+                SkipStaleEntries(queue, now, revokeAuth: false, isHostQueue: false);
         }
 
         // ── Lookup ────────────────────────────────────────────────────────────
@@ -367,17 +485,23 @@ namespace SeapowerMultiplayer
         /// </summary>
         public static void UpdateMapping(int hostId, Vector3 hostPos)
         {
-            // Already mapped (likely via spawn-time matching)?
+            // Already mapped, PvP mode, or exceeded match attempts?
             if (_hostToLocal.ContainsKey(hostId)) return;
-
-            // PvP: skip proximity matching (spawn-time matching is sufficient)
             if (Plugin.Instance.CfgPvP.Value) return;
+            if (_failedMatchAttempts.TryGetValue(hostId, out var attempts) && attempts >= MaxMatchAttempts) return;
+            if (_lockedHostIds.Contains(hostId)) return;
+            if (_pendingHostIds.Contains(hostId))
+                return;
+            // Fix #52: Grace period check REMOVED from here (was lines 325-326).
+            // Proximity matching now runs continuously — it's incremental and self-correcting.
+            // Grace period moved to OnReconciliationReceived() to prevent batch thrashing.
 
             // Try direct ID match first
             var direct = StateSerializer.FindById(hostId);
             if (direct != null && !direct.IsDestroyed && (direct is Missile || direct is Torpedo))
             {
                 Register(hostId, hostId);
+                _failedMatchAttempts.Remove(hostId);
                 return;
             }
 
@@ -387,23 +511,47 @@ namespace SeapowerMultiplayer
             FindClosestUnmapped<Missile>(hostPos, ref bestMatch, ref bestDist);
             FindClosestUnmapped<Torpedo>(hostPos, ref bestMatch, ref bestDist);
 
-            if (bestMatch != null && bestDist < 2000f)
+            if (bestMatch != null && bestDist < 300f)
             {
                 Register(hostId, bestMatch.UniqueID);
-                Plugin.Log.LogDebug($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                _failedMatchAttempts.Remove(hostId);
+                if (Plugin.Instance.CfgVerboseDebug.Value)
+                    Plugin.Log.LogDebug($"[IdMapper] Proximity-matched host projectile {hostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                return;
             }
-            else
+
+            // Track failed match attempt
+            _failedMatchAttempts[hostId] = (_failedMatchAttempts.TryGetValue(hostId, out var prev) ? prev : 0) + 1;
+
+            // Throttle log warnings (suppress duplicates, show count every LogThrottleInterval)
+            if (_logThrottle.TryGetValue(hostId, out var throttle) && Time.unscaledTime - throttle.lastLogTime < LogThrottleInterval)
             {
-                Plugin.Log.LogWarning($"[IdMapper] No local match for host projectile {hostId} at ({hostPos.x:F0},{hostPos.y:F0},{hostPos.z:F0}) bestDist={bestDist:F0}");
+                _logThrottle[hostId] = (throttle.lastLogTime, throttle.suppressedCount + 1);
+                return;
             }
+            string suffix = (throttle.suppressedCount > 0) ? $" (suppressed {throttle.suppressedCount} similar)" : "";
+            Plugin.Log.LogWarning($"[IdMapper] No local match for host projectile {hostId} at ({hostPos.x:F0},{hostPos.y:F0},{hostPos.z:F0}) bestDist={bestDist:F0}{suffix}");
+            _logThrottle[hostId] = (Time.unscaledTime, 0);
         }
 
         private static void FindClosestUnmapped<T>(Vector3 hostPos, ref ObjectBase? bestMatch, ref float bestDist)
             where T : ObjectBase
         {
-            foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            IEnumerable<ObjectBase> projectiles;
+            if (_cacheValid && typeof(T) == typeof(Missile))
+                projectiles = _cachedMissiles;
+            else if (_cacheValid && typeof(T) == typeof(Torpedo))
+                projectiles = _cachedTorpedoes;
+            else if (typeof(T) == typeof(Missile))
+                projectiles = UnitRegistry.Missiles;
+            else if (typeof(T) == typeof(Torpedo))
+                projectiles = UnitRegistry.Torpedoes;
+            else
+                projectiles = UnitRegistry.All;
+
+            foreach (var p in projectiles)
             {
-                if (p.IsDestroyed) continue;
+                if (p == null || p.IsDestroyed) continue;
                 if (_localToHost.ContainsKey(p.UniqueID)) continue;
                 float dist = Vector3.Distance(p.transform.position, hostPos);
                 if (dist < bestDist)
@@ -416,15 +564,50 @@ namespace SeapowerMultiplayer
 
         private static void Register(int hostId, int localId)
         {
+            // Don't reassign a localId that is already mapped to a different locked hostId.
+            // This prevents reconciliation from corrupting locked assignments.
+            if (_localToHost.TryGetValue(localId, out int existingHostId) && existingHostId != hostId)
+            {
+                if (_lockedHostIds.Contains(existingHostId))
+                {
+                    if (Plugin.Instance.CfgVerboseDebug.Value)
+                        Plugin.Log.LogDebug($"[IdMapper] Skipped reassign local {localId}: already locked to host {existingHostId}");
+                    return;
+                }
+                // Clean up stale reverse mapping
+                _hostToLocal.Remove(existingHostId);
+            }
+
             // On client: reassign the local projectile's UniqueID to match the host's.
             // After this, FindById(hostId) works directly — no mapping lookup needed.
+            // Save/restore _UID to prevent SetUniqueId from polluting the game's global
+            // entity counter — without this, the client's counter jumps to the host's ID
+            // range, causing subsequent entity spawns to get wildly divergent IDs.
             if (NetworkManager.Instance.IsConnectedClient && hostId != localId)
             {
                 var obj = StateSerializer.FindById(localId);
                 if (obj != null)
                 {
+                    // Check cycle detection: has this host ID been reassigned too many times?
+                    int count = _reassignmentCount.TryGetValue(hostId, out var c) ? c + 1 : 1;
+                    _reassignmentCount[hostId] = count;
+
+                    if (count >= MaxReassignments)
+                    {
+                        // Lock this assignment to prevent infinite cycling
+                        _lockedHostIds.Add(hostId);
+                        Plugin.Log.LogWarning($"[IdMapper] Cycle detected: host {hostId} reassigned {count} times — locking assignment to local {localId}");
+                        // Still register the mapping so lookups work
+                        _hostToLocal[hostId] = localId;
+                        _localToHost[localId] = hostId;
+                        return;
+                    }
+
+                    int prevUid = Singleton<SceneCreator>.Instance._UID;
                     obj.SetUniqueId(hostId);
-                    Plugin.Log.LogDebug($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
+                    Singleton<SceneCreator>.Instance._UID = prevUid;
+                    if (Plugin.Instance.CfgVerboseDebug.Value)
+                        Plugin.Log.LogDebug($"[IdMapper] Reassigned client projectile {localId} → {hostId}");
                     return;  // No mapping needed — IDs now match
                 }
             }
@@ -432,6 +615,59 @@ namespace SeapowerMultiplayer
             // Fallback: keep mapping for host or if object not found yet
             _hostToLocal[hostId] = localId;
             _localToHost[localId] = hostId;
+        }
+
+        /// <summary>
+        /// Handle reconciliation message from host. Updates tracking of host-only
+        /// projectiles and attempts second-chance matching for unmapped entries.
+        /// </summary>
+        public static void OnReconciliationReceived(Messages.ProjectileReconciliationMessage msg)
+        {
+            // Fix #52: Defer reconciliation during post-hard-sync grace period.
+            // Reconciliation uses batch position matching which can thrash during
+            // scene reload when entity positions are still settling.
+            // UpdateMapping() handles incremental matching during this window.
+            if (IsInGracePeriod())
+            {
+                Plugin.Log.LogDebug("[IdMapper] Reconciliation deferred — grace period active " +
+                    $"({HardSyncGracePeriod - (Time.unscaledTime - _hardSyncTime):F1}s remaining)");
+                return;
+            }
+
+            var activeHostIds = new HashSet<int>(msg.Projectiles.Count);
+
+            foreach (var entry in msg.Projectiles)
+            {
+                activeHostIds.Add(entry.HostId);
+
+                // Already mapped? Good.
+                if (_hostToLocal.ContainsKey(entry.HostId)) continue;
+
+                // Already locked from cycling? Skip.
+                if (_lockedHostIds.Contains(entry.HostId)) continue;
+
+                // Try proximity match as a second chance
+                var hostPos = new UnityEngine.Vector3(entry.X, entry.Y, entry.Z);
+                ObjectBase bestMatch = null;
+                float bestDist = float.MaxValue;
+                FindClosestUnmapped<SeaPower.Missile>(hostPos, ref bestMatch, ref bestDist);
+                FindClosestUnmapped<SeaPower.Torpedo>(hostPos, ref bestMatch, ref bestDist);
+
+                if (bestMatch != null && bestDist < 200f)
+                {
+                    Register(entry.HostId, bestMatch.UniqueID);
+                    _reassignmentCount.Remove(entry.HostId);
+                    Plugin.Log.LogInfo($"[IdMapper] Reconciliation matched: host {entry.HostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                }
+                else
+                {
+                    // Track as host-only (no local counterpart)
+                    _hostOnlyProjectiles.Add(entry.HostId);
+                }
+            }
+
+            // Clean up host-only tracking: remove IDs no longer in host's active list
+            _hostOnlyProjectiles.RemoveWhere(id => !activeHostIds.Contains(id));
         }
 
         /// <summary>Remove mapping when a projectile is destroyed.</summary>

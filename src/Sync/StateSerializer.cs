@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq.Expressions;
 using System.Reflection;
 using HarmonyLib;
 using SeaPower;
@@ -12,9 +13,45 @@ namespace SeapowerMultiplayer
     {
         public static int GetUniqueId(ObjectBase obj) => obj.UniqueID;
 
-        // Cached reflection for protected field (avoids Traverse per-unit in hot path)
-        private static readonly FieldInfo _setRudderAngleField =
-            AccessTools.Field(typeof(Vessel), "_setRudderAngle");
+        // Compiled delegates for hot-path reflected fields (avoids FieldInfo.GetValue per-unit)
+        private static readonly Func<Vessel, float> _getRudderAngle;
+        private static readonly Func<WeaponBase, ObjectBase> _getLaunchPlatform;
+
+        private static readonly StateUpdateMessage _pooledMsg = new();
+
+        static StateSerializer()
+        {
+            var rudderField = AccessTools.Field(typeof(Vessel), "_setRudderAngle");
+            if (rudderField != null)
+            {
+                var param = Expression.Parameter(typeof(Vessel));
+                var access = Expression.Field(param, rudderField);
+                _getRudderAngle = Expression.Lambda<Func<Vessel, float>>(access, param).Compile();
+            }
+            else
+            {
+                _getRudderAngle = _ => 0f;
+            }
+
+            var launchField = AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
+            if (launchField != null)
+            {
+                var param = Expression.Parameter(typeof(WeaponBase));
+                var access = Expression.Field(param, launchField);
+                var cast = Expression.TypeAs(access, typeof(ObjectBase));
+                _getLaunchPlatform = Expression.Lambda<Func<WeaponBase, ObjectBase>>(cast, param).Compile();
+            }
+            else
+            {
+                _getLaunchPlatform = _ => null;
+            }
+        }
+
+        /// <summary>
+        /// Public accessor for the compiled _launchPlatform delegate, so other classes
+        /// (e.g. StateBroadcaster) can use it without their own FieldInfo reflection.
+        /// </summary>
+        public static ObjectBase GetLaunchPlatform(WeaponBase wb) => _getLaunchPlatform(wb);
 
         /// <summary>
         /// Find any ObjectBase by UniqueID. Uses SceneCreator's fast dictionary first,
@@ -30,43 +67,47 @@ namespace SeapowerMultiplayer
 
         public static StateUpdateMessage Capture(Taskforce filterTaskforce = null)
         {
-            var msg = new StateUpdateMessage
-            {
-                Timestamp   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                GameSeconds = Singleton<SeaPower.Environment>.Instance.Hour * 3600f
+            var msg = _pooledMsg;
+            msg.Reset();
+            msg.Timestamp   = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            msg.GameSeconds = Singleton<SeaPower.Environment>.Instance.Hour * 3600f
                             + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
-                            + Singleton<SeaPower.Environment>.Instance.Seconds,
-            };
+                            + Singleton<SeaPower.Environment>.Instance.Seconds;
 
-            AddUnits<Vessel>    (msg, UnitType.Vessel,     filterTaskforce);
-            AddUnits<Submarine> (msg, UnitType.Submarine,  filterTaskforce);
-            AddUnits<Aircraft>  (msg, UnitType.Aircraft,   filterTaskforce);
-            AddUnits<Helicopter>(msg, UnitType.Helicopter, filterTaskforce);
-            AddUnits<LandUnit>  (msg, UnitType.LandUnit,   filterTaskforce);
+            AddRegistryUnits(msg, UnitType.Vessel,     UnitRegistry.Vessels,      filterTaskforce);
+            AddRegistryUnits(msg, UnitType.Submarine,  UnitRegistry.Submarines,   filterTaskforce);
+            AddRegistryUnits(msg, UnitType.Aircraft,   UnitRegistry.AircraftList, filterTaskforce);
+            AddRegistryUnits(msg, UnitType.Helicopter, UnitRegistry.Helicopters,  filterTaskforce);
+            AddRegistryUnits(msg, UnitType.LandUnit,   UnitRegistry.LandUnits,    filterTaskforce);
             // Biologics excluded — ambient sonar contacts, not gameplay units
 
             if (filterTaskforce == null)
             {
                 // Co-op: all projectiles (host-authoritative)
-                AddProjectiles<Missile>(msg, 0);
-                AddProjectiles<Torpedo>(msg, 1);
+                AddRegistryProjectiles(msg, 0, UnitRegistry.Missiles);
+                AddRegistryProjectiles(msg, 1, UnitRegistry.Torpedoes);
             }
             else
             {
                 // PvP: owned projectiles only (owner-authoritative)
-                AddOwnedProjectiles<Missile>(msg, 0, filterTaskforce);
-                AddOwnedProjectiles<Torpedo>(msg, 1, filterTaskforce);
+                AddRegistryOwnedProjectiles(msg, 0, UnitRegistry.Missiles,  filterTaskforce);
+                AddRegistryOwnedProjectiles(msg, 1, UnitRegistry.Torpedoes, filterTaskforce);
             }
 
-            Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
+            msg.ProjectileCount = msg.Projectiles.Count;
+
+            if (Plugin.Instance.CfgVerboseDebug.Value)
+                Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
             return msg;
         }
 
-        private static void AddUnits<T>(StateUpdateMessage msg, UnitType kind, Taskforce filterTf = null)
-            where T : ObjectBase
+        private static void AddRegistryUnits<T>(StateUpdateMessage msg, UnitType kind,
+            IReadOnlyList<T> units, Taskforce filterTf = null) where T : ObjectBase
         {
-            foreach (var unit in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            for (int i = 0; i < units.Count; i++)
             {
+                var unit = units[i];
+                if (unit == null) continue;
                 if (filterTf != null && unit._taskforce != filterTf) continue;
 
                 // Encode as absolute GeoPosition (longitude/latitude/height) so
@@ -75,8 +116,7 @@ namespace SeapowerMultiplayer
                 // is relative to different origins on each machine.
                 var geo = Utils.worldPositionFromUnityToLongLat(
                     unit.transform.position, Globals._currentCenterTile);
-                float rudder = _setRudderAngleField != null && unit is Vessel
-                    ? (float)_setRudderAngleField.GetValue(unit) : 0f;
+                float rudder = unit is Vessel vessel ? _getRudderAngle(vessel) : 0f;
 
                 float desiredAlt = 0f;
                 if (unit is Aircraft || unit is Helicopter)
@@ -103,12 +143,20 @@ namespace SeapowerMultiplayer
             }
         }
 
-        private static void AddProjectiles<T>(StateUpdateMessage msg, byte kind)
-            where T : ObjectBase
+        private static void AddRegistryProjectiles<T>(StateUpdateMessage msg, byte kind,
+            IReadOnlyList<T> projectiles) where T : ObjectBase
         {
-            foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            for (int i = 0; i < projectiles.Count; i++)
             {
-                if (p.IsDestroyed) continue;
+                var p = projectiles[i];
+                if (p == null || p.IsDestroyed) continue;
+
+                // Fix #50: Skip chaff/countermeasures — not worth serializing.
+                // Same pattern as Fix #40 (tracking) and Fix #49 (order routing).
+                if (p is WeaponBase wb && wb._ap != null &&
+                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
+                    continue;
+
                 var pos = p.transform.position;
                 msg.Projectiles.Add(new ProjectileState
                 {
@@ -122,16 +170,14 @@ namespace SeapowerMultiplayer
             }
         }
 
-        private static readonly FieldInfo _launchPlatformField =
-            AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
-
-        private static void AddOwnedProjectiles<T>(StateUpdateMessage msg, byte kind, Taskforce ownerTf)
-            where T : ObjectBase
+        private static void AddRegistryOwnedProjectiles<T>(StateUpdateMessage msg, byte kind,
+            IReadOnlyList<T> projectiles, Taskforce ownerTf) where T : ObjectBase
         {
-            foreach (var p in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            for (int i = 0; i < projectiles.Count; i++)
             {
-                if (p.IsDestroyed) continue;
-                var launcher = _launchPlatformField?.GetValue(p) as ObjectBase;
+                var p = projectiles[i];
+                if (p == null || p.IsDestroyed) continue;
+                var launcher = (p is WeaponBase wb) ? _getLaunchPlatform(wb) : null;
                 if (launcher == null || launcher._taskforce != ownerTf) continue;
 
                 // Encode as GeoPosition (floating-origin safe)
@@ -146,7 +192,7 @@ namespace SeapowerMultiplayer
                     Y        = (float)geo._height,
                     Z        = (float)geo._latitude,
                     Heading  = p.transform.eulerAngles.y,
-                    Speed    = (p is WeaponBase wb) ? wb._velocityInKnots : 0f,
+                    Speed    = (p is WeaponBase wb2) ? wb2._velocityInKnots : 0f,
                     Pitch    = p.transform.eulerAngles.x,
                 });
             }
@@ -183,12 +229,6 @@ namespace SeapowerMultiplayer
         private const float PvpAirPosLerp        = 0.75f;
         private const float PvpAirHeadingLerp    = 0.85f;
         private const float PvpAirSpeedLerp      = 0.7f;
-        // Projectiles (missiles/torpedoes)
-        private const float PvpProjSnapThreshold = 50f;
-        private const float PvpProjPosLerp       = 0.85f;
-        private const float PvpProjHeadingLerp   = 0.9f;
-        private const float PvpProjSpeedLerp     = 0.8f;
-
         // Track projectile IDs across state updates for disappearance detection.
         // If host's state update no longer includes a projectile, it was destroyed.
         private static HashSet<int> _prevProjectileIds = new HashSet<int>();
@@ -366,6 +406,54 @@ namespace SeapowerMultiplayer
                 if (state.Kind == UnitType.Submarine && !isPvP)
                     hostPos.y = unit.transform.position.y;
 
+                // Fix #51: Aircraft position interpolation buffer (replaces Fix #46)
+                // Three-tier correction: accept, lerp, or snap based on divergence magnitude.
+                if (state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter)
+                {
+                    // Always sync DesiredAltitude so flight physics targets the right altitude
+                    if (state.DesiredAltitude > 0f)
+                        unit.DesiredAltitude.Value = state.DesiredAltitude;
+
+                    bool isOnDeck = state.Y < 2.0f;
+
+                    if (isOnDeck)
+                    {
+                        // On-deck/landing: snap precisely (taxiing, takeoff, landing)
+                        hostPos.y = state.Y;
+                    }
+                    else
+                    {
+                        float yDrift = Mathf.Abs(unit.transform.position.y - state.Y);
+                        float xzDrift = Vector2.Distance(
+                            new Vector2(unit.transform.position.x, unit.transform.position.z),
+                            new Vector2(hostPos.x, hostPos.z));
+
+                        // Tier 1: Accept zone (<50 units / ~11,000 feet)
+                        // Client position is close enough — local physics is accurate.
+                        // Keep client's local position entirely.
+                        if (yDrift < 50f && xzDrift < 50f)
+                        {
+                            hostPos = unit.transform.position;
+                        }
+                        // Tier 2: Smooth correction (50-500 units)
+                        // Moderate divergence — lerp toward host position over multiple frames.
+                        // LerpFactor 0.15 = ~15% correction per update at 2 Hz → smooth over ~3 updates.
+                        else if (yDrift < 500f && xzDrift < 500f)
+                        {
+                            hostPos = Vector3.Lerp(unit.transform.position, hostPos, 0.15f);
+                            hostPos.y = Mathf.Lerp(unit.transform.position.y, state.Y, 0.15f);
+                        }
+                        // Tier 3: Hard snap (>500 units)
+                        // Extreme divergence — snap immediately to re-establish sync.
+                        else
+                        {
+                            hostPos.y = state.Y;
+                            Plugin.Log.LogWarning($"[StateApplier] Aircraft {unit.name} drift " +
+                                $"Y={yDrift:F0} XZ={xzDrift:F0} exceeded 500, force-snapped");
+                        }
+                    }
+                }
+
                 if (isPvP)
                 {
                     // PvP hybrid: local physics simulates, owner's state provides corrections
@@ -417,7 +505,8 @@ namespace SeapowerMultiplayer
                     float drift = Vector3.Distance(unit.transform.position, hostPos);
                     float speedDrift = Mathf.Abs(unit._velocityInKnots - state.Speed);
                     float headingDrift = Mathf.Abs(Mathf.DeltaAngle(unit.transform.eulerAngles.y, state.Heading));
-                    DriftDetector.RecordUnit(drift, speedDrift, headingDrift);
+                    bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
+                    DriftDetector.RecordUnit(drift, speedDrift, headingDrift, isAircraft: isAir);
 
                     if (drift < driftThreshold) continue;
 
@@ -466,7 +555,7 @@ namespace SeapowerMultiplayer
 
             // DriftDetector: skip for PvP (puppets have no drift)
             if (!isPvP)
-                DriftDetector.EndFrame(CountLocalUnits(), msg.Units.Count);
+                DriftDetector.EndFrame(CountLocalUnits(), msg.Units.Count, CountLocalProjectiles(), msg.ProjectileCount);
 
             // ── Game time drift correction (host is time authority) ──────────
             if (!isHost && msg.GameSeconds > 0f)
@@ -497,54 +586,16 @@ namespace SeapowerMultiplayer
             // ── Projectile sync ──────────────────────────────────────────────────
             if (isPvP)
             {
-                // PvP: correct enemy missile/torpedo positions with authoritative lerp
+                // PvP: track enemy projectile IDs for disappearance detection.
+                // Do NOT apply position corrections — both sides force-spawn enemy
+                // missiles locally and run identical physics. Position overrides at
+                // 10 Hz fight with local sim and cause visible jitter. Combat outcomes
+                // (hits, intercepts, jamming) are synced via CombatEventMessage and
+                // MissileStateSyncMessage, not position.
                 _currProjectileIds.Clear();
                 foreach (var proj in msg.Projectiles)
                 {
                     _currProjectileIds.Add(proj.EntityId);
-
-                    var projObj = StateSerializer.FindById(proj.EntityId);
-                    if (projObj == null || projObj.IsDestroyed) continue;
-
-                    // Skip Bombs (sonobuoys) found by coincidental ID collision
-                    // with a remote missile/torpedo — sonobuoys are stationary and
-                    // not included in projectile state sync
-                    if (projObj is Bomb) continue;
-
-                    // Convert GeoPosition to local coords
-                    var projGeo = new GeoPosition
-                    {
-                        _longitude = proj.X,
-                        _latitude  = proj.Z,
-                        _height    = proj.Y,
-                    };
-                    Vector2 projLocal = Utils.longLatToLocal(projGeo, Globals._currentCenterTile);
-                    Vector3 projPos = new Vector3(projLocal.x, proj.Y, projLocal.y);
-
-                    float projDrift = Vector3.Distance(projObj.transform.position, projPos);
-
-                    if (projDrift > PvpProjSnapThreshold)
-                    {
-                        projObj.transform.position = projPos;
-                        projObj.transform.eulerAngles = new Vector3(
-                            proj.Pitch, proj.Heading, projObj.transform.eulerAngles.z);
-                        if (projObj is WeaponBase wb)
-                            wb._velocityInKnots = proj.Speed;
-                    }
-                    else if (projDrift > 2f)
-                    {
-                        projObj.transform.position = Vector3.Lerp(
-                            projObj.transform.position, projPos, PvpProjPosLerp);
-                        float heading = Mathf.LerpAngle(
-                            projObj.transform.eulerAngles.y, proj.Heading, PvpProjHeadingLerp);
-                        float pitch = Mathf.LerpAngle(
-                            projObj.transform.eulerAngles.x, proj.Pitch, PvpProjHeadingLerp);
-                        projObj.transform.eulerAngles = new Vector3(
-                            pitch, heading, projObj.transform.eulerAngles.z);
-                        if (projObj is WeaponBase wb)
-                            wb._velocityInKnots = Mathf.Lerp(
-                                wb._velocityInKnots, proj.Speed, PvpProjSpeedLerp);
-                    }
                 }
 
                 // Disappearance tracking: grace period for missed projectiles
@@ -582,41 +633,44 @@ namespace SeapowerMultiplayer
                 // Co-op: client-only projectile sync (unchanged)
                 if (isHost) return;
 
-                _currProjectileIds.Clear();
-                foreach (var proj in msg.Projectiles)
+                ProjectileIdMapper.CacheSceneProjectiles();
+                try
                 {
-                    _currProjectileIds.Add(proj.EntityId);
-
-                    var projWorldPos = new Vector3(proj.X, proj.Y, proj.Z);
-                    ProjectileIdMapper.UpdateMapping(proj.EntityId, projWorldPos);
-
-                    var p = ProjectileIdMapper.FindByHostId(proj.EntityId);
-                    if (p == null) continue;
-
-                    _projectileTargets[proj.EntityId] = new ProjectileTarget
+                    _currProjectileIds.Clear();
+                    foreach (var proj in msg.Projectiles)
                     {
-                        LocalId  = p.UniqueID,
-                        Position = projWorldPos,
-                        Heading  = proj.Heading,
-                    };
-                }
+                        _currProjectileIds.Add(proj.EntityId);
 
-                foreach (int id in _prevProjectileIds)
+                        var projWorldPos = new Vector3(proj.X, proj.Y, proj.Z);
+                        ProjectileIdMapper.UpdateMapping(proj.EntityId, projWorldPos);
+
+                        // Co-op: do NOT store position targets for local projectiles.
+                        // Both sides run identical physics — force-spawned missiles fly
+                        // on local sim. Position overrides cause jitter. We only need
+                        // the ID mapping and destruction detection (below).
+                    }
+
+                    foreach (int id in _prevProjectileIds)
+                    {
+                        if (_currProjectileIds.Contains(id)) continue;
+                        _projectileTargets.Remove(id);
+                        var obj = ProjectileIdMapper.FindByHostId(id);
+                        if (obj == null || obj.IsDestroyed) continue;
+
+                        CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
+                        ProjectileIdMapper.OnProjectileDestroyed(obj.UniqueID);
+                        ProjectilesDestroyedByTimeout++;
+                        Plugin.Log.LogDebug($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
+                    }
+
+                    var temp = _prevProjectileIds;
+                    _prevProjectileIds = _currProjectileIds;
+                    _currProjectileIds = temp;
+                }
+                finally
                 {
-                    if (_currProjectileIds.Contains(id)) continue;
-                    _projectileTargets.Remove(id);
-                    var obj = ProjectileIdMapper.FindByHostId(id);
-                    if (obj == null || obj.IsDestroyed) continue;
-
-                    CombatEventHandler.RunAsNetworkEvent(() => obj.notifyOfExternalDestruction());
-                    ProjectileIdMapper.OnProjectileDestroyed(obj.UniqueID);
-                    ProjectilesDestroyedByTimeout++;
-                    Plugin.Log.LogDebug($"[StateApplier] Projectile {id} disappeared from host update — destroyed local {obj.UniqueID}");
+                    ProjectileIdMapper.ClearSceneCache();
                 }
-
-                var temp = _prevProjectileIds;
-                _prevProjectileIds = _currProjectileIds;
-                _currProjectileIds = temp;
             }
         }
 
@@ -666,9 +720,11 @@ namespace SeapowerMultiplayer
         {
             ObjectBase best = null;
             float bestDist = float.MaxValue;
-            foreach (var obj in UnityEngine.Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
+            var all = UnitRegistry.All;
+            for (int i = 0; i < all.Count; i++)
             {
-                if (obj.IsDestroyed) continue;
+                var obj = all[i];
+                if (obj == null || obj.IsDestroyed) continue;
                 if (!KindMatches(obj, kind)) continue;
                 float d = (obj.transform.position - worldPos).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; best = obj; }
@@ -750,21 +806,58 @@ namespace SeapowerMultiplayer
                 _projectileTargets.Remove(id);
         }
 
+        private static int _cachedLocalUnitCount;
+        private static float _lastUnitCountTime;
+        private const float UnitCountCacheInterval = 1f;
+
         private static int CountLocalUnits(Taskforce filterTf = null)
         {
+            if (filterTf == null && Time.unscaledTime - _lastUnitCountTime < UnitCountCacheInterval)
+                return _cachedLocalUnitCount;
+
             int count = 0;
-            CountType<Vessel>(filterTf, ref count);
-            CountType<Submarine>(filterTf, ref count);
-            CountType<Aircraft>(filterTf, ref count);
-            CountType<Helicopter>(filterTf, ref count);
-            CountType<LandUnit>(filterTf, ref count);
+            CountRegistryType(UnitRegistry.Vessels, filterTf, ref count);
+            CountRegistryType(UnitRegistry.Submarines, filterTf, ref count);
+            CountRegistryType(UnitRegistry.AircraftList, filterTf, ref count);
+            CountRegistryType(UnitRegistry.Helicopters, filterTf, ref count);
+            CountRegistryType(UnitRegistry.LandUnits, filterTf, ref count);
+
+            if (filterTf == null)
+            {
+                _cachedLocalUnitCount = count;
+                _lastUnitCountTime = Time.unscaledTime;
+            }
             return count;
         }
 
-        private static void CountType<T>(Taskforce filterTf, ref int count) where T : ObjectBase
+        private static void CountRegistryType<T>(IReadOnlyList<T> units, Taskforce filterTf, ref int count) where T : ObjectBase
         {
-            foreach (var u in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
-                if (filterTf == null || u._taskforce == filterTf) count++;
+            for (int i = 0; i < units.Count; i++)
+            {
+                var u = units[i];
+                if (u != null && (filterTf == null || u._taskforce == filterTf)) count++;
+            }
+        }
+
+        private static int _cachedLocalProjectileCount;
+        private static float _lastProjectileCountTime;
+
+        private static int CountLocalProjectiles()
+        {
+            if (Time.unscaledTime - _lastProjectileCountTime < UnitCountCacheInterval)
+                return _cachedLocalProjectileCount;
+
+            int count = 0;
+            var missiles = UnitRegistry.Missiles;
+            for (int i = 0; i < missiles.Count; i++)
+                if (missiles[i] != null) count++;
+            var torpedoes = UnitRegistry.Torpedoes;
+            for (int i = 0; i < torpedoes.Count; i++)
+                if (torpedoes[i] != null) count++;
+
+            _cachedLocalProjectileCount = count;
+            _lastProjectileCountTime = Time.unscaledTime;
+            return count;
         }
 
         /// <summary>
@@ -784,18 +877,19 @@ namespace SeapowerMultiplayer
             var enemyTf = Globals._enemyTaskforce;
             if (enemyTf == null) return;
 
-            CheckOrphans<Vessel>(enemyTf);
-            CheckOrphans<Submarine>(enemyTf);
-            CheckOrphans<Aircraft>(enemyTf);
-            CheckOrphans<Helicopter>(enemyTf);
-            CheckOrphans<LandUnit>(enemyTf);
+            CheckRegistryOrphans(UnitRegistry.Vessels, enemyTf);
+            CheckRegistryOrphans(UnitRegistry.Submarines, enemyTf);
+            CheckRegistryOrphans(UnitRegistry.AircraftList, enemyTf);
+            CheckRegistryOrphans(UnitRegistry.Helicopters, enemyTf);
+            CheckRegistryOrphans(UnitRegistry.LandUnits, enemyTf);
         }
 
-        private static void CheckOrphans<T>(Taskforce enemyTf) where T : ObjectBase
+        private static void CheckRegistryOrphans<T>(IReadOnlyList<T> units, Taskforce enemyTf) where T : ObjectBase
         {
-            foreach (var unit in UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.None))
+            for (int i = 0; i < units.Count; i++)
             {
-                if (unit.IsDestroyed) continue;
+                var unit = units[i];
+                if (unit == null || unit.IsDestroyed) continue;
                 if (unit._taskforce != enemyTf) continue;
 
                 // Skip aircraft managed by the flight ops pipeline (awaiting ID remap
@@ -845,6 +939,20 @@ namespace SeapowerMultiplayer
         /// </summary>
         internal static bool ApplyingFromNetwork;
 
+        private static int _orderNotFoundCount;
+        private static float _lastOrderNotFoundLogTime;
+
+        private static readonly Dictionary<(int, Messages.OrderType), (float lastLogTime, int suppressedCount)> _logThrottle = new();
+        private const float LogInterval = 10f;
+
+        public static void ClearLogThrottle() => _logThrottle.Clear();
+
+        private static Vehicle FindVehicleForUnit(ObjectBase unit)
+        {
+            if (Globals._playerTaskforce == null) return null;
+            return Globals._playerTaskforce.PlottingTable?.VehicleForObject(unit);
+        }
+
         public static void Apply(PlayerOrderMessage msg)
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
@@ -852,10 +960,34 @@ namespace SeapowerMultiplayer
             var unit = StateSerializer.FindById(msg.SourceEntityId);
             if (unit == null)
             {
-                Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found (order={msg.Order})");
+                _orderNotFoundCount++;
+                if (Time.unscaledTime - _lastOrderNotFoundLogTime > 10f)
+                {
+                    Plugin.Log.LogWarning($"[Order] id={msg.SourceEntityId} not found (order={msg.Order}) — {_orderNotFoundCount} total missed");
+                    _orderNotFoundCount = 0;
+                    _lastOrderNotFoundLogTime = Time.unscaledTime;
+                }
                 return;
             }
-            Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}");
+
+            var logKey = (msg.SourceEntityId, msg.Order);
+            if (_logThrottle.TryGetValue(logKey, out var throttle) && Time.unscaledTime - throttle.lastLogTime < LogInterval)
+            {
+                _logThrottle[logKey] = (throttle.lastLogTime, throttle.suppressedCount + 1);
+            }
+            else
+            {
+                string suffix = (throttle.suppressedCount > 0) ? $" (suppressed {throttle.suppressedCount} similar)" : "";
+
+                // Fix #47: Skip generic log for orders that have their own specific logging
+                if (msg.Order != Messages.OrderType.ReturnToBase
+                    && msg.Order != Messages.OrderType.SetAltitude
+                    && msg.Order != Messages.OrderType.ClassifyContact)
+                {
+                    Plugin.Log.LogInfo($"[Order] entity={msg.SourceEntityId} order={msg.Order} unit={unit.name}{suffix}");
+                }
+                _logThrottle[logKey] = (Time.unscaledTime, 0);
+            }
 
             ApplyingFromNetwork = true;
             OrderDeduplicator.UpdateCache(msg); // track received values so local patches won't re-send
@@ -962,12 +1094,13 @@ namespace SeapowerMultiplayer
                                     $"autoEngaging={ws._isAutoEngaging} delay={ws._engageDelay:F3}s";
                             }
                         }
-                        Plugin.Log.LogDebug($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
-                            $"unit={unit.UniqueID} name={unit.name} ammo={msg.AmmoId} " +
-                            $"target={msg.TargetEntityId} targetFound={target != null} " +
-                            $"targetName={target?.name ?? "pos"} shots={msg.ShotsToFire} " +
-                            $"priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}" +
-                            $"{wsState}");
+                        if (Plugin.Instance.CfgVerboseDebug.Value)
+                            Plugin.Log.LogDebug($"[AutoFire DIAG] t={recvMs}ms RECV_APPLY " +
+                                $"unit={unit.UniqueID} name={unit.name} ammo={msg.AmmoId} " +
+                                $"target={msg.TargetEntityId} targetFound={target != null} " +
+                                $"targetName={target?.name ?? "pos"} shots={msg.ShotsToFire} " +
+                                $"priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}" +
+                                $"{wsState}");
 
                         unit.InsertEngageTask(msg.AmmoId, target, targetPos, msg.ShotsToFire,
                                               priority, true, false, false);
@@ -985,7 +1118,7 @@ namespace SeapowerMultiplayer
                                 }
                             }
                         }
-                        if (wsStateAfter.Length > 0)
+                        if (wsStateAfter.Length > 0 && Plugin.Instance.CfgVerboseDebug.Value)
                             Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms POST_INSERT " +
                                 $"unit={unit.UniqueID}{wsStateAfter}");
                         break;
@@ -1082,11 +1215,93 @@ namespace SeapowerMultiplayer
                             Patch_ObjectBase_HandleEngageTasks.MarkNetworkOrdered(unit.UniqueID);
                         }
 
-                        var geo = new GeoPosition { _longitude = msg.DestX, _latitude = msg.DestZ, _height = msg.DestY };
-                        Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
-                        Vector3 localPos = new Vector3(local.x, msg.DestY, local.y);
-                        unit.AddEngageTask(new EngageTask(msg.AmmoId, localPos, unit, 1));
+                        Vector3 dropPos;
+                        if (Plugin.Instance.CfgPvP.Value)
+                        {
+                            // PvP: coordinates are GeoPosition (floating-origin safe)
+                            var geo = new GeoPosition { _longitude = msg.DestX, _latitude = msg.DestZ, _height = msg.DestY };
+                            Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
+                            dropPos = new Vector3(local.x, msg.DestY, local.y);
+                        }
+                        else
+                        {
+                            // Co-op: coordinates are already in local Unity space (shared origin)
+                            dropPos = new Vector3(msg.DestX, msg.DestY, msg.DestZ);
+                        }
+
+                        unit.AddEngageTask(new EngageTask(msg.AmmoId, dropPos, unit, 1));
                         Plugin.Log.LogInfo($"[Sonobuoy] Applied drop: unit={unit.UniqueID} ammo={msg.AmmoId}");
+                        break;
+                    }
+
+                    case Messages.OrderType.SetAltitude:
+                    {
+                        int preset = (int)msg.Speed;
+                        bool updateAlt = msg.Heading > 0.5f;
+
+                        if (unit is Aircraft aircraft)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { aircraft.setPresetHeight(preset, updateAlt); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                        }
+                        else if (unit is Helicopter helicopter)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { helicopter.setPresetHeight(preset, updateAlt); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                        }
+                        Plugin.Log.LogInfo($"[Order] Applied SetAltitude for {unit?.name} (id={msg.SourceEntityId}): preset={preset}, updateWaypoints={updateAlt}");
+                        break;
+                    }
+
+                    case Messages.OrderType.ReturnToBase:
+                    {
+                        ObjectBase homeBase = null;
+                        if (msg.TargetEntityId != 0)
+                            homeBase = StateSerializer.FindById(msg.TargetEntityId);
+
+                        OrderHandler.ApplyingFromNetwork = true;
+                        try { unit.setOrder(Order.Type.ReturnToBase, homeBase, displayOrderText: true); }
+                        finally { OrderHandler.ApplyingFromNetwork = false; }
+                        Plugin.Log.LogInfo($"[Order] Applied ReturnToBase for {unit?.name} (id={msg.SourceEntityId}): homeBase={homeBase?.name ?? "null"}");
+                        break;
+                    }
+
+                    case Messages.OrderType.ClassifyContact:
+                    {
+                        RelationsState classification = (RelationsState)(int)msg.Speed;
+
+                        Vehicle vehicle = FindVehicleForUnit(unit);
+                        if (vehicle != null)
+                        {
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { vehicle.OverrideRelationship(classification); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+
+                            // Fix #53: Force UI refresh for relationship change.
+                            // MapUnitViewModel subscribes to property changes but has no subscription
+                            // for relationship/classification changes. Trigger a property notification
+                            // to force the radar display to re-render with the new classification color.
+                            try
+                            {
+                                var onPropChanged = typeof(Vehicle).GetMethod("OnPropertyChanged",
+                                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                                onPropChanged?.Invoke(vehicle, new object[] { "CurrentRelationship" });
+                            }
+                            catch (Exception ex)
+                            {
+                                Plugin.Log.LogDebug($"[Order] ClassifyContact UI refresh failed (non-critical): {ex.Message}");
+                            }
+
+                            Plugin.Log.LogInfo($"[Order] Applied ClassifyContact for {unit.name} (id={msg.SourceEntityId}): " +
+                                              $"classification={classification}");
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning($"[Order] ClassifyContact: No Vehicle found for {unit.name} (id={msg.SourceEntityId}), " +
+                                                 $"classification={classification}");
+                        }
                         break;
                     }
 
@@ -1142,6 +1357,14 @@ namespace SeapowerMultiplayer
 
                 case GameEventType.TimeProposalResponse:
                     TimeSyncManager.OnProposalResponseReceived(msg.Param);
+                    break;
+
+                case GameEventType.UnitSelected:
+                    UnitLockManager.OnRemoteSelected((int)msg.Param);
+                    break;
+
+                case GameEventType.UnitDeselected:
+                    UnitLockManager.OnRemoteDeselected();
                     break;
             }
         }

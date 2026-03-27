@@ -13,6 +13,22 @@ using VesselStates;
 
 namespace SeapowerMultiplayer
 {
+    // ── UnitRegistry lifecycle hooks ────────────────────────────────────────
+    // Harmony patches ObjectBase.Awake (non-virtual, public) and OnDestroy (private)
+    // to maintain the UnitRegistry without per-frame FindObjectsByType calls.
+
+    [HarmonyPatch(typeof(ObjectBase), "Awake")]
+    public static class Patch_ObjectBase_Register
+    {
+        static void Postfix(ObjectBase __instance) => UnitRegistry.Register(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), "OnDestroy")]
+    public static class Patch_ObjectBase_Unregister
+    {
+        static void Postfix(ObjectBase __instance) => UnitRegistry.Unregister(__instance);
+    }
+
     // ── Client physics: targeted null-guard patches ────────────────────────
     //
     // After save-file load, SpeedCommand.Value is null (only set when
@@ -305,6 +321,7 @@ namespace SeapowerMultiplayer
 
             bool isHost = Plugin.Instance.CfgIsHost.Value;
             if (!isHost && !TaskforceAssignmentManager.ClientMayControl(unit)) return;
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return;
 
             var root = unit._userRoot;
             if (root == null || start < 0 || start >= root.TaskViewModels.Count) return;
@@ -722,9 +739,10 @@ namespace SeapowerMultiplayer
             {
                 if (ws._executingEngageTask && ws._isAutoEngaging && ws._engageDelay > 0f)
                 {
-                    Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
-                        $"unit={__instance.UniqueID} name={__instance.name} " +
-                        $"wasDelay={ws._engageDelay:F3}s");
+                    if (Plugin.Instance.CfgVerboseDebug.Value)
+                        Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms ZERO_DELAY " +
+                            $"unit={__instance.UniqueID} name={__instance.name} " +
+                            $"wasDelay={ws._engageDelay:F3}s");
                     ws._engageDelay = 0f;
                 }
             }
@@ -864,14 +882,17 @@ namespace SeapowerMultiplayer
 
                 NetworkManager.Instance.SendToOther(order);
 
-                Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms SEND seq={diagSeq} " +
-                    $"unit={__instance.UniqueID} name={__instance.name} ammo={ammoId} " +
-                    $"targetLocal={targetObject?.UniqueID ?? 0} targetSent={targetId} targetName={targetObject?.name ?? "pos"} " +
-                    $"shots={shotsToFire} priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}");
+                if (Plugin.Instance.CfgVerboseDebug.Value)
+                    Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms SEND seq={diagSeq} " +
+                        $"unit={__instance.UniqueID} name={__instance.name} ammo={ammoId} " +
+                        $"targetLocal={targetObject?.UniqueID ?? 0} targetSent={targetId} targetName={targetObject?.name ?? "pos"} " +
+                        $"shots={shotsToFire} priority={priority} isHost={Plugin.Instance.CfgIsHost.Value}");
                 return;
             }
 
             // Player orders (co-op path — PvP player fires are handled by the Prefix above)
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID)) return;
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return;
 
@@ -932,6 +953,8 @@ namespace SeapowerMultiplayer
 
             // Client control check for direct AddEngageTask callers
             // (e.g. LaunchNoisemaker). Send logic is in InsertEngageTask.
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID)) return false;
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return false;
 
@@ -940,23 +963,59 @@ namespace SeapowerMultiplayer
             bool isSonobuoy = engageTask._ammoId != null
                 && engageTask._ammoId.IndexOf("ssq", StringComparison.OrdinalIgnoreCase) >= 0;
 
-            if (isSonobuoy && Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected)
+            if (isSonobuoy && NetworkManager.Instance.IsConnected)
             {
-                var geo = Utils.worldPositionFromUnityToLongLat(
-                    engageTask._targetPosition, Globals._currentCenterTile);
+                bool isPvPSono = Plugin.Instance.CfgPvP.Value;
+                bool isHostSono = Plugin.Instance.CfgIsHost.Value;
 
-                var msg = new PlayerOrderMessage
+                if (isPvPSono)
                 {
-                    SourceEntityId = __instance.UniqueID,
-                    Order          = OrderType.DropSonobuoy,
-                    AmmoId         = engageTask._ammoId,
-                    DestX          = (float)geo._longitude,
-                    DestY          = (float)geo._height,
-                    DestZ          = (float)geo._latitude,
-                };
-                NetworkManager.Instance.SendToOther(msg);
-                Plugin.Log.LogInfo($"[Sonobuoy] Sent drop via AddEngageTask: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
-                return true; // let it execute locally
+                    // PvP: encode as GeoPosition (floating-origin safe) and send to opponent
+                    var geo = Utils.worldPositionFromUnityToLongLat(
+                        engageTask._targetPosition, Globals._currentCenterTile);
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = __instance.UniqueID,
+                        Order          = OrderType.DropSonobuoy,
+                        AmmoId         = engageTask._ammoId,
+                        DestX          = (float)geo._longitude,
+                        DestY          = (float)geo._height,
+                        DestZ          = (float)geo._latitude,
+                    };
+                    NetworkManager.Instance.SendToOther(msg);
+                    Plugin.Log.LogInfo($"[Sonobuoy] PvP sent drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                }
+                else if (!isHostSono && TaskforceAssignmentManager.ClientMayControl(__instance))
+                {
+                    // Co-op client: send to host using local coords (shared origin in co-op)
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = __instance.UniqueID,
+                        Order          = OrderType.DropSonobuoy,
+                        AmmoId         = engageTask._ammoId,
+                        DestX          = engageTask._targetPosition.x,
+                        DestY          = engageTask._targetPosition.y,
+                        DestZ          = engageTask._targetPosition.z,
+                    };
+                    NetworkManager.Instance.SendToServer(msg);
+                    Plugin.Log.LogInfo($"[Sonobuoy] Co-op client sent drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                }
+                else if (isHostSono)
+                {
+                    // Co-op host: broadcast to client so client sees host-initiated sonobuoy drops
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = __instance.UniqueID,
+                        Order          = OrderType.DropSonobuoy,
+                        AmmoId         = engageTask._ammoId,
+                        DestX          = engageTask._targetPosition.x,
+                        DestY          = engageTask._targetPosition.y,
+                        DestZ          = engageTask._targetPosition.z,
+                    };
+                    NetworkManager.Instance.BroadcastToClients(msg);
+                    Plugin.Log.LogInfo($"[Sonobuoy] Co-op host broadcast drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
+                }
+                return true; // execute locally on whoever sent
             }
 
             // PvP: flag player fires for delay handling in InsertEngageTask Prefix
@@ -1039,6 +1098,13 @@ namespace SeapowerMultiplayer
             _lockTime[id] = now;
             __state = true; // Signal Postfix to broadcast
 
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+            {
+                __state = false; // don't broadcast
+                return false;
+            }
+
             if (Plugin.Instance.CfgIsHost.Value) return true;
 
             // PvP: don't sync weapon internals
@@ -1068,10 +1134,11 @@ namespace SeapowerMultiplayer
             Order          = OrderType.CeaseFire,
         };
 
-        static bool Prefix(ObjectBase __instance)
+        static bool Prefix(ObjectBase __instance, bool report)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true;
+            if (!report) return true;
 
             // PvP: delay local execution so both sides cease at the same wall-clock time
             if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
@@ -1095,8 +1162,9 @@ namespace SeapowerMultiplayer
             return OrderSyncHelper.Prefix(__instance, Msg(__instance));
         }
 
-        static void Postfix(ObjectBase __instance)
+        static void Postfix(ObjectBase __instance, bool report)
         {
+            if (!report) return;
             // PvP: message already sent in Prefix
             if (Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected) return;
 
@@ -1158,6 +1226,22 @@ namespace SeapowerMultiplayer
             // PvP: don't sync orders for weapons (missiles/torpedoes) — their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
+            // Fix #54 (enhanced Fix #49): Skip order routing for chaff/countermeasure entities.
+            // Primary check: ammunition type (covers initialized entities).
+            // Fallback check: class name (covers entities where _ap is null during spawn).
+            if (unit is WeaponBase wb)
+            {
+                if (wb._ap != null &&
+                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
+                    return true;
+
+                // Fallback: check by class name when _ap is not yet initialized
+                string typeName = unit.GetType().Name;
+                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
+                    return true;
+            }
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate — skip send, still execute locally
@@ -1172,6 +1256,17 @@ namespace SeapowerMultiplayer
             if (OrderHandler.ApplyingFromNetwork) return;
             // PvP: don't sync orders for weapons (missiles/torpedoes)
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
+            // Fix #54 (enhanced Fix #49): Same chaff/noisemaker filter as Prefix
+            if (unit is WeaponBase wb2)
+            {
+                if (wb2._ap != null &&
+                    (wb2._ap._type == Ammunition.Type.Chaff || wb2._ap._type == Ammunition.Type.Noisemaker))
+                    return;
+
+                string typeName = unit.GetType().Name;
+                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
+                    return;
+            }
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
             if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate — skip broadcast
             NetworkManager.Instance.BroadcastToClients(msg);
@@ -1229,6 +1324,17 @@ namespace SeapowerMultiplayer
         }
 
         private static readonly Dictionary<(int, OrderType, int), Fingerprint> _cache = new();
+        private static readonly Dictionary<(int, OrderType, int), float> _lastSendTime = new();
+
+        private static float GetMinInterval(OrderType order) => order switch
+        {
+            OrderType.SensorToggle    => 10f,
+            OrderType.RemoveWaypoints => 2f,
+            OrderType.DeleteWaypoint  => 1f,
+            OrderType.SetSpeed        => 0.5f,
+            OrderType.SetEMCON        => 10f,
+            _                         => 0f,
+        };
 
         /// <summary>
         /// Returns true if the order differs from the last-sent value (should send).
@@ -1241,10 +1347,11 @@ namespace SeapowerMultiplayer
                 case OrderType.FireWeapon:
                 case OrderType.AutoFireWeapon:
                 case OrderType.CeaseFire:
-                case OrderType.RemoveWaypoints:
-                case OrderType.DeleteWaypoint:
                 case OrderType.DropSonobuoy:
                 case OrderType.SubmarineMast:
+                case OrderType.SetAltitude:
+                case OrderType.ReturnToBase:
+                case OrderType.ClassifyContact:
                     return true;
             }
 
@@ -1254,17 +1361,29 @@ namespace SeapowerMultiplayer
             if (_cache.TryGetValue(key, out var last) && last.Matches(fp))
                 return false;
 
+            float minInterval = GetMinInterval(msg.Order);
+            if (minInterval > 0f && _lastSendTime.TryGetValue(key, out var lastTime) &&
+                Time.unscaledTime - lastTime < minInterval)
+                return false;
+
             _cache[key] = fp;
+            _lastSendTime[key] = Time.unscaledTime;
             return true;
         }
 
         /// <summary>Update cache without checking (for network-received orders).</summary>
         internal static void UpdateCache(PlayerOrderMessage msg)
         {
-            _cache[MakeKey(msg)] = MakeFingerprint(msg);
+            var key = MakeKey(msg);
+            _cache[key] = MakeFingerprint(msg);
+            _lastSendTime[key] = Time.unscaledTime;
         }
 
-        internal static void Clear() => _cache.Clear();
+        internal static void Clear()
+        {
+            _cache.Clear();
+            _lastSendTime.Clear();
+        }
 
         private static (int, OrderType, int) MakeKey(PlayerOrderMessage msg)
         {
@@ -1306,6 +1425,8 @@ namespace SeapowerMultiplayer
         internal static bool AllowSensorChange(ObjectBase unit)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
             if (!Plugin.Instance.CfgPvP.Value || !NetworkManager.Instance.IsConnected) return true;
             return unit._taskforce == Globals._playerTaskforce;
         }
@@ -1431,18 +1552,21 @@ namespace SeapowerMultiplayer
             {
                 if (OrderHandler.ApplyingFromNetwork) return;
                 if (unit.UniqueID == 0) return;
+                if (SessionManager.SceneLoading) return;
 
                 var msg = OrderSyncHelper.SensorMsg(unit, 2, active);
 
                 if (Plugin.Instance.CfgIsHost.Value)
                 {
-                    if (NetworkManager.Instance != null && NetworkManager.Instance.IsConnected)
+                    if (NetworkManager.Instance != null && NetworkManager.Instance.IsConnected &&
+                        OrderDeduplicator.ShouldSend(msg))
                         NetworkManager.Instance.BroadcastToClients(msg);
                 }
                 else
                 {
                     if (TaskforceAssignmentManager.ClientMayControl(unit) &&
-                        NetworkManager.Instance != null)
+                        NetworkManager.Instance != null &&
+                        OrderDeduplicator.ShouldSend(msg))
                         NetworkManager.Instance.SendToServer(msg);
                 }
             });
@@ -1626,7 +1750,7 @@ namespace SeapowerMultiplayer
             CombatSyncHelper.Send(new CombatEventMessage
             {
                 EventType      = CombatEventType.ProjectileIntercepted,
-                TargetEntityId = target.UniqueID,
+                TargetEntityId = ProjectileIdMapper.TranslateForRemote(target.UniqueID),
                 SourceEntityId = __instance._baseObject.UniqueID,
             });
         }
@@ -1641,6 +1765,9 @@ namespace SeapowerMultiplayer
     [HarmonyPatch]
     public static class Patch_Blastzone_OnHitWeapon
     {
+        private static readonly HashSet<int> _sentInterceptions = new();
+        internal static void ClearInterceptions() => _sentInterceptions.Clear();
+
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(Blastzone), "OnHitWeapon");
 
@@ -1668,13 +1795,14 @@ namespace SeapowerMultiplayer
         {
             if (!CombatSyncHelper.ShouldBroadcast()) return;
             if (!hitObject._externalDestructionNotified) return; // interception RNG failed
+            if (!_sentInterceptions.Add(hitObject.UniqueID)) return; // dedup
 
-            int sourceId = ____weapon != null ? ____weapon.UniqueID : 0;
+            int sourceId = ____weapon != null ? ProjectileIdMapper.TranslateForRemote(____weapon.UniqueID) : 0;
             Plugin.Log.LogInfo($"[Combat] SAM intercept: target={hitObject.UniqueID} by={sourceId}");
             CombatSyncHelper.Send(new CombatEventMessage
             {
                 EventType      = CombatEventType.ProjectileIntercepted,
-                TargetEntityId = hitObject.UniqueID,
+                TargetEntityId = ProjectileIdMapper.TranslateForRemote(hitObject.UniqueID),
                 SourceEntityId = sourceId,
             });
         }
@@ -1693,6 +1821,11 @@ namespace SeapowerMultiplayer
         // Dedup: only send one MissileImpact per weapon (OnHitUnit fires every frame while overlapping)
         private static readonly HashSet<int> _sentMissileImpacts = new();
         internal static void ClearMissileImpacts() => _sentMissileImpacts.Clear();
+
+        private static int _suppressedPvpHitCount;
+        private static float _lastSuppressedPvpHitLogTime;
+        private static int _suppressedHitCount;
+        private static float _lastSuppressedHitLogTime;
 
         private static readonly FieldInfo _blastzoneWeaponField =
             AccessTools.Field(typeof(Blastzone), "_weapon");
@@ -1729,7 +1862,13 @@ namespace SeapowerMultiplayer
             {
                 if (hitObject._taskforce != SeaPower.Globals._playerTaskforce)
                 {
-                    Plugin.Log.LogInfo($"[Combat] PvP: Suppressed OnHitUnit for enemy unit {hitObject.UniqueID}");
+                    _suppressedPvpHitCount++;
+                    if (Time.unscaledTime - _lastSuppressedPvpHitLogTime > 10f)
+                    {
+                        Plugin.Log.LogInfo($"[Combat] PvP: Suppressed {_suppressedPvpHitCount} OnHitUnit for enemy units");
+                        _suppressedPvpHitCount = 0;
+                        _lastSuppressedPvpHitLogTime = Time.unscaledTime;
+                    }
                     return false;
                 }
                 return true;
@@ -1738,7 +1877,13 @@ namespace SeapowerMultiplayer
             // Co-op: only host runs combat
             if (CombatSyncHelper.ShouldSuppress())
             {
-                Plugin.Log.LogInfo($"[Combat] Suppressed OnHitUnit for {hitObject.UniqueID} on client");
+                _suppressedHitCount++;
+                if (Time.unscaledTime - _lastSuppressedHitLogTime > 10f)
+                {
+                    Plugin.Log.LogInfo($"[Combat] Suppressed {_suppressedHitCount} OnHitUnit calls on client");
+                    _suppressedHitCount = 0;
+                    _lastSuppressedHitLogTime = Time.unscaledTime;
+                }
                 return false;
             }
             return true;
@@ -1753,7 +1898,7 @@ namespace SeapowerMultiplayer
             bool killedNow = hitObject.IsDestroyed || hitObject._externalDestructionNotified;
             if (!__state && killedNow)
             {
-                int sourceId = ____weapon != null ? ____weapon.UniqueID : 0;
+                int sourceId = ____weapon != null ? ProjectileIdMapper.TranslateForRemote(____weapon.UniqueID) : 0;
                 CombatSyncHelper.Send(new CombatEventMessage
                 {
                     EventType      = CombatEventType.UnitDestroyed,
@@ -1890,15 +2035,23 @@ namespace SeapowerMultiplayer
             if (!NetworkManager.Instance.IsConnected) return;
             if (SessionManager.SceneLoading) return;
 
+            // Skip projectile tracking for chaff and countermeasures.
+            // These spawn in bursts, don't align between host/client,
+            // and have no gameplay sync value.
+            var ammoType = __instance._ap?._type ?? Ammunition.Type.Unknown;
+            if (ammoType == Ammunition.Type.Chaff || ammoType == Ammunition.Type.Noisemaker)
+                return;
+
             int projectileId = __instance.UniqueID;
             var launcher = _launchPlatformField.GetValue(__instance) as ObjectBase;
             int sourceUnitId = launcher?.UniqueID ?? 0;
 
-            Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms PROJECTILE_SPAWN " +
-                $"projId={projectileId} projName={__instance.name} " +
-                $"launcherId={sourceUnitId} launcherName={launcher?.name ?? "?"} " +
-                $"isHost={Plugin.Instance.CfgIsHost.Value} " +
-                $"projType={__instance.GetType().Name}");
+            if (Plugin.Instance.CfgVerboseDebug.Value)
+                Plugin.Log.LogDebug($"[AutoFire DIAG] t={AIAutoFireState.DiagMs}ms PROJECTILE_SPAWN " +
+                    $"projId={projectileId} projName={__instance.name} " +
+                    $"launcherId={sourceUnitId} launcherName={launcher?.name ?? "?"} " +
+                    $"isHost={Plugin.Instance.CfgIsHost.Value} " +
+                    $"projType={__instance.GetType().Name}");
 
             bool isPvP = Plugin.Instance.CfgPvP.Value;
 
@@ -1929,15 +2082,21 @@ namespace SeapowerMultiplayer
                     // The receiver uses target info so TryForceSpawn fires at the correct target.
                     // Coordinates are geo (floating-origin safe).
                     var geo = Utils.worldPositionFromUnityToLongLat(targetPosition, Globals._currentCenterTile);
+                    var fwd = __instance.transform.forward;
                     var spawnMsg = new ProjectileSpawnMessage
                     {
                         HostProjectileId = projectileId,
                         SourceUnitId     = sourceUnitId,
                         AmmoName         = ammoName,
-                        TargetEntityId   = targetObject?.UniqueID ?? 0,
+                        TargetEntityId   = targetObject != null
+                                             ? ProjectileIdMapper.TranslateForRemote(targetObject.UniqueID)
+                                             : 0,
                         TargetX          = (float)geo._longitude,
                         TargetY          = (float)geo._height,
                         TargetZ          = (float)geo._latitude,
+                        LaunchDirX       = fwd.x,
+                        LaunchDirY       = fwd.y,
+                        LaunchDirZ       = fwd.z,
                     };
                     NetworkManager.Instance.SendToOther(spawnMsg, DeliveryMethod.ReliableOrdered);
                     Plugin.Log.LogInfo($"[Spawn] PvP own projectile: id={projectileId} source={sourceUnitId} ammo={ammoName}");
@@ -2238,7 +2397,7 @@ namespace SeapowerMultiplayer
             CombatSyncHelper.Send(new CombatEventMessage
             {
                 EventType      = CombatEventType.ProjectileDestroyed,
-                TargetEntityId = id,
+                TargetEntityId = ProjectileIdMapper.TranslateForRemote(id),
                 SourceEntityId = 0,
             });
             Plugin.Log.LogDebug($"[Combat] PvP missile death notification: id={id}");
@@ -2267,10 +2426,360 @@ namespace SeapowerMultiplayer
             CombatSyncHelper.Send(new CombatEventMessage
             {
                 EventType      = CombatEventType.ProjectileDestroyed,
-                TargetEntityId = id,
+                TargetEntityId = ProjectileIdMapper.TranslateForRemote(id),
                 SourceEntityId = 0,
             });
             Plugin.Log.LogDebug($"[Combat] PvP torpedo death notification: id={id}");
+        }
+    }
+
+    // ── Unit Selection Lock (Co-op) ──────────────────────────────────────────
+
+    [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.switchToObject))]
+    public static class Patch_RenderPosition_SwitchToObject
+    {
+        static bool Prefix(ObjectBase objectToAttach)
+        {
+            // Only active in co-op when connected
+            if (Plugin.Instance.CfgPvP.Value) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (objectToAttach == null) return true;
+
+            // Block selection if the remote player has this unit selected
+            if (UnitLockManager.IsLockedByRemote(objectToAttach.UniqueID))
+            {
+                Plugin.Log.LogDebug(
+                    $"[UnitLock] Selection of unit {objectToAttach.UniqueID} blocked — held by remote player.");
+                UnitLockManager.NotifySelectionBlocked();
+                return false; // prevent switchToObject from running
+            }
+
+            return true;
+        }
+
+        static void Postfix(ObjectBase objectToAttach)
+        {
+            // Only broadcast in co-op when connected
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (objectToAttach == null) return;
+
+            // Verify the selection actually took effect
+            var current = Singleton<RenderPosition>.Instance.SelectedObject;
+            if (current == null || current.UniqueID != objectToAttach.UniqueID) return;
+
+            // Broadcast our selection to the remote player
+            NetworkManager.Instance.SendToOther(new GameEventMessage
+            {
+                EventType = GameEventType.UnitSelected,
+                Param     = (float)objectToAttach.UniqueID,
+            });
+        }
+    }
+
+    [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.deselectObjectAndDetachCamera))]
+    public static class Patch_RenderPosition_DeselectObjectAndDetachCamera
+    {
+        static void Prefix()
+        {
+            // Only broadcast in co-op when connected
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            // Read SelectedObject BEFORE deselection clears it
+            var current = Singleton<RenderPosition>.Instance.SelectedObject;
+            if (current == null) return;
+
+            NetworkManager.Instance.SendToOther(new GameEventMessage
+            {
+                EventType = GameEventType.UnitDeselected,
+                Param     = (float)current.UniqueID,
+            });
+        }
+    }
+
+    // ── MapUnitViewModel registry for unit lock map indicator ────────────────
+
+    [HarmonyPatch(typeof(MapUnitViewModel), MethodType.Constructor,
+        new[] { typeof(Taskforce), typeof(Vehicle), typeof(ReactiveProperty<ISelectableObject>), typeof(bool) })]
+    public static class Patch_MapUnitViewModel_Ctor
+    {
+        static void Postfix(MapUnitViewModel __instance)
+        {
+            MapUnitViewModelRegistry.Register(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(MapUnitViewModel), nameof(MapUnitViewModel.Dispose))]
+    public static class Patch_MapUnitViewModel_Dispose
+    {
+        static void Prefix(MapUnitViewModel __instance)
+        {
+            MapUnitViewModelRegistry.Unregister(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(MapUnitViewModel), "get_ContactInfoLine2")]
+    public static class Patch_MapUnitViewModel_ContactInfoLine2
+    {
+        static void Postfix(MapUnitViewModel __instance, ref string __result)
+        {
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            var obj = __instance.Unit?.BaseObject as ObjectBase;
+            if (obj != null && UnitLockManager.IsLockedByRemote(obj.UniqueID))
+                __result = "[BUSY]";
+        }
+    }
+
+    [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.setPresetHeight))]
+    public static class Patch_Aircraft_SetPresetHeight
+    {
+        static void Postfix(Aircraft __instance, int preset, bool updateAltForWaypoints)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.SetAltitude,
+                Speed          = (float)preset,
+                Heading        = updateAltForWaypoints ? 1f : 0f,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.setPresetHeight))]
+    public static class Patch_Helicopter_SetPresetHeight
+    {
+        static void Postfix(Helicopter __instance, int preset, bool updateAltForWaypoints)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.SetAltitude,
+                Speed          = (float)preset,
+                Heading        = updateAltForWaypoints ? 1f : 0f,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setOrder),
+        new[] { typeof(Order.Type), typeof(ObjectBase), typeof(bool) })]
+    public static class Patch_ObjectBase_SetOrder_RTB
+    {
+        static void Postfix(ObjectBase __instance, Order.Type type, ObjectBase targetObject, bool displayOrderText)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+            if (type != Order.Type.ReturnToBase) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.ReturnToBase,
+                TargetEntityId = targetObject?.UniqueID ?? 0,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OverrideRelationship))]
+    public static class Patch_Vehicle_OverrideRelationship
+    {
+        static void Postfix(Vehicle __instance, RelationsState forcedState)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            ObjectBase baseObj = __instance.BaseObject;
+            if (baseObj == null) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = baseObj.UniqueID,
+                Order          = OrderType.ClassifyContact,
+                Speed          = (float)forcedState,
+            };
+
+            OrderSyncHelper.Postfix(baseObj, msg);
+        }
+    }
+
+    /// <summary>
+    /// Fix #53: Correct priority inversion in Vehicle.CurrentRelationship().
+    /// The original method checks UnitTaskforce (auto-detection) BEFORE ForcedRelationState
+    /// (manual classification), meaning manual classifications are always shadowed.
+    /// This prefix checks ForcedRelationState first, returning it if present.
+    ///
+    /// Uses reflection to access Unity.Entities types (EntityManager, Entity,
+    /// ForcedRelationState) because the mod does not reference Unity.Entities.dll.
+    /// </summary>
+    [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.CurrentRelationship))]
+    public static class Patch_Vehicle_CurrentRelationship
+    {
+        // Cached reflection handles — resolved once on first call.
+        private static bool _reflectionResolved;
+        private static bool _reflectionFailed;
+        private static FieldInfo _vehicleEntityField;       // Vehicle.Entity
+        private static PropertyInfo _defaultWorldProp;      // World.DefaultGameObjectInjectionWorld
+        private static PropertyInfo _entityManagerProp;      // World.EntityManager
+        private static MethodInfo _hasComponentMethod;       // EntityManager.HasComponent<ForcedRelationState>(Entity)
+        private static MethodInfo _getComponentDataMethod;   // EntityManager.GetComponentData<ForcedRelationState>(Entity)
+        private static FieldInfo _forcedStateField;          // ForcedRelationState.ForcedState
+
+        private static void ResolveReflection()
+        {
+            if (_reflectionResolved) return;
+            _reflectionResolved = true;
+
+            try
+            {
+                // Vehicle.Entity field (type is Unity.Entities.Entity)
+                _vehicleEntityField = typeof(Vehicle).GetField("Entity",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                // Unity.Entities.World type
+                var worldType = Type.GetType("Unity.Entities.World, Unity.Entities");
+                if (worldType == null)
+                {
+                    // Try scanning loaded assemblies
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        worldType = asm.GetType("Unity.Entities.World");
+                        if (worldType != null) break;
+                    }
+                }
+
+                // ForcedRelationState type (in Seapower-Scripts)
+                var forcedRelationType = typeof(Vehicle).Assembly.GetType("SeaPower.ForcedRelationState");
+
+                if (worldType == null || forcedRelationType == null || _vehicleEntityField == null)
+                {
+                    _reflectionFailed = true;
+                    return;
+                }
+
+                // World.DefaultGameObjectInjectionWorld (static property)
+                _defaultWorldProp = worldType.GetProperty("DefaultGameObjectInjectionWorld",
+                    BindingFlags.Public | BindingFlags.Static);
+
+                // World.EntityManager (instance property)
+                _entityManagerProp = worldType.GetProperty("EntityManager",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (_defaultWorldProp == null || _entityManagerProp == null)
+                {
+                    _reflectionFailed = true;
+                    return;
+                }
+
+                // EntityManager is a struct type
+                var entityManagerType = _entityManagerProp.PropertyType;
+
+                // EntityManager.HasComponent<T>(Entity) — generic method
+                var hasComponentOpen = entityManagerType.GetMethod("HasComponent",
+                    new[] { _vehicleEntityField.FieldType });
+                if (hasComponentOpen != null && hasComponentOpen.IsGenericMethodDefinition)
+                {
+                    _hasComponentMethod = hasComponentOpen.MakeGenericMethod(forcedRelationType);
+                }
+                else
+                {
+                    // Search among all HasComponent methods for the right generic overload
+                    foreach (var m in entityManagerType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (m.Name != "HasComponent" || !m.IsGenericMethodDefinition) continue;
+                        var pars = m.GetParameters();
+                        if (pars.Length == 1 && pars[0].ParameterType == _vehicleEntityField.FieldType)
+                        {
+                            _hasComponentMethod = m.MakeGenericMethod(forcedRelationType);
+                            break;
+                        }
+                    }
+                }
+
+                // EntityManager.GetComponentData<T>(Entity) — generic method
+                foreach (var m in entityManagerType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (m.Name != "GetComponentData" || !m.IsGenericMethodDefinition) continue;
+                    var pars = m.GetParameters();
+                    if (pars.Length == 1 && pars[0].ParameterType == _vehicleEntityField.FieldType)
+                    {
+                        _getComponentDataMethod = m.MakeGenericMethod(forcedRelationType);
+                        break;
+                    }
+                }
+
+                // ForcedRelationState.ForcedState field
+                _forcedStateField = forcedRelationType.GetField("ForcedState",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (_hasComponentMethod == null || _getComponentDataMethod == null || _forcedStateField == null)
+                {
+                    _reflectionFailed = true;
+                }
+            }
+            catch (Exception)
+            {
+                _reflectionFailed = true;
+            }
+        }
+
+        static bool Prefix(Vehicle __instance, ref RelationsState __result)
+        {
+            // Destroyed objects -> Unknown
+            if (__instance.BaseObject != null && __instance.BaseObject.IsDestroyed)
+            {
+                __result = RelationsState.Unknown;
+                return false;
+            }
+
+            ResolveReflection();
+
+            if (_reflectionFailed)
+            {
+                // Cannot check ECS — fall through to original method
+                return true;
+            }
+
+            try
+            {
+                // Get the Entity value from the Vehicle instance
+                object entity = _vehicleEntityField.GetValue(__instance);
+
+                // Get World.DefaultGameObjectInjectionWorld
+                object world = _defaultWorldProp.GetValue(null);
+                if (world == null) return true;
+
+                // Get the EntityManager from the world
+                object entityManager = _entityManagerProp.GetValue(world);
+
+                // PRIORITY 1 (FIXED): Check manual classification first
+                bool hasForced = (bool)_hasComponentMethod.Invoke(entityManager, new[] { entity });
+                if (hasForced)
+                {
+                    object forcedComponent = _getComponentDataMethod.Invoke(entityManager, new[] { entity });
+                    __result = (RelationsState)_forcedStateField.GetValue(forcedComponent);
+                    return false;  // Skip original — manual classification takes priority
+                }
+            }
+            catch (Exception)
+            {
+                // If reflection fails at runtime, fall through to original
+            }
+
+            // PRIORITY 2: Fall through to original method for auto-detection
+            return true;
         }
     }
 }

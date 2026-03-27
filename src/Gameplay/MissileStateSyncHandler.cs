@@ -62,32 +62,9 @@ namespace SeapowerMultiplayer
                     missile._hasPoppedUp = entry.HasPoppedUp;
                 }
 
-                // Position: lerp toward authoritative owner state
-                var geo = new GeoPosition
-                {
-                    _longitude = entry.X,
-                    _latitude  = entry.Z,
-                    _height    = entry.Y,
-                };
-                Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
-                Vector3 targetPos = new Vector3(local.x, entry.Y, local.y);
-
-                float drift = Vector3.Distance(obj.transform.position, targetPos);
-
-                if (drift > 100f) // snap threshold
-                {
-                    obj.transform.position = targetPos;
-                    obj.transform.eulerAngles = new Vector3(entry.CurrentPitch, entry.Heading, 0f);
-                    weapon._velocityInKnots = entry.Speed;
-                }
-                else if (drift > 2f) // ignore trivial
-                {
-                    obj.transform.position = Vector3.Lerp(obj.transform.position, targetPos, 0.7f);
-                    float heading = Mathf.LerpAngle(obj.transform.eulerAngles.y, entry.Heading, 0.8f);
-                    float pitch = Mathf.LerpAngle(obj.transform.eulerAngles.x, entry.CurrentPitch, 0.8f);
-                    obj.transform.eulerAngles = new Vector3(pitch, heading, 0f);
-                    weapon._velocityInKnots = Mathf.Lerp(weapon._velocityInKnots, entry.Speed, 0.6f);
-                }
+                // Position: no longer corrected — local physics runs the missile
+                // after force-spawn. Position overrides cause visible jitter.
+                // Guidance state (jammed, targetLost, etc.) synced above is sufficient.
             }
         }
     }

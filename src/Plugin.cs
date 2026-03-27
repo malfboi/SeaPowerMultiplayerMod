@@ -26,6 +26,9 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
 
+        // Debug config
+        internal ConfigEntry<bool> CfgVerboseDebug = null!;
+
         // Drift correction config
         internal ConfigEntry<float> CfgSoftSyncElevated = null!;
         internal ConfigEntry<float> CfgSoftSyncHigh = null!;
@@ -34,6 +37,8 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<int>   CfgHardSyncUnitDelta = null!;
         internal ConfigEntry<float> CfgHardSyncConfirmSec = null!;
         internal ConfigEntry<float> CfgHardSyncCooldown = null!;
+        internal ConfigEntry<float> CfgHardSyncBreachWindowSec = null!;
+        internal ConfigEntry<int>   CfgHardSyncBreachCountThreshold = null!;
 
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
@@ -53,10 +58,13 @@ namespace SeapowerMultiplayer
             CfgHostIP      = Config.Bind("Network", "HostIP",       "127.0.0.1", "Host IP address (used when IsHost=false)");
             CfgPort        = Config.Bind("Network", "Port",         7777,        "UDP port");
             CfgAutoConnect = Config.Bind("Network", "AutoConnect",  false,       "Connect/host automatically on game launch");
-            CfgPvP         = Config.Bind("Network", "PvP",          true,        "PvP mode: swap sides for client, suppress all AI combat.");
-            CfgPvP.Value   = true; // Force PvP on for now
+            CfgPvP         = Config.Bind("Network", "PvP",          false,       "PvP=true: players control opposing sides. PvP=false: co-op, both players on same side with taskforce assignment.");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
+
+            // Debug
+            CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
+                "Enable verbose per-tick debug logging (Serialize counts, AutoFire diagnostics, Net received)");
 
             // Drift correction
             CfgSoftSyncElevated   = Config.Bind("DriftCorrection", "SoftSyncElevated",   20f,  "Avg drift threshold for Elevated tier");
@@ -66,6 +74,8 @@ namespace SeapowerMultiplayer
             CfgHardSyncUnitDelta  = Config.Bind("DriftCorrection", "HardSyncUnitDelta",  2,    "Unit count difference for hard sync trigger");
             CfgHardSyncConfirmSec = Config.Bind("DriftCorrection", "HardSyncConfirmSec", 25f,   "Seconds breach must persist before hard sync");
             CfgHardSyncCooldown   = Config.Bind("DriftCorrection", "HardSyncCooldown",   30f,  "Cooldown seconds between hard syncs");
+            CfgHardSyncBreachWindowSec      = Config.Bind("DriftCorrection", "HardSyncBreachWindowSec",      60f,  "Rolling window (seconds) for counting breach events");
+            CfgHardSyncBreachCountThreshold = Config.Bind("DriftCorrection", "HardSyncBreachCountThreshold", 3,    "Number of breaches within the window that trigger immediate hard sync");
 
             // PvP sync tuning
             CfgDamageSyncInterval   = Config.Bind("Sync", "DamageSyncInterval",     2f,   "Seconds between damage state corrections (default 2)");
@@ -112,6 +122,7 @@ namespace SeapowerMultiplayer
         }
 
         private bool _loggedWaitingForSceneCreator;
+        private int _sceneReadyPollCount;
 
         private void Update()
         {
@@ -161,7 +172,9 @@ namespace SeapowerMultiplayer
 
                 if (scExists && !loadDone && _sceneReadyFrames == 0)
                 {
-                    Log.LogInfo("[SceneReady] SceneCreator exists, IsLoadingDone=false, waiting...");
+                    _sceneReadyPollCount++;
+                    if (_sceneReadyPollCount == 1 || _sceneReadyPollCount % 60 == 0)
+                        Log.LogInfo($"[SceneReady] SceneCreator exists, IsLoadingDone=false, waiting... (poll #{_sceneReadyPollCount})");
                 }
 
                 if (loadDone)
@@ -172,6 +185,9 @@ namespace SeapowerMultiplayer
                     if (_sceneReadyFrames >= SceneSettleFrames)
                     {
                         Log.LogInfo("[SceneReady] Settle complete, calling OnSceneReady()");
+                        if (_sceneReadyPollCount > 1)
+                            Log.LogInfo($"[SceneReady] Loading complete after {_sceneReadyPollCount} polls");
+                        _sceneReadyPollCount = 0;
                         _sceneReadyFrames = 0;
                         _loggedWaitingForSceneCreator = false;
                         SessionManager.OnSceneReady();
