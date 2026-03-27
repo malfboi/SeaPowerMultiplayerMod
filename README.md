@@ -215,13 +215,14 @@ The mod includes automatic drift detection and correction. If issues persist, ei
 
 ## Known Issues
 
-| Issue | Workaround |
-|-------|------------|
-| Unit snaps back to original position on first order | Drag or delete the order and re-issue it |
-| Carrier ops can desync at 10x+ time compression | Use lower time compression during carrier ops |
-| Defensive missiles can desync in high-missile scenarios | Does not affect combat outcomes |
-| Position-targeted weapons don't sync (e.g., torpedoes/Tomahawks at a location) | Target a unit instead of a position |
-| Launcher occasionally starts the game without the mod | Re-launch - the MP overlay should appear top-right before the main menu |
+| Issue | Status | Workaround |
+|-------|--------|------------|
+| Aircraft cluster bombs deal no damage to ground units | Open | None - under investigation |
+| Unit snaps back to original position on first order | Open | Move the waypoint slightly by dragging it on the map or cancel and re-issue the order |
+| Carrier ops can desync at 10x+ time compression | Improved in 0.1.4 | Aircraft now use tiered drift correction. Use lower time compression if issues persist. |
+| Position-targeted weapons don't sync (e.g., torpedoes/Tomahawks at a location) | Open | Target a unit instead of a position |
+| Launcher occasionally starts the game without the mod | Open | Re-launch - the MP overlay should appear top-right before the main menu |
+| Defensive missiles desync in high-missile scenarios | Fixed in 0.1.4 | Enemy air defence missiles no longer get purged. Missile position syncing removed for performance. |
 
 <br>
 
@@ -231,7 +232,7 @@ The mod includes automatic drift detection and correction. If issues persist, ei
 
 - [x] Core PvP multiplayer
 - [ ] PvP beta bug fixes
-- [ ] Co-op mode
+- [x] Co-op mode
 - [ ] Support for more than 2 players
 - [ ] Headless persistent server
 
