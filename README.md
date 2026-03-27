@@ -1,33 +1,48 @@
+<div align="center">
+
 # Seapower Multiplayer
 
-[![Discord](https://img.shields.io/badge/discord-Sea%20Power%20Multiplayer-5865F2?logo=discord&logoColor=white)](https://discord.gg/rMMnwJHc8w)
+**Real-time multiplayer for Sea Power: Naval Combat in the Missile Age**
 
-Real-time 2-player multiplayer (PvP) for **Sea Power: Naval Combat in the Missile Age**.
+[![GitHub Release](https://img.shields.io/github/v/release/malfboi/SeaPowerMultiplayerMod?style=flat-square&color=blue)](../../releases)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
+[![Discord](https://img.shields.io/badge/discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/rMMnwJHc8w)
+[![.NET](https://img.shields.io/badge/.NET_Framework-4.7.2-purple?style=flat-square)](https://dotnet.microsoft.com/)
 
-Play any scenario head-to-head, each player controlling an opposing task force. One player hosts the session while the other
-   connects as a client. Both instances run their own units authoritatively, syncing game state over UDP or Steam P2P.
+[Getting Started](#getting-started) · [How to Play](#how-to-play) · [Configuration](#configuration) · [Contributing](#contributing) · [Roadmap](#roadmap)
 
-  Combat is resolved by the target of the engagement. If Player A fires a missile at Player B, then Player B decides the
-  outcome, they are authoritative for attacks against their own units. If B's air defence intercepts the missile, that
-  result syncs to A. If B determines the missile hits, both sides see the hit. If the two instances disagree, the target's
-  outcome is always final.
+</div>
 
----
+<br>
 
-## Installation
+Play any Sea Power scenario head-to-head with a friend. One player hosts, the other connects, and you're in. Both instances run their own units authoritatively, with game state synced over UDP or Steam P2P.
+
+### How combat works
+
+Combat is resolved by the **target** of the engagement. If Player A fires a missile at Player B, then Player B's game decides the outcome. If B's air defence intercepts it, that result syncs to A. If the missile hits, both sides see the hit. When the two instances disagree, the target's outcome is always final.
+
+> This is a community mod and is not affiliated with Triassic Games.
+
+<br>
+
+## Getting Started
 
 There are three ways to install the mod. Pick whichever suits you best.
 
-### Option 1: Use the Launcher (Recommended)
+<details>
+<summary><b>Option 1: Use the Launcher (Recommended)</b></summary>
 
-The launcher handles everything automatically — it installs BepInEx, copies the plugin, and launches the game.
+The launcher handles everything automatically - it installs BepInEx, copies the plugin, and launches the game.
 
 1. Download **SeapowerMultiplayer.Launcher.exe** from the [Releases](../../releases) page.
 2. Run the launcher.
 3. It will auto-detect your Sea Power installation, install BepInEx if needed, and copy the plugin DLL into the correct folder.
 4. Click **Launch** to start the game with the mod loaded.
 
-### Option 2: Manual DLL Install
+</details>
+
+<details>
+<summary><b>Option 2: Manual DLL Install</b></summary>
 
 If you prefer to manage things yourself:
 
@@ -38,13 +53,16 @@ If you prefer to manage things yourself:
 3. Copy the DLL into `Sea Power/BepInEx/plugins/`.
 4. Launch the game normally.
 
-### Option 3: Build from Source
+</details>
+
+<details>
+<summary><b>Option 3: Build from Source</b></summary>
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/your-username/SeapowerMultiplayer.git
+   git clone https://github.com/malfboi/SeaPowerMultiplayerMod.git
    ```
-2. Make sure **BepInEx 5.4.x** is installed in your game directory (see Option 2, step 1).
+2. Make sure **BepInEx 5.4.x** is installed in your game directory (see Option 2 above).
 3. Build the plugin:
    ```bash
    dotnet build src/SeapowerMultiplayer.csproj
@@ -55,39 +73,46 @@ If you prefer to manage things yourself:
    ```
    The build automatically copies the DLL and its dependencies into `BepInEx/plugins/`.
 
----
+</details>
+
+<br>
 
 ## How to Play
 
-### Connecting via Steam
+### Via Steam (easiest)
 
 1. Launch the game with the mod installed.
 2. Open a mission.
-3. Press **Ctrl F9** to open the multiplayer overlay.
+3. Press **Ctrl+F9** to open the multiplayer overlay.
 4. Click **Host Lobby**.
-5. Click **Invite Friend** and invite your friend through Steam.
-6. Your friend accepts the invite and is automatically connected and synced into the mission.
+5. Click **Invite Friend** and send a Steam invite.
+6. Your friend accepts and is automatically connected and synced into the mission.
 
-### Connecting via Direct Connect
+### Via Direct Connect
 
 1. Launch the game with the mod installed.
 2. Press **Ctrl+F9** to open the multiplayer overlay (top-right corner).
-3. **Host:** Open a mission, then click **Start Hosting**. The default port is 7777.
+3. **Host:** Open a mission, then click **Start Hosting**. Default port is `7777`.
 4. **Client:** Enter the host's IP address, then click **Connect**.
-5. Once connected, the host clicks **Send Scene to Client** to sync the current scenario.
+5. Once connected, the host clicks **Send Scene to Client** to sync the scenario.
 
-The client will automatically receive and load the host's save — no need to manually load the same mission.
+The client automatically receives and loads the host's save - no need to manually load the same mission.
 
-### Controls
+### In-Game Controls
 
-Both players use the normal game controls. In PvP, both sides are authoritative for their own units. In co-op, the host's game is authoritative — client orders are sent to the host for execution.
+Both players use the normal game controls. In PvP, both sides are authoritative for their own units. In co-op, the host's game is authoritative and client orders are sent to the host for execution.
 
-- **Time controls** are synced. Either player can pause/unpause/change time compression; the host decides and broadcasts the result.
-- **Resync** - either player can press **Ctrl F10** and force a resync.
+| Action | Shortcut | Notes |
+|--------|----------|-------|
+| Open multiplayer overlay | `Ctrl+F9` | Host, connect, invite, send scene |
+| Force resync | `Ctrl+F10` | Either player can trigger this |
+| Time controls | Normal keys | Synced - host decides and broadcasts the result |
 
-### Configuration
+<br>
 
-The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on first launch. Key settings:
+## Configuration
+
+The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on first launch.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -95,44 +120,125 @@ The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on f
 | `HostIP` | `127.0.0.1` | IP to connect to (client only) |
 | `Port` | `7777` | UDP port (must match on both sides) |
 | `AutoConnect` | `false` | Automatically host/connect on game launch |
-| `TransportType` | `LiteNetLib` | Network transport (`LiteNetLib` or `Steam`) |
+| `TransportType` | `LiteNetLib` | Network transport - `LiteNetLib` or `Steam` |
 
 ### Network Requirements
 
-- **LiteNetLib (UDP):** The host must have port 7777 (or your configured port) open/forwarded for UDP traffic. Both players need a direct network path (LAN, port forwarding, or VPN).
-- **Steam P2P:** Uses Steam's relay network — no port forwarding required.
+| Transport | Port Forwarding | Details |
+|-----------|:-:|---------|
+| **LiteNetLib (UDP)** | Required | Host must open port `7777` (or configured port) for UDP. Both players need a direct network path (LAN, port forwarding, or VPN). |
+| **Steam P2P** | Not required | Uses Steam's relay network. Just works. |
 
----
+<br>
+
+**Key concepts:**
+
+- **Authority model** - Each player is authoritative over their own units. Combat outcomes are decided by the target's game instance.
+- **Transport abstraction** - Networking is abstracted behind `ITransport`, making it easy to swap between LiteNetLib (UDP) and Steam P2P.
+- **Harmony patching** - The mod hooks into the game via [Harmony](https://github.com/pardeike/Harmony) patches, intercepting and extending game methods at runtime.
+- **Drift detection** - `DriftDetector` monitors unit positions across both instances and triggers corrections when they diverge.
+
+<br>
+
+## Contributing
+
+Contributions are welcome! Whether it's a bug fix, new feature, or documentation improvement, feel free to open a PR.
+
+### Getting set up
+
+1. **Fork & clone** the repository.
+2. **Install [BepInEx 5.4.x](https://github.com/BepInEx/BepInEx/releases)** into your Sea Power game directory.
+3. **Build:**
+   ```bash
+   dotnet build src/SeapowerMultiplayer.csproj /p:GameDir="<your Sea Power install path>"
+   ```
+4. The DLL is automatically copied to `BepInEx/plugins/` on successful build.
+
+### Guidelines
+
+- **Keep PRs small and focused.** One feature or one fix per PR. Large, sweeping changesets are hard to review and slow down the merge process. If your work touches multiple areas, split it into separate PRs.
+- **Follow existing code style** and naming conventions.
+- **Test in a live multiplayer session** before submitting. At minimum, verify your change works in a two-player session (host + client). Pay special attention to combat sync - missiles, air defence, carrier ops, and ground attacks are all areas where subtle issues can hide.
+- **Open an issue first for large features** so we can discuss the approach before you invest time building it.
+- **Document what you changed** in your PR description. Explain *what* and *why*, not just *how*.
+
+### Testing
+
+> A formal testing and benchmarking process is in the works. Until that's in place, the expectations below apply.
+
+There is no automated test suite yet. Before submitting a PR, manually verify:
+
+- Host and client can connect and sync a scenario.
+- Your changes don't break existing combat sync.
+- Performance is not noticeably degraded - watch for frame drops or network spikes, especially in high-unit-count scenarios.
+
+If your change is in a specific area (e.g., flight ops, missile sync, damage states), test that area thoroughly across different time compression levels (1x, 5x, 10x).
+
+### Reporting Bugs
+
+Found a bug? [Open an issue](../../issues/new) with:
+
+- Steps to reproduce
+- Expected vs. actual behavior
+- Whether you were host or client
+- Time compression level, if relevant
+- Any relevant log output from `BepInEx/LogOutput.log`
+
+Or hop into the [Discord](https://discord.gg/rMMnwJHc8w) and let us know.
+
+<br>
 
 ## Troubleshooting
 
-- **Mod not loading?** Check that `BepInEx/` is in the correct location (same folder as `Sea Power.exe`) and that the plugin DLL is in `BepInEx/plugins/`.
-- **Can't connect?** Verify the host's IP and port are correct, and that the UDP port is open in the host's firewall/router.
-- **Desync or drift?** The mod includes automatic drift detection and correction. If issues persist, the host can re-send the scene via the F9 overlay.
+<details>
+<summary><b>Mod not loading</b></summary>
 
----
+Check that `BepInEx/` is in the correct location (same folder as `Sea Power.exe`) and that the plugin DLL is in `BepInEx/plugins/`. If you used the launcher, try closing and re-launching - the multiplayer overlay should appear in the top-right before you reach the main menu.
+
+</details>
+
+<details>
+<summary><b>Can't connect</b></summary>
+
+Verify the host's IP and port are correct, and that the UDP port is open in the host's firewall/router. If using Steam P2P, make sure both players are friends on Steam and that Steam is running.
+
+</details>
+
+<details>
+<summary><b>Desync or drift</b></summary>
+
+The mod includes automatic drift detection and correction. If issues persist, either player can press **Ctrl+F10** to force a resync, or the host can re-send the scene via the Ctrl+F9 overlay.
+
+</details>
+
+<br>
 
 ## Known Issues
 
-- When giving a unit its first order it may snap back to the original position, dragging or deleting the order should resolve this.
-- Carrier ops can desync at 10x time compression and above.
-- Defensive missiles can desync in high missile scenarios but should not affect combat outcomes.
-- Weapons fired at a position rather than a target do not sync (e.g., torpedoes or Tomahawks fired at a location instead of a unit).
-- Sometimes launching via launcher launches without the mod, simple way to know is the multiplayer menu should appear in top right before you hit the main menu, if it hasn't try: and launch again
+| Issue | Workaround |
+|-------|------------|
+| Unit snaps back to original position on first order | Drag or delete the order and re-issue it |
+| Carrier ops can desync at 10x+ time compression | Use lower time compression during carrier ops |
+| Defensive missiles can desync in high-missile scenarios | Does not affect combat outcomes |
+| Position-targeted weapons don't sync (e.g., torpedoes/Tomahawks at a location) | Target a unit instead of a position |
+| Launcher occasionally starts the game without the mod | Re-launch - the MP overlay should appear top-right before the main menu |
 
-
----
+<br>
 
 ## Roadmap
-- PvP Beta bug fixes
-- Co-op mode
-- More players
-- Headless persistent server (this might be a pipe dream but I am looking into it)
 
-This is a very abstract overview of the roadmap, I have no timeframes in mind for these features and all is subject to change.
+> This is a rough overview. No timeframes, everything is subject to change.
 
----
+- [x] Core PvP multiplayer
+- [ ] PvP beta bug fixes
+- [ ] Co-op mode
+- [ ] Support for more than 2 players
+- [ ] Headless persistent server
+
+Have ideas? [Open a discussion](../../discussions) or share them in the [Discord](https://discord.gg/rMMnwJHc8w).
+
+<br>
 
 ## License
 
-MIT — mod the mod freely.
+[MIT](LICENSE) - mod the mod freely.
