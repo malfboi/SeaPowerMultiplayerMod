@@ -17,7 +17,7 @@
 
         <!-- Header -->
         <TextBlock Grid.Row="0"
-                   Text="v0.1.3 Release Notes"
+                   Text="v0.1.4 Release Notes"
                    Foreground="{StaticResource TextPrimary}"
                    FontSize="18"
                    FontWeight="Bold"
@@ -33,13 +33,12 @@
                            Foreground="{StaticResource WarningOrange}"
                            FontSize="13"
                            FontWeight="SemiBold"
-                           Margin="0,0,0,6"/>
-
+                           Margin="0,0,0,6"/>     
                 <TextBlock Foreground="{StaticResource TextPrimary}"
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,4"
-                           Text="&#x2022; When giving a unit its first order it may snap back to the original position - dragging or deleting the order should resolve this."/>
+                           Text="&#x2022; Some damage desync issues remain with air targetting ground units but these appear to be largely resolved."/>
                 <TextBlock Foreground="{StaticResource TextPrimary}"
                            FontSize="13"
                            TextWrapping="Wrap"
@@ -61,18 +60,22 @@
                            Foreground="{StaticResource SuccessGreen}"
                            FontSize="13"
                            FontWeight="SemiBold"
-                           Margin="0,0,0,6"/>
-
-                <TextBlock Foreground="{StaticResource TextSecondary}"
-                           FontSize="13"
-                           TextWrapping="Wrap"
-                           Margin="8,0,0,12"
-                           Text="Fix sensor state and damage syncing between ground units."/>
+                           Margin="0,0,0,6"/>                
                 <TextBlock Foreground="{StaticResource TextSecondary}"
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
                            Text="Various fixes to reduce desync issues."/>
+                <TextBlock Foreground="{StaticResource TextSecondary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="More sensible GC handling and object caching to improve performance and reduce desync."/>
+                <TextBlock Foreground="{StaticResource TextSecondary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="Removed missile position syncing so missiles will no longer jitter."/>
 
                 <!-- Disclaimer -->
                 <Rectangle Height="1"

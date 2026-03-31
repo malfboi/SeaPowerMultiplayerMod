@@ -368,7 +368,7 @@ namespace SeapowerMultiplayer.Launcher
             }
         }
 
-        private const string CurrentVersion = "0.1.3";
+        private const string CurrentVersion = "0.1.4";
 
         private async void BtnLaunch_Click(object sender, RoutedEventArgs e)
         {
