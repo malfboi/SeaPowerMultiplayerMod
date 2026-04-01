@@ -89,6 +89,11 @@ namespace SeapowerMultiplayer.Launcher.Services
                 # Default value: 7777
                 Port = {settings.Port}
 
+                ## PvP mode: players control opposing sides
+                # Setting type: Boolean
+                # Default value: false
+                PvP = true
+
                 ## Automatically connect on game start
                 # Setting type: Boolean
                 # Default value: false

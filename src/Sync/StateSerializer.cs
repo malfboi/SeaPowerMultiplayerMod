@@ -65,7 +65,8 @@ namespace SeapowerMultiplayer
             return SceneCreator.FindGlobalObjectById(id);
         }
 
-        public static StateUpdateMessage Capture(Taskforce filterTaskforce = null)
+        public static StateUpdateMessage Capture(Taskforce filterTaskforce = null,
+            HashSet<int> includeEntityIds = null)
         {
             var msg = _pooledMsg;
             msg.Reset();
@@ -74,11 +75,11 @@ namespace SeapowerMultiplayer
                             + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
                             + Singleton<SeaPower.Environment>.Instance.Seconds;
 
-            AddRegistryUnits(msg, UnitType.Vessel,     UnitRegistry.Vessels,      filterTaskforce);
-            AddRegistryUnits(msg, UnitType.Submarine,  UnitRegistry.Submarines,   filterTaskforce);
-            AddRegistryUnits(msg, UnitType.Aircraft,   UnitRegistry.AircraftList, filterTaskforce);
-            AddRegistryUnits(msg, UnitType.Helicopter, UnitRegistry.Helicopters,  filterTaskforce);
-            AddRegistryUnits(msg, UnitType.LandUnit,   UnitRegistry.LandUnits,    filterTaskforce);
+            AddRegistryUnits(msg, UnitType.Vessel,     UnitRegistry.Vessels,      filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.Submarine,  UnitRegistry.Submarines,   filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.Aircraft,   UnitRegistry.AircraftList, filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.Helicopter, UnitRegistry.Helicopters,  filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.LandUnit,   UnitRegistry.LandUnits,    filterTaskforce, includeEntityIds);
             // Biologics excluded — ambient sonar contacts, not gameplay units
 
             if (filterTaskforce == null)
@@ -102,13 +103,15 @@ namespace SeapowerMultiplayer
         }
 
         private static void AddRegistryUnits<T>(StateUpdateMessage msg, UnitType kind,
-            IReadOnlyList<T> units, Taskforce filterTf = null) where T : ObjectBase
+            IReadOnlyList<T> units, Taskforce filterTf = null,
+            HashSet<int> includeEntityIds = null) where T : ObjectBase
         {
             for (int i = 0; i < units.Count; i++)
             {
                 var unit = units[i];
                 if (unit == null) continue;
                 if (filterTf != null && unit._taskforce != filterTf) continue;
+                if (includeEntityIds != null && !includeEntityIds.Contains(GetUniqueId(unit))) continue;
 
                 // Encode as absolute GeoPosition (longitude/latitude/height) so
                 // positions are independent of each machine's floating origin.
@@ -334,10 +337,11 @@ namespace SeapowerMultiplayer
                 correctSpeed = DriftDetector.ShouldCorrectSpeed;
             }
 
-            // PvP: rebuild remote unit ID set for orphan cleanup (populated in loop below)
+            // PvP: accumulate remote unit IDs for orphan cleanup (populated in loop below).
+            // Don't clear per-message — with staggered updates, not all units appear in
+            // every message. The set is cleared in CleanupOrphans() after each 10s window.
             if (isPvP)
             {
-                _lastSeenRemoteUnitIds.Clear();
                 _pvpShipDriftSum = _pvpShipDriftMaxAcc = 0f; _pvpShipCount = 0;
                 _pvpAirDriftSum = _pvpAirDriftMaxAcc = 0f; _pvpAirCount = 0;
             }
@@ -882,6 +886,10 @@ namespace SeapowerMultiplayer
             CheckRegistryOrphans(UnitRegistry.AircraftList, enemyTf);
             CheckRegistryOrphans(UnitRegistry.Helicopters, enemyTf);
             CheckRegistryOrphans(UnitRegistry.LandUnits, enemyTf);
+
+            // Clear after processing — start fresh for next cleanup window.
+            // With staggered updates, IDs accumulate across messages between windows.
+            _lastSeenRemoteUnitIds.Clear();
         }
 
         private static void CheckRegistryOrphans<T>(IReadOnlyList<T> units, Taskforce enemyTf) where T : ObjectBase
@@ -928,6 +936,7 @@ namespace SeapowerMultiplayer
             ProjectilesDestroyedByTimeout = 0;
             PvpShipDriftAvg = PvpShipDriftMax = 0f;
             PvpAirDriftAvg = PvpAirDriftMax = 0f;
+            ChangeTracker.Clear();
         }
     }
 

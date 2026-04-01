@@ -129,7 +129,22 @@ namespace SeapowerMultiplayer
                 if (filter == null) return;
             }
 
+            // Phase 1: Full capture (all units + projectiles) for change comparison
             var msg = StateSerializer.Capture(filter);
+
+            // Phase 2: Determine which units actually need sending this tick
+            float now = UnityEngine.Time.unscaledTime;
+            var dirtyIds = ChangeTracker.ComputeDirtySet(msg.Units, now);
+
+            // Phase 3: Filter units in-place (projectiles are untouched — always full rate)
+            if (dirtyIds.Count < msg.Units.Count)
+            {
+                for (int i = msg.Units.Count - 1; i >= 0; i--)
+                {
+                    if (!dirtyIds.Contains(msg.Units[i].EntityId))
+                        msg.Units.RemoveAt(i);
+                }
+            }
 
             if (isHost)
                 NetworkManager.Instance.BroadcastToClients(msg, LiteNetLib.DeliveryMethod.Unreliable);

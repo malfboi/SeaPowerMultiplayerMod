@@ -77,6 +77,7 @@ namespace SeapowerMultiplayer
             _landUnits.Clear();
             _missiles.Clear();
             _torpedoes.Clear();
+            ChangeTracker.Clear();
         }
 
         /// <summary>
