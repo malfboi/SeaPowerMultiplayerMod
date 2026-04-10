@@ -122,7 +122,7 @@ namespace SeapowerMultiplayer
                 float rudder = unit is Vessel vessel ? _getRudderAngle(vessel) : 0f;
 
                 float desiredAlt = 0f;
-                if (unit is Aircraft || unit is Helicopter)
+                if (unit is Aircraft || unit is Helicopter || unit is Submarine)
                     desiredAlt = (float)unit.DesiredAltitude.Value;
 
                 msg.Units.Add(new UnitState
@@ -409,6 +409,14 @@ namespace SeapowerMultiplayer
                 // In PvP, the owner is authoritative for depth — use their value.
                 if (state.Kind == UnitType.Submarine && !isPvP)
                     hostPos.y = unit.transform.position.y;
+
+                // PvP submarines: sync desired depth so local physics targets the
+                // owner's commanded depth instead of fighting position corrections.
+                if (state.Kind == UnitType.Submarine && isPvP)
+                {
+                    if (state.DesiredAltitude != 0f)
+                        unit.DesiredAltitude.Value = state.DesiredAltitude;
+                }
 
                 // Fix #51: Aircraft position interpolation buffer (replaces Fix #46)
                 // Three-tier correction: accept, lerp, or snap based on divergence magnitude.

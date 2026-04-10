@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using BepInEx.Logging;
 using Steamworks;
 
@@ -31,6 +32,9 @@ namespace SeapowerMultiplayer.Transport
         private const int FragmentHeaderSize = 9;      // marker(1) + id(4) + index(2) + total(2)
         private const byte FragmentMarker = 0xFF;      // first byte; MessageType enum uses 0-12
 
+        private const int FragmentRetryCount = 10;
+        private const int FragmentRetryDelayMs = 100;
+
         private uint _nextFragmentId;
 
         private readonly Dictionary<uint, FragmentBuffer> _pendingFragments = new();
@@ -59,6 +63,7 @@ namespace SeapowerMultiplayer.Transport
             : _connectionToHost != HSteamNetConnection.Invalid;
 
         public int RttMs { get; private set; }
+        public bool LastSendFailed { get; private set; }
 
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;
@@ -151,9 +156,12 @@ namespace SeapowerMultiplayer.Transport
 
         private void SendMessage(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
         {
+            LastSendFailed = false;
+
             if (length <= MaxChunkPayload)
             {
-                SendRaw(conn, data, length, delivery);
+                if (!SendRaw(conn, data, length, delivery))
+                    LastSendFailed = true;
                 return;
             }
 
@@ -161,7 +169,8 @@ namespace SeapowerMultiplayer.Transport
             if (delivery == TransportDelivery.Unreliable)
             {
                 Log.LogWarning($"[SteamTransport] Unreliable message too large ({length} bytes), sending anyway");
-                SendRaw(conn, data, length, delivery);
+                if (!SendRaw(conn, data, length, delivery))
+                    LastSendFailed = true;
                 return;
             }
 
@@ -188,11 +197,34 @@ namespace SeapowerMultiplayer.Transport
                 chunk[8] = (byte)((totalChunks >> 8) & 0xFF);
 
                 Buffer.BlockCopy(data, offset, chunk, FragmentHeaderSize, payloadLen);
-                SendRaw(conn, chunk, chunkLen, delivery);
+
+                // Retry with backpressure — Steam's send buffer may be full after
+                // a large prior chunk. The game is paused during session sync so a
+                // brief main-thread block is acceptable.
+                bool sent = false;
+                for (int attempt = 0; attempt < FragmentRetryCount; attempt++)
+                {
+                    if (attempt > 0)
+                    {
+                        Log.LogInfo($"[SteamTransport] Retry {attempt}/{FragmentRetryCount} for chunk {i}/{totalChunks} (id={fragmentId})");
+                        Thread.Sleep(FragmentRetryDelayMs);
+                    }
+                    if (SendRaw(conn, chunk, chunkLen, delivery))
+                    {
+                        sent = true;
+                        break;
+                    }
+                }
+                if (!sent)
+                {
+                    Log.LogError($"[SteamTransport] Fragment chunk {i}/{totalChunks} (id={fragmentId}) failed after {FragmentRetryCount} retries — aborting send");
+                    LastSendFailed = true;
+                    return;
+                }
             }
         }
 
-        private unsafe void SendRaw(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
+        private unsafe bool SendRaw(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
         {
             int flags = delivery switch
             {
@@ -208,7 +240,11 @@ namespace SeapowerMultiplayer.Transport
                 EResult result = SteamNetworkingSockets.SendMessageToConnection(
                     conn, (IntPtr)ptr, (uint)length, flags, out _);
                 if (result != EResult.k_EResultOK)
+                {
                     Log.LogError($"[SteamTransport] Send failed: {result}, size={length}");
+                    return false;
+                }
+                return true;
             }
         }
 

@@ -31,9 +31,11 @@ namespace SeapowerMultiplayer
 
         // ── Public API ────────────────────────────────────────────────────────────
 
-        public int  LastRttMs   => _transport?.RttMs ?? 0;
+        public int  LastRttMs      => _transport?.RttMs ?? 0;
 
-        public bool IsConnected => _transport?.IsConnected ?? false;
+        public bool IsConnected    => _transport?.IsConnected ?? false;
+
+        public bool LastSendFailed => _transport?.LastSendFailed ?? false;
 
         public bool IsConnectedClient => !_isHost && IsConnected;
 

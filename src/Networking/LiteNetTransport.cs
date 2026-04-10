@@ -22,6 +22,7 @@ namespace SeapowerMultiplayer.Transport
             : _serverPeer?.ConnectionState == ConnectionState.Connected;
 
         public int RttMs { get; private set; }
+        public bool LastSendFailed => false;
 
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;

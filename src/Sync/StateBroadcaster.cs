@@ -289,7 +289,10 @@ namespace SeapowerMultiplayer
             }
         }
 
-        // ── Projectile reconciliation (host sends active list to client) ────
+        // ── Projectile reconciliation ─────────────────────────────────────────
+        // Co-op: host sends all active projectiles to client (unidirectional).
+        // PvP: both sides send their own-taskforce projectiles to each other
+        // (bidirectional) with geo-encoded positions and ammo names for matching.
         private IEnumerator ProjectileReconciliationLoop()
         {
             var wait = new WaitForSeconds(5f);
@@ -297,11 +300,14 @@ namespace SeapowerMultiplayer
             while (true)
             {
                 yield return wait;
-                if (!Plugin.Instance.CfgIsHost.Value) continue;
-                if (Plugin.Instance.CfgPvP.Value) continue;
                 if (!NetworkManager.Instance.IsConnected) continue;
                 if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
                 if (SessionManager.SceneLoading) continue;
+
+                bool isPvP = Plugin.Instance.CfgPvP.Value;
+
+                // Co-op: only host sends
+                if (!isPvP && !Plugin.Instance.CfgIsHost.Value) continue;
 
                 msg.Reset();
 
@@ -310,14 +316,13 @@ namespace SeapowerMultiplayer
                 {
                     var m = missiles[i];
                     if (m == null || m.IsDestroyed) continue;
-                    var launcher = StateSerializer.GetLaunchPlatform(m);
-                    var pos = m.transform.position;
-                    msg.Projectiles.Add(new Messages.ProjectileReconciliationMessage.ActiveProjectile
+                    // PvP: only include own-taskforce projectiles
+                    if (isPvP)
                     {
-                        HostId = m.UniqueID,
-                        SourceUnitId = launcher?.UniqueID ?? 0,
-                        X = pos.x, Y = pos.y, Z = pos.z,
-                    });
+                        var launcher = StateSerializer.GetLaunchPlatform(m);
+                        if (launcher != null && launcher._taskforce != SeaPower.Globals._playerTaskforce) continue;
+                    }
+                    AddProjectileEntry(msg, m, isPvP);
                 }
 
                 var torpedoes = UnitRegistry.Torpedoes;
@@ -325,19 +330,52 @@ namespace SeapowerMultiplayer
                 {
                     var t = torpedoes[i];
                     if (t == null || t.IsDestroyed) continue;
-                    var launcher = StateSerializer.GetLaunchPlatform(t);
-                    var pos = t.transform.position;
-                    msg.Projectiles.Add(new Messages.ProjectileReconciliationMessage.ActiveProjectile
+                    if (isPvP)
                     {
-                        HostId = t.UniqueID,
-                        SourceUnitId = launcher?.UniqueID ?? 0,
-                        X = pos.x, Y = pos.y, Z = pos.z,
-                    });
+                        var launcher = StateSerializer.GetLaunchPlatform(t);
+                        if (launcher != null && launcher._taskforce != SeaPower.Globals._playerTaskforce) continue;
+                    }
+                    AddProjectileEntry(msg, t, isPvP);
                 }
 
                 if (msg.Projectiles.Count > 0)
-                    NetworkManager.Instance.BroadcastToClients(msg, LiteNetLib.DeliveryMethod.ReliableOrdered);
+                {
+                    // PvP: both sides send; Co-op: host broadcasts
+                    if (isPvP)
+                        NetworkManager.Instance.SendToOther(msg, LiteNetLib.DeliveryMethod.ReliableOrdered);
+                    else
+                        NetworkManager.Instance.BroadcastToClients(msg, LiteNetLib.DeliveryMethod.ReliableOrdered);
+                }
             }
+        }
+
+        private static void AddProjectileEntry(Messages.ProjectileReconciliationMessage msg,
+            SeaPower.WeaponBase weapon, bool useGeo)
+        {
+            var launcher = StateSerializer.GetLaunchPlatform(weapon);
+            string ammoName = weapon._ap?._ammunitionFileName ?? "";
+
+            float x, y, z;
+            if (useGeo)
+            {
+                var geo = weapon.getGeoPosition();
+                x = (float)geo._longitude;
+                y = (float)geo._height;
+                z = (float)geo._latitude;
+            }
+            else
+            {
+                var pos = weapon.transform.position;
+                x = pos.x; y = pos.y; z = pos.z;
+            }
+
+            msg.Projectiles.Add(new Messages.ProjectileReconciliationMessage.ActiveProjectile
+            {
+                HostId = weapon.UniqueID,
+                SourceUnitId = launcher?.UniqueID ?? 0,
+                X = x, Y = y, Z = z,
+                AmmoName = ammoName,
+            });
         }
 
         // ── PvP orphan cleanup (destroys unmatched units/missiles) ──────────

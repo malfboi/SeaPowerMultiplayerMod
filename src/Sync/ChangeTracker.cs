@@ -13,6 +13,7 @@ namespace SeapowerMultiplayer
     {
         private static readonly Dictionary<int, UnitState> _lastSent = new();
         private static readonly Dictionary<int, float> _nextHeartbeat = new();
+        private static readonly Dictionary<int, float> _phaseOffset = new();
         private static int _staggerCounter;
 
         // Idle entities resend at this interval (seconds, unscaled time)
@@ -48,10 +49,11 @@ namespace SeapowerMultiplayer
                 bool include;
                 if (!_lastSent.TryGetValue(id, out var previous))
                 {
-                    // New entity — always send, assign staggered heartbeat
+                    // New entity — always send, assign staggered phase offset
                     include = true;
-                    _nextHeartbeat[id] = now + HeartbeatInterval
-                        * (_staggerCounter++ % StaggerBuckets) / StaggerBuckets;
+                    float phase = HeartbeatInterval * (_staggerCounter++ % StaggerBuckets) / StaggerBuckets;
+                    _phaseOffset[id] = phase;
+                    _nextHeartbeat[id] = now + phase;
                 }
                 else if (HasChanged(current, previous))
                 {
@@ -71,7 +73,11 @@ namespace SeapowerMultiplayer
                 {
                     dirty.Add(id);
                     _lastSent[id] = current;
-                    _nextHeartbeat[id] = now + HeartbeatInterval;
+                    // Advance to next heartbeat aligned to this entity's phase,
+                    // so idle units stay distributed across ticks instead of clumping.
+                    float phase = _phaseOffset.TryGetValue(id, out var p) ? p : 0f;
+                    float nextAligned = now - ((now - phase) % HeartbeatInterval) + HeartbeatInterval;
+                    _nextHeartbeat[id] = nextAligned;
                 }
             }
 
@@ -115,6 +121,7 @@ namespace SeapowerMultiplayer
         {
             _lastSent.Clear();
             _nextHeartbeat.Clear();
+            _phaseOffset.Clear();
             _staggerCounter = 0;
         }
     }

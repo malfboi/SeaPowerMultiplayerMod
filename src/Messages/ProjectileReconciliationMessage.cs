@@ -16,6 +16,7 @@ namespace SeapowerMultiplayer.Messages
             public int HostId;
             public int SourceUnitId;
             public float X, Y, Z;
+            public string AmmoName;
         }
 
         public List<ActiveProjectile> Projectiles = new(64);
@@ -36,6 +37,7 @@ namespace SeapowerMultiplayer.Messages
                 w.Put(p.X);
                 w.Put(p.Y);
                 w.Put(p.Z);
+                w.Put(p.AmmoName ?? "");
             }
         }
 
@@ -52,6 +54,7 @@ namespace SeapowerMultiplayer.Messages
                     X = r.GetFloat(),
                     Y = r.GetFloat(),
                     Z = r.GetFloat(),
+                    AmmoName = r.GetString(),
                 });
             }
             return msg;

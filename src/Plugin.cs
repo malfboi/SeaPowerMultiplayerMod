@@ -133,6 +133,9 @@ namespace SeapowerMultiplayer
             OrderDelayQueue.Tick();
             CombatEventHandler.Tick();
 
+            // Check for pending session sync retries (failed sends)
+            SessionManager.TickRetry();
+
             // Process deferred flight ops spawns (elevators were busy)
             FlightOpsHandler.Tick();
 
