@@ -152,11 +152,12 @@ namespace SeapowerMultiplayer
 
             var msg = new SessionSyncMessage
             {
-                SaveFileContent    = saveContent,
-                MissionFileName    = missionFileName,
-                MissionFileContent = missionFileContent,
-                RngSeed            = rngSeed,
-                GameSeconds        = gameSeconds,
+                SaveFileContent     = saveContent,
+                MissionFileName     = missionFileName,
+                MissionFileContent  = missionFileContent,
+                RngSeed             = rngSeed,
+                GameSeconds         = gameSeconds,
+                HostTimeVoteEnabled = Plugin.Instance.CfgTimeVote.Value,
             };
 
             Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
@@ -209,8 +210,10 @@ namespace SeapowerMultiplayer
 
         public static void ApplyReceivedSession(SessionSyncMessage msg)
         {
-            Log.LogInfo($"[Session] Received SessionSync: loadByName={msg.LoadByName}, mission={msg.MissionFileName}, save={msg.SaveFileContent?.Length ?? 0}ch, rngSeed={msg.RngSeed}");
+            Log.LogInfo($"[Session] Received SessionSync: loadByName={msg.LoadByName}, mission={msg.MissionFileName}, save={msg.SaveFileContent?.Length ?? 0}ch, rngSeed={msg.RngSeed}, hostTimeVote={msg.HostTimeVoteEnabled}");
             IsReceiving = true;
+
+            TimeSyncManager.SetHostVoteMode(msg.HostTimeVoteEnabled);
 
             try
             {
@@ -466,7 +469,6 @@ namespace SeapowerMultiplayer
             Log.LogInfo("[Session] OnSceneReady — finalizing scene load");
             SceneLoading = false;
             _inGame = true;
-            DriftDetector.Reset();
             StateApplier.ResetOrphanTracking();
             PvPDeathNotifications.Clear();
             PvPFireAuth.Clear();

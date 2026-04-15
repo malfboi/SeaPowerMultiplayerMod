@@ -2527,7 +2527,10 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgPvP.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             var obj = __instance.Unit?.BaseObject as ObjectBase;
-            if (obj != null && UnitLockManager.IsLockedByRemote(obj.UniqueID))
+            if (obj == null) return;
+            // Only friendly units are co-controlled — enemy units can't be "locked by the other player"
+            if (obj._taskforce != Globals._playerTaskforce) return;
+            if (UnitLockManager.IsLockedByRemote(obj.UniqueID))
                 __result = "[BUSY]";
         }
     }

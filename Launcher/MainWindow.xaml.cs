@@ -116,6 +116,7 @@ namespace SeapowerMultiplayer.Launcher
             TxtPort.Text = _config.Settings.Port.ToString();
             ChkAutoConnect.IsChecked = _config.Settings.AutoConnect;
             ChkTimeVote.IsChecked = _config.Settings.TimeVote;
+            ChkPvP.IsChecked = _config.Settings.PvP;
             TxtHostIP.IsEnabled = !_config.Settings.IsHost;
         }
 
@@ -128,6 +129,7 @@ namespace SeapowerMultiplayer.Launcher
                 _config.Settings.Port = port;
             _config.Settings.AutoConnect = ChkAutoConnect.IsChecked == true;
             _config.Settings.TimeVote = ChkTimeVote.IsChecked == true;
+            _config.Settings.PvP = ChkPvP.IsChecked == true;
             _config.Save();
         }
 
@@ -431,6 +433,7 @@ namespace SeapowerMultiplayer.Launcher
             TxtPort.IsEnabled = enabled;
             ChkAutoConnect.IsEnabled = enabled;
             ChkTimeVote.IsEnabled = enabled;
+            ChkPvP.IsEnabled = enabled;
         }
 
         

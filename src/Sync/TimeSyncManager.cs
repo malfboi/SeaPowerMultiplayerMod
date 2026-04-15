@@ -40,8 +40,25 @@ namespace SeapowerMultiplayer
         /// <summary>True when we've sent a proposal and are waiting for the other side to respond.</summary>
         public static bool WaitingForVoteResponse { get; private set; }
 
+        /// <summary>Host's CfgTimeVote, synced to client via SessionSync. Only read on client.</summary>
+        private static bool _hostVoteModeEnabled;
+
+        /// <summary>Called on client when SessionSync arrives with the host's vote-mode setting.</summary>
+        public static void SetHostVoteMode(bool enabled)
+        {
+            _hostVoteModeEnabled = enabled;
+            Plugin.Log.LogInfo($"[TimeSync] Host vote mode = {enabled}");
+        }
+
+        /// <summary>
+        /// Effective vote-mode setting: the host's config is authoritative for both sides.
+        /// Host reads its own config; client reads the value synced from the host.
+        /// </summary>
+        private static bool VoteModeActive =>
+            Plugin.Instance.CfgIsHost.Value ? Plugin.Instance.CfgTimeVote.Value : _hostVoteModeEnabled;
+
         private static bool IsVoteMode =>
-            Plugin.Instance.CfgTimeVote.Value && NetworkManager.Instance.IsConnected;
+            VoteModeActive && NetworkManager.Instance.IsConnected;
 
         // ── UI-facing request methods (called by MultiplayerUI buttons) ───────
 
@@ -269,7 +286,7 @@ namespace SeapowerMultiplayer
         /// <summary>Shared prefix logic: in vote mode, suppress all time changes unless applying from network.</summary>
         private static bool ShouldSuppressForVoteMode()
         {
-            if (!Plugin.Instance.CfgTimeVote.Value) return false;
+            if (!VoteModeActive) return false;
             if (!NetworkManager.Instance.IsConnected) return false;
             if (_applyingFromNetwork) return false;
             return true;

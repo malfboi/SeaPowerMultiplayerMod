@@ -171,7 +171,6 @@ namespace SeapowerMultiplayer
             _mainThreadQueue.Enqueue(() =>
             {
                 OrderDelayQueue.Clear();
-                DriftDetector.Reset();
                 TaskforceAssignmentManager.Reset();
                 UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
@@ -278,6 +277,16 @@ namespace SeapowerMultiplayer
                 case MessageType.ProjectileSpawn:
                 {
                     var msg = ProjectileSpawnMessage.Deserialize(reader);
+                    // In co-op, only the host spawns projectiles and only the client
+                    // should receive these messages. If the host receives one (e.g.
+                    // from a client running a stale/mismatched PvP config) dropping
+                    // it here prevents the ForceSpawn→Postfix→broadcast feedback
+                    // loop that produces infinite interceptors.
+                    if (Plugin.Instance.CfgIsHost.Value && !Plugin.Instance.CfgPvP.Value)
+                    {
+                        Plugin.Log.LogWarning($"[Net] Dropping unexpected ProjectileSpawn on co-op host (source unit {msg.SourceUnitId}, ammo={msg.AmmoName})");
+                        break;
+                    }
                     _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnHostSpawnReceived(
                         msg.HostProjectileId, msg.SourceUnitId, msg.AmmoName,
                         msg.TargetEntityId, msg.TargetX, msg.TargetY, msg.TargetZ,
