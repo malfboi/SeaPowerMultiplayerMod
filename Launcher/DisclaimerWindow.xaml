@@ -17,7 +17,7 @@
 
         <!-- Header -->
         <TextBlock Grid.Row="0"
-                   Text="v0.1.4 Release Notes"
+                   Text="v0.2.0 Release Notes"
                    Foreground="{StaticResource TextPrimary}"
                    FontSize="18"
                    FontWeight="Bold"
@@ -44,16 +44,6 @@
                            TextWrapping="Wrap"
                            Margin="8,0,0,4"
                            Text="&#x2022; Carrier ops can desync at 10x time compression and above."/>
-                <TextBlock Foreground="{StaticResource TextPrimary}"
-                           FontSize="13"
-                           TextWrapping="Wrap"
-                           Margin="8,0,0,4"
-                           Text="&#x2022; Defensive missiles can desync in high missile scenarios but should not affect combat outcomes."/>
-                <TextBlock Foreground="{StaticResource TextPrimary}"
-                           FontSize="13"
-                           TextWrapping="Wrap"
-                           Margin="8,0,0,12"
-                           Text="&#x2022; Weapons fired at a position rather than a target do not sync (e.g., torpedoes or Tomahawks fired at a location instead of a unit)."/>
 
                 <!-- Fixed Since Last Update -->
                 <TextBlock Text="FIXED SINCE LAST UPDATE"
@@ -65,18 +55,12 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Various fixes to reduce desync issues."/>
+                           Text="Added 2 player Co Op!"/>
                 <TextBlock Foreground="{StaticResource TextSecondary}"
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="More sensible GC handling and object caching to improve performance and reduce desync."/>
-                <TextBlock Foreground="{StaticResource TextSecondary}"
-                           FontSize="13"
-                           TextWrapping="Wrap"
-                           Margin="8,0,0,12"
-                           Text="Removed missile position syncing so missiles will no longer jitter."/>
-
+                           Text="More optimised networking."/>                
                 <!-- Disclaimer -->
                 <Rectangle Height="1"
                            Fill="{StaticResource BorderColor}"

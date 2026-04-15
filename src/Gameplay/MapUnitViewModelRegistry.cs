@@ -6,8 +6,10 @@ using SeapowerUI;
 namespace SeapowerMultiplayer
 {
     /// <summary>
-    /// Tracks all live MapUnitViewModel instances so UnitLockManager can
-    /// trigger PropertyChanged when lock state changes.
+    /// Tracks live MapUnitViewModel instances so UnitLockManager can push a
+    /// PropertyChanged notification when the remote player's lock changes —
+    /// the map unit label re-reads <see cref="MapUnitViewModel.ContactInfoLine2"/>
+    /// and renders the "[ALLY]" badge.
     /// </summary>
     public static class MapUnitViewModelRegistry
     {
@@ -31,11 +33,6 @@ namespace SeapowerMultiplayer
             _instances.Remove(vm);
         }
 
-        /// <summary>
-        /// Fire PropertyChanged("ContactInfoLine4") on the MapUnitViewModel for
-        /// the given unit so Noesis re-reads the getter (which now returns "[BUSY]"
-        /// or the original value depending on lock state).
-        /// </summary>
         public static void NotifyLockChanged(int uniqueId)
         {
             foreach (var vm in _instances)
@@ -44,11 +41,9 @@ namespace SeapowerMultiplayer
                 if (obj != null && obj.UniqueID == uniqueId)
                 {
                     _onPropertyChanged?.Invoke(vm, new object[] { "ContactInfoLine2" });
-                    Plugin.Log.LogDebug($"[UnitLock] Notified MapUnitViewModel for unit {uniqueId}");
                     return;
                 }
             }
-            Plugin.Log.LogDebug($"[UnitLock] No MapUnitViewModel found for unit {uniqueId}");
         }
 
         public static void Clear()
