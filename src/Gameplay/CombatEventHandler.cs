@@ -56,6 +56,23 @@ namespace SeapowerMultiplayer
         private const float KillResyncInterval = 5f;
         private static float _lastKillResync = 0f;
 
+        // ── Destroyed-unit tombstones ────────────────────────────────────────
+        // Units destroyed via Compartments.DestroyByExplosion are removed from
+        // SceneCreator's lookup. Late combat events then hit "NOT FOUND".
+        // Tombstones let us recognize these as "already destroyed" instead.
+        private const float TombstoneTtl = 60f;
+        private static readonly Dictionary<int, float> _destroyedUnitTombstones = new();
+
+        internal static void RecordTombstone(int unitId)
+        {
+            _destroyedUnitTombstones[unitId] = Time.unscaledTime;
+        }
+
+        // ── Kill resync acknowledgment ───────────────────────────────────────
+        // When the remote side sends UnitDestroyed for a unit we already know is dead,
+        // that confirms they processed the kill. Stop re-broadcasting it.
+        private static readonly HashSet<int> _remoteAckedDeaths = new();
+
         internal static void WatchForDeath(int unitId)
         {
             if (!_deathWatch.ContainsKey(unitId))
@@ -67,6 +84,8 @@ namespace SeapowerMultiplayer
             _deathWatch.Clear();
             _lastKillResync = 0f;
             _confirmedDeadOwnUnits.Clear();
+            _destroyedUnitTombstones.Clear();
+            _remoteAckedDeaths.Clear();
         }
 
         /// <summary>Called from Plugin.Update() each frame.</summary>
@@ -114,6 +133,7 @@ namespace SeapowerMultiplayer
                         });
                         // Track for incremental kill resync
                         TrackDeadUnit(kvp.Key);
+                        RecordTombstone(kvp.Key);
                         if (unit != null)
                         {
                             // Silence sensors so radar stops being a target immediately.
@@ -133,11 +153,17 @@ namespace SeapowerMultiplayer
             // Periodic kill resync: re-broadcast all confirmed dead own-side units so
             // the remote machine catches any UnitDestroyed it may have missed.
             // Uses the incremental _confirmedDeadOwnUnits set instead of scanning all objects.
-            if (now - _lastKillResync > KillResyncInterval)
+            // Only broadcast when synchronized — otherwise the remote side ignores them
+            // and we just flood the network with useless messages.
+            if (now - _lastKillResync > KillResyncInterval
+                && SimSyncManager.CurrentState == SimState.Synchronized)
             {
                 _lastKillResync = now;
                 foreach (var deadId in _confirmedDeadOwnUnits)
                 {
+                    // Remote already confirmed this kill — no need to re-broadcast
+                    if (_remoteAckedDeaths.Contains(deadId)) continue;
+
                     CombatSyncHelper.Send(new CombatEventMessage
                     {
                         EventType      = CombatEventType.UnitDestroyed,
@@ -145,6 +171,19 @@ namespace SeapowerMultiplayer
                         SourceEntityId = 0,
                     });
                 }
+            }
+
+            // Purge expired tombstones (piggyback on kill resync interval)
+            if (_destroyedUnitTombstones.Count > 0)
+            {
+                _deathWatchRemove.Clear();
+                foreach (var kvp in _destroyedUnitTombstones)
+                {
+                    if (now - kvp.Value > TombstoneTtl)
+                        _deathWatchRemove.Add(kvp.Key);
+                }
+                foreach (var id in _deathWatchRemove)
+                    _destroyedUnitTombstones.Remove(id);
             }
         }
 
@@ -193,6 +232,9 @@ namespace SeapowerMultiplayer
             if (unit._taskforce == Globals._playerTaskforce)
                 TrackDeadUnit(unit.UniqueID);
 
+            // Tombstone so late combat events recognize "already destroyed" instead of NOT FOUND
+            RecordTombstone(unit.UniqueID);
+
             DisableSensors(unit);
         }
 
@@ -225,6 +267,15 @@ namespace SeapowerMultiplayer
 
             if (target == null)
             {
+                if (_destroyedUnitTombstones.ContainsKey(msg.TargetEntityId))
+                {
+                    // Remote confirmed our kill — stop re-broadcasting in kill resync
+                    if (msg.EventType == CombatEventType.UnitDestroyed
+                        && _confirmedDeadOwnUnits.Contains(msg.TargetEntityId))
+                        _remoteAckedDeaths.Add(msg.TargetEntityId);
+                    Log.LogDebug($"[Combat] {msg.EventType} target={msg.TargetEntityId} already destroyed (tombstone)");
+                    return;
+                }
                 EventsNotFound++;
                 Log.LogWarning($"[Combat] {msg.EventType} target={msg.TargetEntityId} NOT FOUND");
                 return;

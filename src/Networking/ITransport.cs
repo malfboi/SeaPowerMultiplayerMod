@@ -8,6 +8,7 @@ namespace SeapowerMultiplayer.Transport
     {
         bool IsConnected { get; }
         int RttMs { get; }
+        bool LastSendFailed { get; }
 
         void Start(bool asHost);
         void Stop();

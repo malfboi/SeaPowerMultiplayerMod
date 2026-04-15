@@ -19,6 +19,7 @@ namespace SeapowerMultiplayer.Messages
         public string MissionFileContent  = "";    // full text of the base mission .ini (empty for built-ins)
         public int    RngSeed;                     // deterministic seed for synchronized RNG
         public float  GameSeconds;                  // Environment.Seconds (save format drops sub-minute precision)
+        public bool   HostTimeVoteEnabled;         // host's CfgTimeVote — client must defer to this
 
         public void Serialize(NetDataWriter w)
         {
@@ -28,18 +29,20 @@ namespace SeapowerMultiplayer.Messages
             PutLargeString(w, MissionFileContent);
             w.Put(RngSeed);
             w.Put(GameSeconds);
+            w.Put(HostTimeVoteEnabled);
         }
 
         public static SessionSyncMessage Deserialize(NetDataReader r)
         {
             var msg = new SessionSyncMessage
             {
-                LoadByName         = r.GetBool(),
-                SaveFileContent    = GetLargeString(r),
-                MissionFileName    = r.GetString(),
-                MissionFileContent = GetLargeString(r),
-                RngSeed            = r.GetInt(),
-                GameSeconds        = r.GetFloat(),
+                LoadByName          = r.GetBool(),
+                SaveFileContent     = GetLargeString(r),
+                MissionFileName     = r.GetString(),
+                MissionFileContent  = GetLargeString(r),
+                RngSeed             = r.GetInt(),
+                GameSeconds         = r.GetFloat(),
+                HostTimeVoteEnabled = r.GetBool(),
             };
 
             return msg;

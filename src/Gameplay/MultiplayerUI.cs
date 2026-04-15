@@ -64,7 +64,7 @@ namespace SeapowerMultiplayer
         // Foldout state for sync health sections
         private bool _foldUnits = true;
         private bool _foldProjectiles, _foldMissileState, _foldFlightOps;
-        private bool _foldFireAuth, _foldCombatEvents, _foldDrift;
+        private bool _foldFireAuth, _foldCombatEvents;
 
         // Toggle for showing/hiding sync health section panels
         private bool _syncPanelsVisible = false;
@@ -747,14 +747,11 @@ namespace SeapowerMultiplayer
             bool isPvP = Plugin.Instance.CfgPvP.Value;
 
             // Issues (red)
-            if (!isPvP && DriftDetector.DriftLevel == DriftTier.Critical) return SyncStatus.Issues;
-            if (!isPvP && DriftDetector.HardSyncRequested) return SyncStatus.Issues;
             if (StateApplier.OrphanCandidateCount > 3) return SyncStatus.Issues;
             if (ProjectileIdMapper.PendingHostCount + ProjectileIdMapper.PendingLocalCount > 5) return SyncStatus.Issues;
             if (isPvP && PvPFireAuth.SuppressedCount > 10) return SyncStatus.Issues;
 
             // Degraded (yellow)
-            if (!isPvP && (DriftDetector.DriftLevel == DriftTier.Elevated || DriftDetector.DriftLevel == DriftTier.High)) return SyncStatus.Degraded;
             if (StateApplier.OrphanCandidateCount > 0) return SyncStatus.Degraded;
             if (ProjectileIdMapper.PendingHostCount + ProjectileIdMapper.PendingLocalCount > 0) return SyncStatus.Degraded;
             if (FlightOpsHandler.DeferredSpawnCount > 0) return SyncStatus.Degraded;
@@ -778,12 +775,8 @@ namespace SeapowerMultiplayer
         private SyncStatus SectionStatus_Units()
         {
             if (StateApplier.OrphanCandidateCount > 3) return SyncStatus.Issues;
-            bool isPvP = Plugin.Instance.CfgPvP.Value;
-            if (isPvP)
-            {
-                if (StateApplier.PvpShipDriftMax > 100f || StateApplier.PvpAirDriftMax > 200f) return SyncStatus.Issues;
-                if (StateApplier.PvpShipDriftAvg > 20f || StateApplier.PvpAirDriftAvg > 40f) return SyncStatus.Degraded;
-            }
+            if (StateApplier.ShipDriftMax > 100f || StateApplier.AirDriftMax > 200f) return SyncStatus.Issues;
+            if (StateApplier.ShipDriftAvg > 20f || StateApplier.AirDriftAvg > 40f) return SyncStatus.Degraded;
             if (StateApplier.OrphanCandidateCount > 0) return SyncStatus.Degraded;
             return SyncStatus.OK;
         }
@@ -821,13 +814,6 @@ namespace SeapowerMultiplayer
             // so the remote's event often arrives after the missile is already dead locally.
             if (!Plugin.Instance.CfgPvP.Value && CombatEventHandler.EventsNotFound > 0)
                 return SyncStatus.Degraded;
-            return SyncStatus.OK;
-        }
-
-        private SyncStatus SectionStatus_Drift()
-        {
-            if (DriftDetector.DriftLevel == DriftTier.Critical || DriftDetector.HardSyncRequested) return SyncStatus.Issues;
-            if (DriftDetector.DriftLevel == DriftTier.Elevated || DriftDetector.DriftLevel == DriftTier.High) return SyncStatus.Degraded;
             return SyncStatus.OK;
         }
 
@@ -876,15 +862,6 @@ namespace SeapowerMultiplayer
                     GUILayout.Label($"  Air:   own {_ownAir}  enemy {_enemyAir}", _labelStyle);
                     if (_ownLand + _enemyLand > 0)
                         GUILayout.Label($"  Land:  own {_ownLand}  enemy {_enemyLand}", _labelStyle);
-
-                    // Per-category position drift
-                    var shipDriftStyle = StateApplier.PvpShipDriftMax > 100f ? _warningStyle
-                        : StateApplier.PvpShipDriftAvg > 20f ? _elevatedStyle : _dimLabelStyle;
-                    GUILayout.Label($"  Ship drift: {StateApplier.PvpShipDriftAvg:F1} avg / {StateApplier.PvpShipDriftMax:F1} max", shipDriftStyle);
-
-                    var airDriftStyle = StateApplier.PvpAirDriftMax > 200f ? _warningStyle
-                        : StateApplier.PvpAirDriftAvg > 40f ? _elevatedStyle : _dimLabelStyle;
-                    GUILayout.Label($"  Air drift:  {StateApplier.PvpAirDriftAvg:F1} avg / {StateApplier.PvpAirDriftMax:F1} max", airDriftStyle);
                 }
                 else
                 {
@@ -893,6 +870,16 @@ namespace SeapowerMultiplayer
                     if (_ownLand + _enemyLand > 0)
                         GUILayout.Label($"  Land: {_ownLand + _enemyLand}", _labelStyle);
                 }
+
+                // Per-category position drift
+                var shipDriftStyle = StateApplier.ShipDriftMax > 100f ? _warningStyle
+                    : StateApplier.ShipDriftAvg > 20f ? _elevatedStyle : _dimLabelStyle;
+                GUILayout.Label($"  Ship drift: {StateApplier.ShipDriftAvg:F1} avg / {StateApplier.ShipDriftMax:F1} max", shipDriftStyle);
+
+                var airDriftStyle = StateApplier.AirDriftMax > 200f ? _warningStyle
+                    : StateApplier.AirDriftAvg > 40f ? _elevatedStyle : _dimLabelStyle;
+                GUILayout.Label($"  Air drift:  {StateApplier.AirDriftAvg:F1} avg / {StateApplier.AirDriftMax:F1} max", airDriftStyle);
+
                 if (StateApplier.OrphanCandidateCount > 0)
                     GUILayout.Label($"  Orphan candidates: {StateApplier.OrphanCandidateCount}", _warningStyle);
             }
@@ -966,37 +953,6 @@ namespace SeapowerMultiplayer
                 GUILayout.Label($"  Received: {CombatEventHandler.EventsReceived}  Not found: {CombatEventHandler.EventsNotFound}", _labelStyle);
             }
 
-            GUILayout.Space(2);
-
-            // ── Drift (co-op only) ───────────────────────────────────────────
-            if (!isPvP)
-            {
-                _foldDrift = DrawSectionHeader("Drift (co-op)", _foldDrift, SectionStatus_Drift());
-                if (_foldDrift)
-                {
-                    // Drift level with tier-colored label
-                    GUIStyle tierStyle;
-                    switch (DriftDetector.DriftLevel)
-                    {
-                        case DriftTier.Elevated: tierStyle = _elevatedStyle!; break;
-                        case DriftTier.High:     tierStyle = _warningStyle!;  break;
-                        case DriftTier.Critical: tierStyle = _criticalStyle!; break;
-                        default:                 tierStyle = _successStyle!;  break;
-                    }
-
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label($"  Drift: {DriftDetector.AvgPositionDrift:F1} / {DriftDetector.MaxPositionDrift:F1} max", _labelStyle, GUILayout.Width(180));
-                    GUILayout.Label(DriftDetector.DriftLevel.ToString(), tierStyle);
-                    GUILayout.EndHorizontal();
-
-                    GUILayout.Label($"  Speed: {DriftDetector.SpeedDriftAvg:F1} kts  Hdg: {DriftDetector.HeadingDriftAvg:F1}\u00b0", _labelStyle);
-                    GUILayout.Label($"  Units: \u00b1{DriftDetector.UnitCountDelta}  Lerp: {DriftDetector.EffectiveLerpFactor:F2}  Corrections: {DriftDetector.CorrectionCount}", _labelStyle);
-                    GUILayout.Label($"  Trend: {DriftDetector.DriftTrend:F1}  Max ever: {DriftDetector.MaxDeltaSeen:F1}", _dimLabelStyle);
-
-                    if (DriftDetector.HardSyncRequested)
-                        GUILayout.Label("  Hard sync requested!", _criticalStyle);
-                }
-            }
         }
     }
 }

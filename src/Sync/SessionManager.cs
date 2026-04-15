@@ -30,9 +30,25 @@ namespace SeapowerMultiplayer
         private static int _pendingRngSeed;
         private static float _pendingGameSeconds;
 
+        /// <summary>When > 0, a resync retry is pending. Counts down each Update frame.</summary>
+        private static float _retrySendAt;
+        private static int _retryCount;
+        private const int MaxRetries = 3;
+        private const float RetryDelaySec = 2f;
+
         private static ManualLogSource Log => Plugin.Log;
 
         // ── Host side ─────────────────────────────────────────────────────────
+
+        /// <summary>Called from Plugin.Update() to check for pending resync retries.</summary>
+        public static void TickRetry()
+        {
+            if (_retrySendAt <= 0f) return;
+            if (Time.unscaledTime < _retrySendAt) return;
+            _retrySendAt = 0f;
+            Log.LogInfo($"[Session] Retry #{_retryCount}/{MaxRetries} — re-sending session sync");
+            CaptureAndSend();
+        }
 
         public static void CaptureAndSend()
         {
@@ -136,15 +152,37 @@ namespace SeapowerMultiplayer
 
             var msg = new SessionSyncMessage
             {
-                SaveFileContent    = saveContent,
-                MissionFileName    = missionFileName,
-                MissionFileContent = missionFileContent,
-                RngSeed            = rngSeed,
-                GameSeconds        = gameSeconds,
+                SaveFileContent     = saveContent,
+                MissionFileName     = missionFileName,
+                MissionFileContent  = missionFileContent,
+                RngSeed             = rngSeed,
+                GameSeconds         = gameSeconds,
+                HostTimeVoteEnabled = Plugin.Instance.CfgTimeVote.Value,
             };
 
             Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
             NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
+
+            if (NetworkManager.Instance.LastSendFailed)
+            {
+                if (_retryCount < MaxRetries)
+                {
+                    _retryCount++;
+                    _retrySendAt = Time.unscaledTime + RetryDelaySec;
+                    Log.LogWarning($"[Session] Send failed — scheduling retry #{_retryCount}/{MaxRetries} in {RetryDelaySec}s");
+                    return;
+                }
+                else
+                {
+                    Log.LogError($"[Session] Send failed after {MaxRetries} retries — session sync could not be delivered. Save may be too large ({saveContent.Length} chars).");
+                    _retryCount = 0;
+                    SimSyncManager.Reset();
+                    return;
+                }
+            }
+
+            // Success — reset retry counter
+            _retryCount = 0;
 
             // Seed host RNG to match what client will use
             RngSeeder.SeedAll(rngSeed);
@@ -172,8 +210,10 @@ namespace SeapowerMultiplayer
 
         public static void ApplyReceivedSession(SessionSyncMessage msg)
         {
-            Log.LogInfo($"[Session] Received SessionSync: loadByName={msg.LoadByName}, mission={msg.MissionFileName}, save={msg.SaveFileContent?.Length ?? 0}ch, rngSeed={msg.RngSeed}");
+            Log.LogInfo($"[Session] Received SessionSync: loadByName={msg.LoadByName}, mission={msg.MissionFileName}, save={msg.SaveFileContent?.Length ?? 0}ch, rngSeed={msg.RngSeed}, hostTimeVote={msg.HostTimeVoteEnabled}");
             IsReceiving = true;
+
+            TimeSyncManager.SetHostVoteMode(msg.HostTimeVoteEnabled);
 
             try
             {
@@ -429,7 +469,6 @@ namespace SeapowerMultiplayer
             Log.LogInfo("[Session] OnSceneReady — finalizing scene load");
             SceneLoading = false;
             _inGame = true;
-            DriftDetector.Reset();
             StateApplier.ResetOrphanTracking();
             PvPDeathNotifications.Clear();
             PvPFireAuth.Clear();

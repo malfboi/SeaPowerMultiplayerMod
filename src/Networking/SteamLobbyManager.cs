@@ -159,6 +159,19 @@ namespace SeapowerMultiplayer.Transport
             Log.LogInfo($"[SteamLobby] Connecting to host {hostSteamId}");
             HostSteamId = hostSteamId;
             Plugin.Instance.CfgIsHost.Value = false;
+
+            // Sync PvP from lobby metadata — otherwise a mismatched local PvP setting
+            // causes the client's WeaponBase Postfix to take the PvP "own projectile"
+            // path and send ProjectileSpawnMessage back to the host, producing an
+            // infinite interceptor feedback loop.
+            string pvpStr = SteamMatchmaking.GetLobbyData(LobbyId, "pvp");
+            if (!string.IsNullOrEmpty(pvpStr) && bool.TryParse(pvpStr, out bool lobbyPvP))
+            {
+                if (Plugin.Instance.CfgPvP.Value != lobbyPvP)
+                    Log.LogInfo($"[SteamLobby] Overriding local PvP={Plugin.Instance.CfgPvP.Value} with host's PvP={lobbyPvP}");
+                Plugin.Instance.CfgPvP.Value = lobbyPvP;
+            }
+
             NetworkManager.Instance.StartTransport(asHost: false);
         }
 

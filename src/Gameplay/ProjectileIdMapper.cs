@@ -70,6 +70,26 @@ namespace SeapowerMultiplayer
         // Host-only projectile tracking (projectiles on host with no local counterpart)
         private static readonly HashSet<int> _hostOnlyProjectiles = new();
 
+        // ── TryForceSpawn retry queue ────────────────────────────────────────
+        // When TryForceSpawn fails (container reloading, unit temporarily unavailable),
+        // retry a few times before giving up instead of losing the mapping forever.
+        private const int MaxForceSpawnRetries = 3;
+        private const float ForceSpawnRetryDelay = 0.5f;
+
+        private struct RetryEntry
+        {
+            public float RetryAt;
+            public int HostId;
+            public int SourceUnitId;
+            public string AmmoName;
+            public ObjectBase TargetObj;
+            public Vector3? TargetPos;
+            public Vector3? LaunchDir;
+            public int RetryCount;
+        }
+
+        private static readonly Queue<RetryEntry> _forceSpawnRetries = new();
+
         // Pending host IDs: tracks host IDs currently queued in _pendingHostSpawns
         private static readonly HashSet<int> _pendingHostIds = new();
 
@@ -93,6 +113,7 @@ namespace SeapowerMultiplayer
             _lockedHostIds.Clear();
             _hostOnlyProjectiles.Clear();
             _pendingHostIds.Clear();
+            _forceSpawnRetries.Clear();
             // Fix #52: Only start a new grace period if not already in one
             if (!IsInGracePeriod())
             {
@@ -136,12 +157,11 @@ namespace SeapowerMultiplayer
             // Already mapped? (e.g. IDs happen to align)
             if (_hostToLocal.ContainsKey(hostProjectileId)) return;
 
-            // PvP: the remote's spawn message implicitly authorizes the local spawn.
-            // Without this, bombs/gun shells (which aren't covered by FireWeapon orders)
-            // get suppressed by PvPFireAuth as "unauthorized."
-            // Only authorize if the unit has no existing authorizations (avoids double-auth
-            // for SAMs which already got authorized via the AutoFireWeapon order).
-            if (Plugin.Instance.CfgPvP.Value && PvPFireAuth.ActiveAuthForUnit(sourceUnitId) == 0)
+            // PvP: each spawn message represents one authorized shot from the remote side.
+            // Always grant 1 auth token per message — without this, rapid fire (multiple
+            // spawn messages before the first is consumed) causes auth exhaustion, which
+            // suppresses the local TryForceSpawn and permanently desynchronizes the FIFO queue.
+            if (Plugin.Instance.CfgPvP.Value)
                 PvPFireAuth.Authorize(sourceUnitId, 1);
 
             var key = (sourceUnitId, ammoName);
@@ -214,7 +234,23 @@ namespace SeapowerMultiplayer
             Vector3? launchDir = (launchDirX != 0f || launchDirY != 0f || launchDirZ != 0f)
                 ? new Vector3(launchDirX, launchDirY, launchDirZ)
                 : (Vector3?)null;
-            TryForceSpawn(sourceUnitId, ammoName, hasTarget ? targetObject : null, hasTarget ? targetPos : (Vector3?)null, launchDir);
+            var targetObjArg = hasTarget ? targetObject : null;
+            var targetPosArg = hasTarget ? targetPos : (Vector3?)null;
+            if (!TryForceSpawn(sourceUnitId, ammoName, targetObjArg, targetPosArg, launchDir))
+            {
+                // Queue for retry — container may be reloading, unit may become available
+                _forceSpawnRetries.Enqueue(new RetryEntry
+                {
+                    RetryAt     = Time.unscaledTime + ForceSpawnRetryDelay,
+                    HostId      = hostProjectileId,
+                    SourceUnitId = sourceUnitId,
+                    AmmoName    = ammoName,
+                    TargetObj   = targetObjArg,
+                    TargetPos   = targetPosArg,
+                    LaunchDir   = launchDir,
+                    RetryCount  = 1,
+                });
+            }
         }
 
         /// <summary>
@@ -433,7 +469,8 @@ namespace SeapowerMultiplayer
 
         /// <summary>
         /// Periodic cleanup called from StateBroadcaster at 1Hz.
-        /// Purges stale entries from both pending queues.
+        /// Purges stale entries from both pending queues, and drains entries
+        /// whose source unit has been destroyed (no spawn can ever match).
         /// </summary>
         public static void PurgeStaleEntries()
         {
@@ -443,6 +480,70 @@ namespace SeapowerMultiplayer
                 SkipStaleEntries(queue, now, revokeAuth: true, isHostQueue: true);
             foreach (var queue in _pendingLocalSpawns.Values)
                 SkipStaleEntries(queue, now, revokeAuth: false, isHostQueue: false);
+
+            // PvP: drain host spawn entries whose source unit is destroyed — no local
+            // projectile can ever spawn from a dead unit, so waiting is pointless.
+            if (Plugin.Instance.CfgPvP.Value)
+                DrainDestroyedSourceEntries();
+
+            ProcessRetryQueue(now);
+        }
+
+        private static void DrainDestroyedSourceEntries()
+        {
+            foreach (var kvp in _pendingHostSpawns)
+            {
+                var queue = kvp.Value;
+                while (queue.Count > 0)
+                {
+                    var entry = queue.Peek();
+                    var src = StateSerializer.FindById(entry.SourceUnitId);
+                    if (src != null && !src.IsDestroyed) break;
+
+                    queue.Dequeue();
+                    _pendingHostTotal--;
+                    _pendingHostIds.Remove(entry.Id);
+                    SpawnFailureCount++;
+                    PvPFireAuth.Revoke(entry.SourceUnitId, 1);
+                    Plugin.Log.LogWarning($"[IdMapper] Drained orphan entry: id={entry.Id} source={entry.SourceUnitId} (unit destroyed)");
+                }
+            }
+        }
+
+        private static void ProcessRetryQueue(float now)
+        {
+            int count = _forceSpawnRetries.Count;
+            for (int i = 0; i < count; i++)
+            {
+                var entry = _forceSpawnRetries.Dequeue();
+
+                // Already matched by another path (e.g. local spawn arrived in the meantime)?
+                if (_hostToLocal.ContainsKey(entry.HostId)) continue;
+
+                if (now < entry.RetryAt)
+                {
+                    _forceSpawnRetries.Enqueue(entry);
+                    continue;
+                }
+
+                if (TryForceSpawn(entry.SourceUnitId, entry.AmmoName, entry.TargetObj, entry.TargetPos, entry.LaunchDir))
+                {
+                    Plugin.Log.LogInfo($"[IdMapper] ForceSpawn retry {entry.RetryCount} succeeded: host={entry.HostId} ammo={entry.AmmoName}");
+                    continue;
+                }
+
+                if (entry.RetryCount < MaxForceSpawnRetries)
+                {
+                    entry.RetryCount++;
+                    entry.RetryAt = now + ForceSpawnRetryDelay;
+                    _forceSpawnRetries.Enqueue(entry);
+                }
+                else
+                {
+                    SpawnFailureCount++;
+                    Plugin.Log.LogWarning($"[IdMapper] ForceSpawn failed after {MaxForceSpawnRetries} retries: host={entry.HostId} source={entry.SourceUnitId} ammo={entry.AmmoName}");
+                }
+            }
         }
 
         // ── Lookup ────────────────────────────────────────────────────────────
@@ -634,6 +735,7 @@ namespace SeapowerMultiplayer
                 return;
             }
 
+            bool isPvP = Plugin.Instance.CfgPvP.Value;
             var activeHostIds = new HashSet<int>(msg.Projectiles.Count);
 
             foreach (var entry in msg.Projectiles)
@@ -646,28 +748,78 @@ namespace SeapowerMultiplayer
                 // Already locked from cycling? Skip.
                 if (_lockedHostIds.Contains(entry.HostId)) continue;
 
-                // Try proximity match as a second chance
-                var hostPos = new UnityEngine.Vector3(entry.X, entry.Y, entry.Z);
-                ObjectBase bestMatch = null;
-                float bestDist = float.MaxValue;
-                FindClosestUnmapped<SeaPower.Missile>(hostPos, ref bestMatch, ref bestDist);
-                FindClosestUnmapped<SeaPower.Torpedo>(hostPos, ref bestMatch, ref bestDist);
+                ObjectBase matched = null;
 
-                if (bestMatch != null && bestDist < 200f)
+                if (isPvP)
                 {
-                    Register(entry.HostId, bestMatch.UniqueID);
-                    _reassignmentCount.Remove(entry.HostId);
-                    Plugin.Log.LogInfo($"[IdMapper] Reconciliation matched: host {entry.HostId} → local {bestMatch.UniqueID} (dist={bestDist:F1})");
+                    // PvP: match by (SourceUnitId, AmmoName) — positions use different
+                    // floating origins so proximity matching is unreliable.
+                    matched = FindUnmappedBySourceAndAmmo(entry.SourceUnitId, entry.AmmoName);
                 }
                 else
                 {
-                    // Track as host-only (no local counterpart)
+                    // Co-op: proximity match as a second chance
+                    var hostPos = new UnityEngine.Vector3(entry.X, entry.Y, entry.Z);
+                    float bestDist = float.MaxValue;
+                    FindClosestUnmapped<SeaPower.Missile>(hostPos, ref matched, ref bestDist);
+                    FindClosestUnmapped<SeaPower.Torpedo>(hostPos, ref matched, ref bestDist);
+                    if (bestDist >= 200f) matched = null;
+                }
+
+                if (matched != null)
+                {
+                    Register(entry.HostId, matched.UniqueID);
+                    _reassignmentCount.Remove(entry.HostId);
+                    Plugin.Log.LogInfo($"[IdMapper] Reconciliation matched: remote {entry.HostId} → local {matched.UniqueID} (source={entry.SourceUnitId}, ammo={entry.AmmoName})");
+                }
+                else
+                {
+                    // Track as remote-only (no local counterpart)
                     _hostOnlyProjectiles.Add(entry.HostId);
                 }
             }
 
-            // Clean up host-only tracking: remove IDs no longer in host's active list
+            // Clean up host-only tracking: remove IDs no longer in remote's active list
             _hostOnlyProjectiles.RemoveWhere(id => !activeHostIds.Contains(id));
+        }
+
+        /// <summary>
+        /// PvP reconciliation: find a local unmapped projectile matching the given
+        /// source unit and ammo name. Returns the first match found, or null.
+        /// </summary>
+        private static ObjectBase FindUnmappedBySourceAndAmmo(int sourceUnitId, string ammoName)
+        {
+            if (string.IsNullOrEmpty(ammoName)) return null;
+
+            ObjectBase result = null;
+            result = SearchUnmapped<Missile>(sourceUnitId, ammoName);
+            if (result != null) return result;
+            result = SearchUnmapped<Torpedo>(sourceUnitId, ammoName);
+            return result;
+        }
+
+        private static ObjectBase SearchUnmapped<T>(int sourceUnitId, string ammoName) where T : WeaponBase
+        {
+            System.Collections.Generic.IReadOnlyList<T> list;
+            if (typeof(T) == typeof(Missile))
+                list = (System.Collections.Generic.IReadOnlyList<T>)(object)UnitRegistry.Missiles;
+            else
+                list = (System.Collections.Generic.IReadOnlyList<T>)(object)UnitRegistry.Torpedoes;
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                var p = list[i];
+                if (p == null || p.IsDestroyed) continue;
+                // Already mapped? Skip.
+                if (_localToHost.ContainsKey(p.UniqueID)) continue;
+                // Check source unit
+                var launcher = StateSerializer.GetLaunchPlatform(p);
+                if (launcher == null || launcher.UniqueID != sourceUnitId) continue;
+                // Check ammo type
+                if (p._ap?._ammunitionFileName != ammoName) continue;
+                return p;
+            }
+            return null;
         }
 
         /// <summary>Remove mapping when a projectile is destroyed.</summary>

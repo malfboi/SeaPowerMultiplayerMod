@@ -65,7 +65,8 @@ namespace SeapowerMultiplayer
             return SceneCreator.FindGlobalObjectById(id);
         }
 
-        public static StateUpdateMessage Capture(Taskforce filterTaskforce = null)
+        public static StateUpdateMessage Capture(Taskforce filterTaskforce = null,
+            HashSet<int> includeEntityIds = null)
         {
             var msg = _pooledMsg;
             msg.Reset();
@@ -74,11 +75,11 @@ namespace SeapowerMultiplayer
                             + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
                             + Singleton<SeaPower.Environment>.Instance.Seconds;
 
-            AddRegistryUnits(msg, UnitType.Vessel,     UnitRegistry.Vessels,      filterTaskforce);
-            AddRegistryUnits(msg, UnitType.Submarine,  UnitRegistry.Submarines,   filterTaskforce);
-            AddRegistryUnits(msg, UnitType.Aircraft,   UnitRegistry.AircraftList, filterTaskforce);
-            AddRegistryUnits(msg, UnitType.Helicopter, UnitRegistry.Helicopters,  filterTaskforce);
-            AddRegistryUnits(msg, UnitType.LandUnit,   UnitRegistry.LandUnits,    filterTaskforce);
+            AddRegistryUnits(msg, UnitType.Vessel,     UnitRegistry.Vessels,      filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.Submarine,  UnitRegistry.Submarines,   filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.Aircraft,   UnitRegistry.AircraftList, filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.Helicopter, UnitRegistry.Helicopters,  filterTaskforce, includeEntityIds);
+            AddRegistryUnits(msg, UnitType.LandUnit,   UnitRegistry.LandUnits,    filterTaskforce, includeEntityIds);
             // Biologics excluded — ambient sonar contacts, not gameplay units
 
             if (filterTaskforce == null)
@@ -94,21 +95,21 @@ namespace SeapowerMultiplayer
                 AddRegistryOwnedProjectiles(msg, 1, UnitRegistry.Torpedoes, filterTaskforce);
             }
 
-            msg.ProjectileCount = msg.Projectiles.Count;
-
             if (Plugin.Instance.CfgVerboseDebug.Value)
                 Plugin.Log.LogDebug($"[Serialize] {msg.Units.Count} units, {msg.Projectiles.Count} projectiles");
             return msg;
         }
 
         private static void AddRegistryUnits<T>(StateUpdateMessage msg, UnitType kind,
-            IReadOnlyList<T> units, Taskforce filterTf = null) where T : ObjectBase
+            IReadOnlyList<T> units, Taskforce filterTf = null,
+            HashSet<int> includeEntityIds = null) where T : ObjectBase
         {
             for (int i = 0; i < units.Count; i++)
             {
                 var unit = units[i];
                 if (unit == null) continue;
                 if (filterTf != null && unit._taskforce != filterTf) continue;
+                if (includeEntityIds != null && !includeEntityIds.Contains(GetUniqueId(unit))) continue;
 
                 // Encode as absolute GeoPosition (longitude/latitude/height) so
                 // positions are independent of each machine's floating origin.
@@ -119,7 +120,7 @@ namespace SeapowerMultiplayer
                 float rudder = unit is Vessel vessel ? _getRudderAngle(vessel) : 0f;
 
                 float desiredAlt = 0f;
-                if (unit is Aircraft || unit is Helicopter)
+                if (unit is Aircraft || unit is Helicopter || unit is Submarine)
                     desiredAlt = (float)unit.DesiredAltitude.Value;
 
                 msg.Units.Add(new UnitState
@@ -215,28 +216,23 @@ namespace SeapowerMultiplayer
             env.Seconds = totalSeconds - (total / 60) * 60f; // preserve fractional seconds
         }
 
-        private const float SnapThreshold  = 500f;  // teleport if drift exceeds this (co-op)
-
-        // ── PvP hybrid correction constants ────────────────────────────────
-        // Fixed strong corrections — owner is definitively authoritative.
+        // ── Hybrid correction constants ────────────────────────────────────
+        // Local sim runs, remote owner's state provides position/heading/speed corrections.
         // Ship/Submarine
-        private const float PvpShipSnapThreshold = 75f;
-        private const float PvpShipPosLerp       = 0.7f;
-        private const float PvpShipHeadingLerp   = 0.8f;
-        private const float PvpShipSpeedLerp     = 0.7f;
+        private const float ShipSnapThreshold = 75f;
+        private const float ShipPosLerp       = 0.7f;
+        private const float ShipHeadingLerp   = 0.8f;
+        private const float ShipSpeedLerp     = 0.7f;
         // Aircraft/Helicopter
-        private const float PvpAirSnapThreshold  = 150f;
-        private const float PvpAirPosLerp        = 0.75f;
-        private const float PvpAirHeadingLerp    = 0.85f;
-        private const float PvpAirSpeedLerp      = 0.7f;
+        private const float AirSnapThreshold  = 150f;
+        private const float AirPosLerp        = 0.75f;
+        private const float AirHeadingLerp    = 0.85f;
+        private const float AirSpeedLerp      = 0.7f;
+
         // Track projectile IDs across state updates for disappearance detection.
         // If host's state update no longer includes a projectile, it was destroyed.
         private static HashSet<int> _prevProjectileIds = new HashSet<int>();
         private static HashSet<int> _currProjectileIds = new HashSet<int>();
-
-        // ── PvP periodic reconciliation ──────────────────────────────────────
-        /// <summary>When true, the next Apply() uses lerp=1.0 for all PvP corrections (full snap).</summary>
-        public static bool ForceSnapNextUpdate;
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
@@ -244,20 +240,20 @@ namespace SeapowerMultiplayer
         public static int OrphanCandidateCount => _missedUpdateCount.Count;
         public static int ProjectilesDestroyedByTimeout { get; private set; }
 
-        // PvP per-category drift (computed each Apply cycle)
-        public static float PvpShipDriftAvg { get; private set; }
-        public static float PvpShipDriftMax { get; private set; }
-        public static float PvpAirDriftAvg { get; private set; }
-        public static float PvpAirDriftMax { get; private set; }
+        // Per-category drift (computed each Apply cycle)
+        public static float ShipDriftAvg { get; private set; }
+        public static float ShipDriftMax { get; private set; }
+        public static float AirDriftAvg { get; private set; }
+        public static float AirDriftMax { get; private set; }
 
-        // Per-frame PvP drift accumulators
-        private static float _pvpShipDriftSum, _pvpShipDriftMaxAcc;
-        private static int _pvpShipCount;
-        private static float _pvpAirDriftSum, _pvpAirDriftMaxAcc;
-        private static int _pvpAirCount;
+        // Per-frame drift accumulators
+        private static float _shipDriftSum, _shipDriftMaxAcc;
+        private static int _shipCount;
+        private static float _airDriftSum, _airDriftMaxAcc;
+        private static int _airCount;
 
-        // PvP drift logging timer
-        private static float _nextPvpDriftLogTime;
+        // Drift logging timer
+        private static float _nextDriftLogTime;
 
         // ── PvP missile disappearance tracking ──────────────────────────────
         private static readonly Dictionary<int, int> _missedProjectileCount = new();
@@ -323,24 +319,9 @@ namespace SeapowerMultiplayer
             // PvP: need a valid _playerTaskforce to filter — bail if not set yet
             if (isPvP && Globals._playerTaskforce == null) return;
 
-            // Co-op: drift detection (PvP puppets have no drift)
-            float lerpFactor = 0f, driftThreshold = 0f;
-            bool correctSpeed = false;
-            if (!isPvP)
-            {
-                DriftDetector.BeginFrame();
-                lerpFactor = DriftDetector.EffectiveLerpFactor;
-                driftThreshold = DriftDetector.EffectiveDriftThreshold;
-                correctSpeed = DriftDetector.ShouldCorrectSpeed;
-            }
-
-            // PvP: rebuild remote unit ID set for orphan cleanup (populated in loop below)
-            if (isPvP)
-            {
-                _lastSeenRemoteUnitIds.Clear();
-                _pvpShipDriftSum = _pvpShipDriftMaxAcc = 0f; _pvpShipCount = 0;
-                _pvpAirDriftSum = _pvpAirDriftMaxAcc = 0f; _pvpAirCount = 0;
-            }
+            // Reset per-frame drift accumulators. Populated below, surfaced by UI.
+            _shipDriftSum = _shipDriftMaxAcc = 0f; _shipCount = 0;
+            _airDriftSum = _airDriftMaxAcc = 0f; _airCount = 0;
 
             foreach (var state in msg.Units)
             {
@@ -406,6 +387,14 @@ namespace SeapowerMultiplayer
                 if (state.Kind == UnitType.Submarine && !isPvP)
                     hostPos.y = unit.transform.position.y;
 
+                // PvP submarines: sync desired depth so local physics targets the
+                // owner's commanded depth instead of fighting position corrections.
+                if (state.Kind == UnitType.Submarine && isPvP)
+                {
+                    if (state.DesiredAltitude != 0f)
+                        unit.DesiredAltitude.Value = state.DesiredAltitude;
+                }
+
                 // Fix #51: Aircraft position interpolation buffer (replaces Fix #46)
                 // Three-tier correction: accept, lerp, or snap based on divergence magnitude.
                 if (state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter)
@@ -454,108 +443,60 @@ namespace SeapowerMultiplayer
                     }
                 }
 
-                if (isPvP)
+                // Hybrid correction: local physics simulates, owner's state provides corrections.
+                bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
+                float snapThresh = isAir ? AirSnapThreshold : ShipSnapThreshold;
+                float posLerp    = isAir ? AirPosLerp       : ShipPosLerp;
+                float hdgLerp    = isAir ? AirHeadingLerp   : ShipHeadingLerp;
+                float spdLerp    = isAir ? AirSpeedLerp     : ShipSpeedLerp;
+
+                float drift = Vector3.Distance(unit.transform.position, hostPos);
+
+                if (isAir)
                 {
-                    // PvP hybrid: local physics simulates, owner's state provides corrections
-                    bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
-                    float snapThresh = isAir ? PvpAirSnapThreshold : PvpShipSnapThreshold;
-                    float posLerp    = ForceSnapNextUpdate ? 1f : (isAir ? PvpAirPosLerp       : PvpShipPosLerp);
-                    float hdgLerp    = ForceSnapNextUpdate ? 1f : (isAir ? PvpAirHeadingLerp   : PvpShipHeadingLerp);
-                    float spdLerp    = ForceSnapNextUpdate ? 1f : (isAir ? PvpAirSpeedLerp     : PvpShipSpeedLerp);
-
-                    float drift = Vector3.Distance(unit.transform.position, hostPos);
-
-                    // Record per-category drift for UI
-                    if (isAir)
-                    {
-                        _pvpAirDriftSum += drift;
-                        if (drift > _pvpAirDriftMaxAcc) _pvpAirDriftMaxAcc = drift;
-                        _pvpAirCount++;
-                    }
-                    else
-                    {
-                        _pvpShipDriftSum += drift;
-                        if (drift > _pvpShipDriftMaxAcc) _pvpShipDriftMaxAcc = drift;
-                        _pvpShipCount++;
-                    }
-
-                    if (drift > snapThresh)
-                    {
-                        unit.transform.position = hostPos;
-                        unit.transform.eulerAngles = new Vector3(state.Pitch, state.Heading, state.Roll);
-                        unit._velocityInKnots = state.Speed;
-                    }
-                    else
-                    {
-                        unit.transform.position = Vector3.Lerp(unit.transform.position, hostPos, posLerp);
-                        float heading = Mathf.LerpAngle(unit.transform.eulerAngles.y, state.Heading, hdgLerp);
-                        float pitch = isAir
-                            ? Mathf.LerpAngle(unit.transform.eulerAngles.x, state.Pitch, hdgLerp)
-                            : unit.transform.eulerAngles.x;
-                        float roll = isAir
-                            ? Mathf.LerpAngle(unit.transform.eulerAngles.z, state.Roll, hdgLerp)
-                            : unit.transform.eulerAngles.z;
-                        unit.transform.eulerAngles = new Vector3(pitch, heading, roll);
-                        unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, state.Speed, spdLerp);
-                    }
+                    _airDriftSum += drift;
+                    if (drift > _airDriftMaxAcc) _airDriftMaxAcc = drift;
+                    _airCount++;
                 }
                 else
                 {
-                    // Co-op: drift-based correction (unchanged)
-                    float drift = Vector3.Distance(unit.transform.position, hostPos);
-                    float speedDrift = Mathf.Abs(unit._velocityInKnots - state.Speed);
-                    float headingDrift = Mathf.Abs(Mathf.DeltaAngle(unit.transform.eulerAngles.y, state.Heading));
-                    bool isAir = state.Kind == UnitType.Aircraft || state.Kind == UnitType.Helicopter;
-                    DriftDetector.RecordUnit(drift, speedDrift, headingDrift, isAircraft: isAir);
+                    _shipDriftSum += drift;
+                    if (drift > _shipDriftMaxAcc) _shipDriftMaxAcc = drift;
+                    _shipCount++;
+                }
 
-                    if (drift < driftThreshold) continue;
-
-                    DriftDetector.RecordCorrection();
-
-                    if (drift > SnapThreshold)
-                    {
-                        unit.transform.position = hostPos;
-                        unit.transform.eulerAngles = new Vector3(
-                            unit.transform.eulerAngles.x, state.Heading, unit.transform.eulerAngles.z);
-                    }
-                    else
-                    {
-                        unit.transform.position = Vector3.Lerp(unit.transform.position, hostPos, lerpFactor);
-                        float correctedHeading = Mathf.LerpAngle(
-                            unit.transform.eulerAngles.y, state.Heading, lerpFactor);
-                        unit.transform.eulerAngles = new Vector3(
-                            unit.transform.eulerAngles.x, correctedHeading, unit.transform.eulerAngles.z);
-                    }
-
-                    if (correctSpeed)
-                        unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, state.Speed, Mathf.Min(lerpFactor, 0.3f));
+                if (drift > snapThresh)
+                {
+                    unit.transform.position = hostPos;
+                    unit.transform.eulerAngles = new Vector3(state.Pitch, state.Heading, state.Roll);
+                    unit._velocityInKnots = state.Speed;
+                }
+                else
+                {
+                    unit.transform.position = Vector3.Lerp(unit.transform.position, hostPos, posLerp);
+                    float heading = Mathf.LerpAngle(unit.transform.eulerAngles.y, state.Heading, hdgLerp);
+                    float pitch = isAir
+                        ? Mathf.LerpAngle(unit.transform.eulerAngles.x, state.Pitch, hdgLerp)
+                        : unit.transform.eulerAngles.x;
+                    float roll = isAir
+                        ? Mathf.LerpAngle(unit.transform.eulerAngles.z, state.Roll, hdgLerp)
+                        : unit.transform.eulerAngles.z;
+                    unit.transform.eulerAngles = new Vector3(pitch, heading, roll);
+                    unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, state.Speed, spdLerp);
                 }
             }
 
-            // Finalize per-category drift stats for PvP
-            if (isPvP)
+            // Finalize per-category drift stats
+            ShipDriftAvg = _shipCount > 0 ? _shipDriftSum / _shipCount : 0f;
+            ShipDriftMax = _shipDriftMaxAcc;
+            AirDriftAvg  = _airCount  > 0 ? _airDriftSum  / _airCount  : 0f;
+            AirDriftMax  = _airDriftMaxAcc;
+
+            if (Time.time >= _nextDriftLogTime)
             {
-                PvpShipDriftAvg = _pvpShipCount > 0 ? _pvpShipDriftSum / _pvpShipCount : 0f;
-                PvpShipDriftMax = _pvpShipDriftMaxAcc;
-                PvpAirDriftAvg = _pvpAirCount > 0 ? _pvpAirDriftSum / _pvpAirCount : 0f;
-                PvpAirDriftMax = _pvpAirDriftMaxAcc;
-                if (ForceSnapNextUpdate)
-                {
-                    ForceSnapNextUpdate = false;
-                    Plugin.Log.LogInfo("[PvP Reconcile] Full snap applied to all puppet units");
-                }
-
-                // Periodic drift logging for diagnostics
-                if (Time.time >= _nextPvpDriftLogTime)
-                {
-                    _nextPvpDriftLogTime = Time.time + 30f;
-                    Plugin.Log.LogInfo($"[PvP Drift] Ships: avg={PvpShipDriftAvg:F1}m max={PvpShipDriftMax:F1}m ({_pvpShipCount} units) | Air: avg={PvpAirDriftAvg:F1}m max={PvpAirDriftMax:F1}m ({_pvpAirCount} units)");
-                }
+                _nextDriftLogTime = Time.time + 30f;
+                Plugin.Log.LogInfo($"[Drift] Ships: avg={ShipDriftAvg:F1}m max={ShipDriftMax:F1}m ({_shipCount} units) | Air: avg={AirDriftAvg:F1}m max={AirDriftMax:F1}m ({_airCount} units)");
             }
-
-            // DriftDetector: skip for PvP (puppets have no drift)
-            if (!isPvP)
-                DriftDetector.EndFrame(CountLocalUnits(), msg.Units.Count, CountLocalProjectiles(), msg.ProjectileCount);
 
             // ── Game time drift correction (host is time authority) ──────────
             if (!isHost && msg.GameSeconds > 0f)
@@ -839,27 +780,6 @@ namespace SeapowerMultiplayer
             }
         }
 
-        private static int _cachedLocalProjectileCount;
-        private static float _lastProjectileCountTime;
-
-        private static int CountLocalProjectiles()
-        {
-            if (Time.unscaledTime - _lastProjectileCountTime < UnitCountCacheInterval)
-                return _cachedLocalProjectileCount;
-
-            int count = 0;
-            var missiles = UnitRegistry.Missiles;
-            for (int i = 0; i < missiles.Count; i++)
-                if (missiles[i] != null) count++;
-            var torpedoes = UnitRegistry.Torpedoes;
-            for (int i = 0; i < torpedoes.Count; i++)
-                if (torpedoes[i] != null) count++;
-
-            _cachedLocalProjectileCount = count;
-            _lastProjectileCountTime = Time.unscaledTime;
-            return count;
-        }
-
         /// <summary>
         /// PvP orphan cleanup: destroy local enemy units that the remote side is
         /// no longer reporting. Uses a grace period to handle packet loss.
@@ -882,6 +802,10 @@ namespace SeapowerMultiplayer
             CheckRegistryOrphans(UnitRegistry.AircraftList, enemyTf);
             CheckRegistryOrphans(UnitRegistry.Helicopters, enemyTf);
             CheckRegistryOrphans(UnitRegistry.LandUnits, enemyTf);
+
+            // Clear after processing — start fresh for next cleanup window.
+            // With staggered updates, IDs accumulate across messages between windows.
+            _lastSeenRemoteUnitIds.Clear();
         }
 
         private static void CheckRegistryOrphans<T>(IReadOnlyList<T> units, Taskforce enemyTf) where T : ObjectBase
@@ -926,8 +850,9 @@ namespace SeapowerMultiplayer
             _missedUpdateCount.Clear();
             _pendingAlignment = false;
             ProjectilesDestroyedByTimeout = 0;
-            PvpShipDriftAvg = PvpShipDriftMax = 0f;
-            PvpAirDriftAvg = PvpAirDriftMax = 0f;
+            ShipDriftAvg = ShipDriftMax = 0f;
+            AirDriftAvg  = AirDriftMax  = 0f;
+            ChangeTracker.Clear();
         }
     }
 
@@ -1346,7 +1271,7 @@ namespace SeapowerMultiplayer
                 case GameEventType.HardSyncRequest:
                     if (Plugin.Instance.CfgIsHost.Value)
                     {
-                        Plugin.Log.LogWarning("[DriftDetector] Client requested hard sync");
+                        Plugin.Log.LogWarning("[HardSync] Client requested manual resync");
                         SessionManager.CaptureAndSend();
                     }
                     break;

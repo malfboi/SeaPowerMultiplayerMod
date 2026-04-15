@@ -891,8 +891,6 @@ namespace SeapowerMultiplayer
             }
 
             // Player orders (co-op path — PvP player fires are handled by the Prefix above)
-            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && UnitLockManager.IsLockedByRemote(__instance.UniqueID)) return;
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return;
 
@@ -951,10 +949,13 @@ namespace SeapowerMultiplayer
             // Auto-attacks pass through (sync handled by InsertEngageTask Postfix)
             if (engageTask._isAutoAttack) return true;
 
+            // Co-op: block UI fire on units locked by remote player (ally)
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+                return false;
+
             // Client control check for direct AddEngageTask callers
             // (e.g. LaunchNoisemaker). Send logic is in InsertEngageTask.
-            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && UnitLockManager.IsLockedByRemote(__instance.UniqueID)) return false;
             if (!Plugin.Instance.CfgIsHost.Value && !TaskforceAssignmentManager.ClientMayControl(__instance))
                 return false;
 
@@ -1077,6 +1078,10 @@ namespace SeapowerMultiplayer
             if (SessionManager.SceneLoading) return true;
             if (!NetworkManager.Instance.IsConnected) return true;
 
+            // Co-op: block UI depth changes on units locked by remote player
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+                return false;
+
             int id = __instance.UniqueID;
             float now = Time.unscaledTime;
 
@@ -1097,13 +1102,6 @@ namespace SeapowerMultiplayer
             _lockedDepth[id] = depth;
             _lockTime[id] = now;
             __state = true; // Signal Postfix to broadcast
-
-            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
-            {
-                __state = false; // don't broadcast
-                return false;
-            }
 
             if (Plugin.Instance.CfgIsHost.Value) return true;
 
@@ -1223,6 +1221,11 @@ namespace SeapowerMultiplayer
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true; // don't send during scene load
+            // Co-op: block UI orders for units the remote player has selected (ally lock).
+            // ApplyingFromNetwork above ensures network-applied orders still execute.
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(unit.UniqueID))
+                return false;
             // PvP: don't sync orders for weapons (missiles/torpedoes) — their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
@@ -1240,8 +1243,6 @@ namespace SeapowerMultiplayer
                 if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
                     return true;
             }
-            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate — skip send, still execute locally
@@ -1425,9 +1426,11 @@ namespace SeapowerMultiplayer
         internal static bool AllowSensorChange(ObjectBase unit)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
-            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return false;
-            if (!Plugin.Instance.CfgPvP.Value || !NetworkManager.Instance.IsConnected) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            // Co-op: block sensor changes on units locked by remote player (ally)
+            if (!Plugin.Instance.CfgPvP.Value)
+                return !UnitLockManager.IsLockedByRemote(unit.UniqueID);
+            // PvP: only own-side units can change sensors
             return unit._taskforce == Globals._playerTaskforce;
         }
 
@@ -2433,33 +2436,13 @@ namespace SeapowerMultiplayer
         }
     }
 
-    // ── Unit Selection Lock (Co-op) ──────────────────────────────────────────
+    // ── Unit Selection Broadcast (Co-op) ─────────────────────────────────────
 
     [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.switchToObject))]
     public static class Patch_RenderPosition_SwitchToObject
     {
-        static bool Prefix(ObjectBase objectToAttach)
-        {
-            // Only active in co-op when connected
-            if (Plugin.Instance.CfgPvP.Value) return true;
-            if (!NetworkManager.Instance.IsConnected) return true;
-            if (objectToAttach == null) return true;
-
-            // Block selection if the remote player has this unit selected
-            if (UnitLockManager.IsLockedByRemote(objectToAttach.UniqueID))
-            {
-                Plugin.Log.LogDebug(
-                    $"[UnitLock] Selection of unit {objectToAttach.UniqueID} blocked — held by remote player.");
-                UnitLockManager.NotifySelectionBlocked();
-                return false; // prevent switchToObject from running
-            }
-
-            return true;
-        }
-
         static void Postfix(ObjectBase objectToAttach)
         {
-            // Only broadcast in co-op when connected
             if (Plugin.Instance.CfgPvP.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (objectToAttach == null) return;
@@ -2468,12 +2451,35 @@ namespace SeapowerMultiplayer
             var current = Singleton<RenderPosition>.Instance.SelectedObject;
             if (current == null || current.UniqueID != objectToAttach.UniqueID) return;
 
-            // Broadcast our selection to the remote player
+            int newId = objectToAttach.UniqueID;
+            int previousClaim = UnitLockManager.LocalControlledUnitId;
+
+            // If the remote player already controls this unit, we're only spectating —
+            // don't broadcast a claim (would cause both sides to see each other as remote-locked).
+            if (UnitLockManager.IsLockedByRemote(newId))
+            {
+                // Release any prior claim so the remote knows we've let go.
+                if (previousClaim != 0 && previousClaim != newId)
+                {
+                    NetworkManager.Instance.SendToOther(new GameEventMessage
+                    {
+                        EventType = GameEventType.UnitDeselected,
+                        Param     = (float)previousClaim,
+                    });
+                    UnitLockManager.ClearLocalControlled();
+                }
+                return;
+            }
+
+            // Claim control of the new unit. UnitSelected overwrites the remote's
+            // tracked ID, so we don't need a separate deselect for any prior claim.
+            if (previousClaim == newId) return; // already claimed, skip redundant broadcast
             NetworkManager.Instance.SendToOther(new GameEventMessage
             {
                 EventType = GameEventType.UnitSelected,
-                Param     = (float)objectToAttach.UniqueID,
+                Param     = (float)newId,
             });
+            UnitLockManager.SetLocalControlled(newId);
         }
     }
 
@@ -2482,41 +2488,71 @@ namespace SeapowerMultiplayer
     {
         static void Prefix()
         {
-            // Only broadcast in co-op when connected
             if (Plugin.Instance.CfgPvP.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
 
-            // Read SelectedObject BEFORE deselection clears it
-            var current = Singleton<RenderPosition>.Instance.SelectedObject;
-            if (current == null) return;
+            // Only release a claim we actually made. If we were spectating a
+            // remote-controlled unit, _localControlledUnitId is 0 and we stay silent.
+            int claimed = UnitLockManager.LocalControlledUnitId;
+            if (claimed == 0) return;
 
             NetworkManager.Instance.SendToOther(new GameEventMessage
             {
                 EventType = GameEventType.UnitDeselected,
-                Param     = (float)current.UniqueID,
+                Param     = (float)claimed,
             });
+            UnitLockManager.ClearLocalControlled();
         }
     }
 
-    // ── MapUnitViewModel registry for unit lock map indicator ────────────────
+    // ── IsControllable override (Co-op) ──────────────────────────────────────
+
+    /// <summary>
+    /// In co-op, forces <see cref="ObjectBase.IsControllable"/> to false for any unit
+    /// the remote player currently has selected. This delegates to the game's built-in
+    /// ally handling: the local player can still select and spectate the unit, but the
+    /// game's own code will reject order entry and render it as uncontrollable.
+    /// </summary>
+    [HarmonyPatch(typeof(ObjectBase), "get_IsControllable")]
+    public static class Patch_ObjectBase_IsControllable
+    {
+        static void Postfix(ObjectBase __instance, ref bool __result)
+        {
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (__instance == null) return;
+            // Host is authoritative: it must execute client-originated orders to
+            // completion, and engage tasks are processed asynchronously outside the
+            // ApplyingFromNetwork scope. Forcing IsControllable=false on the host
+            // would make the game's own fire logic drop queued fires mid-tick.
+            // Only apply the override on the client side.
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+                __result = false;
+        }
+    }
+
+    // ── MapUnitViewModel lock indicator ──────────────────────────────────────
+    //
+    // When the remote player selects a unit, we tag its map label with "[ALLY]"
+    // so the local player can see at a glance which contact their partner is
+    // driving. The registry tracks live VMs so UnitLockManager can fire a
+    // PropertyChanged and make Noesis re-read ContactInfoLine2.
 
     [HarmonyPatch(typeof(MapUnitViewModel), MethodType.Constructor,
         new[] { typeof(Taskforce), typeof(Vehicle), typeof(ReactiveProperty<ISelectableObject>), typeof(bool) })]
     public static class Patch_MapUnitViewModel_Ctor
     {
-        static void Postfix(MapUnitViewModel __instance)
-        {
+        static void Postfix(MapUnitViewModel __instance) =>
             MapUnitViewModelRegistry.Register(__instance);
-        }
     }
 
     [HarmonyPatch(typeof(MapUnitViewModel), nameof(MapUnitViewModel.Dispose))]
     public static class Patch_MapUnitViewModel_Dispose
     {
-        static void Prefix(MapUnitViewModel __instance)
-        {
+        static void Prefix(MapUnitViewModel __instance) =>
             MapUnitViewModelRegistry.Unregister(__instance);
-        }
     }
 
     [HarmonyPatch(typeof(MapUnitViewModel), "get_ContactInfoLine2")]
@@ -2528,7 +2564,7 @@ namespace SeapowerMultiplayer
             if (!NetworkManager.Instance.IsConnected) return;
             var obj = __instance.Unit?.BaseObject as ObjectBase;
             if (obj != null && UnitLockManager.IsLockedByRemote(obj.UniqueID))
-                __result = "[BUSY]";
+                __result = "[ALLY]";
         }
     }
 

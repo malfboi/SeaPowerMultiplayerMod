@@ -32,20 +32,8 @@ namespace SeapowerMultiplayer
         // Debug config
         internal ConfigEntry<bool> CfgVerboseDebug = null!;
 
-        // Drift correction config
-        internal ConfigEntry<float> CfgSoftSyncElevated = null!;
-        internal ConfigEntry<float> CfgSoftSyncHigh = null!;
-        internal ConfigEntry<float> CfgSoftSyncCritical = null!;
-        internal ConfigEntry<float> CfgHardSyncDrift = null!;
-        internal ConfigEntry<int>   CfgHardSyncUnitDelta = null!;
-        internal ConfigEntry<float> CfgHardSyncConfirmSec = null!;
-        internal ConfigEntry<float> CfgHardSyncCooldown = null!;
-        internal ConfigEntry<float> CfgHardSyncBreachWindowSec = null!;
-        internal ConfigEntry<int>   CfgHardSyncBreachCountThreshold = null!;
-
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
-        internal ConfigEntry<float> CfgPvpReconcileMinutes = null!;
 
         private Harmony _harmony = null!;
         private int _sceneReadyFrames;
@@ -69,20 +57,8 @@ namespace SeapowerMultiplayer
             CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
                 "Enable verbose per-tick debug logging (Serialize counts, AutoFire diagnostics, Net received)");
 
-            // Drift correction
-            CfgSoftSyncElevated   = Config.Bind("DriftCorrection", "SoftSyncElevated",   20f,  "Avg drift threshold for Elevated tier");
-            CfgSoftSyncHigh       = Config.Bind("DriftCorrection", "SoftSyncHigh",       100f, "Avg drift threshold for High tier");
-            CfgSoftSyncCritical   = Config.Bind("DriftCorrection", "SoftSyncCritical",   300f, "Avg drift threshold for Critical tier");
-            CfgHardSyncDrift      = Config.Bind("DriftCorrection", "HardSyncDrift",      500f, "Avg drift threshold for hard sync trigger");
-            CfgHardSyncUnitDelta  = Config.Bind("DriftCorrection", "HardSyncUnitDelta",  2,    "Unit count difference for hard sync trigger");
-            CfgHardSyncConfirmSec = Config.Bind("DriftCorrection", "HardSyncConfirmSec", 25f,   "Seconds breach must persist before hard sync");
-            CfgHardSyncCooldown   = Config.Bind("DriftCorrection", "HardSyncCooldown",   30f,  "Cooldown seconds between hard syncs");
-            CfgHardSyncBreachWindowSec      = Config.Bind("DriftCorrection", "HardSyncBreachWindowSec",      60f,  "Rolling window (seconds) for counting breach events");
-            CfgHardSyncBreachCountThreshold = Config.Bind("DriftCorrection", "HardSyncBreachCountThreshold", 3,    "Number of breaches within the window that trigger immediate hard sync");
-
             // PvP sync tuning
             CfgDamageSyncInterval   = Config.Bind("Sync", "DamageSyncInterval",     2f,   "Seconds between damage state corrections (default 2)");
-            CfgPvpReconcileMinutes  = Config.Bind("Sync", "PvpReconcileMinutes",    5f,   "PvP periodic full-snap interval in minutes (0 = disabled)");
 
             // Attach helper MonoBehaviours to this same GameObject
             gameObject.AddComponent<StateBroadcaster>();
@@ -135,6 +111,9 @@ namespace SeapowerMultiplayer
             // Drain any PvP delayed combat actions whose timer has expired
             OrderDelayQueue.Tick();
             CombatEventHandler.Tick();
+
+            // Check for pending session sync retries (failed sends)
+            SessionManager.TickRetry();
 
             // Process deferred flight ops spawns (elevators were busy)
             FlightOpsHandler.Tick();

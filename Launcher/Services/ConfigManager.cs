@@ -13,6 +13,7 @@ namespace SeapowerMultiplayer.Launcher.Services
         public int Port { get; set; } = 7777;
         public bool AutoConnect { get; set; } = false;
         public bool TimeVote { get; set; } = false;
+        public bool PvP { get; set; } = false;
         public string? AcknowledgedVersion { get; set; }
     }
 
@@ -92,7 +93,7 @@ namespace SeapowerMultiplayer.Launcher.Services
                 ## PvP mode: players control opposing sides
                 # Setting type: Boolean
                 # Default value: false
-                PvP = true
+                PvP = {settings.PvP.ToString().ToLower()}
 
                 ## Automatically connect on game start
                 # Setting type: Boolean

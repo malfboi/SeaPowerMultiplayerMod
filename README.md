@@ -136,7 +136,7 @@ The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on f
 - **Authority model** - Each player is authoritative over their own units. Combat outcomes are decided by the target's game instance.
 - **Transport abstraction** - Networking is abstracted behind `ITransport`, making it easy to swap between LiteNetLib (UDP) and Steam P2P.
 - **Harmony patching** - The mod hooks into the game via [Harmony](https://github.com/pardeike/Harmony) patches, intercepting and extending game methods at runtime.
-- **Drift detection** - `DriftDetector` monitors unit positions across both instances and triggers corrections when they diverge.
+- **State reconciliation** - Host broadcasts authoritative unit state; clients apply snap/lerp corrections in `StateApplier` to keep puppet units aligned.
 
 <br>
 

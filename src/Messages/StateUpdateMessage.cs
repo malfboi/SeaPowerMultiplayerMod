@@ -25,7 +25,6 @@ namespace SeapowerMultiplayer.Messages
         public float GameSeconds;  // total seconds since midnight (Hour*3600 + Minutes*60 + Seconds)
         public List<UnitState>       Units       = new(64);
         public List<ProjectileState> Projectiles = new(32);
-        public int ProjectileCount; // separate from Units.Count for DriftDetector
 
         public void Reset()
         {
@@ -33,7 +32,6 @@ namespace SeapowerMultiplayer.Messages
             GameSeconds = 0;
             Units.Clear();
             Projectiles.Clear();
-            ProjectileCount = 0;
         }
 
         public void Serialize(NetDataWriter w)
@@ -46,7 +44,6 @@ namespace SeapowerMultiplayer.Messages
 
             w.Put((ushort)Projectiles.Count);
             foreach (var p in Projectiles) p.Write(w);
-            w.Put((ushort)ProjectileCount);
         }
 
         public static StateUpdateMessage Deserialize(NetDataReader r)
@@ -64,8 +61,6 @@ namespace SeapowerMultiplayer.Messages
             int projCount = r.GetUShort();
             for (int i = 0; i < projCount; i++)
                 msg.Projectiles.Add(ProjectileState.Read(r));
-
-            msg.ProjectileCount = r.GetUShort();
 
             return msg;
         }

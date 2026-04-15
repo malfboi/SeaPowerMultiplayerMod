@@ -182,6 +182,10 @@
                 <CheckBox x:Name="ChkTimeVote"
                       Content="Time compression voting (both players must agree)"
                       Margin="0,0,0,4"/>
+
+                <CheckBox x:Name="ChkPvP"
+                      Content="PvP mode (players control opposing sides)"
+                      Margin="0,6,0,4"/>
             </StackPanel>
 
             <!-- Buttons -->
