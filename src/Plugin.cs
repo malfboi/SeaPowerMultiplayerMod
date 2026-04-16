@@ -11,9 +11,6 @@ using UnityEngine;
 
 namespace SeapowerMultiplayer
 {
-    /// <summary>Lightweight shim so existing CfgPvP.Value reads keep compiling.</summary>
-    internal sealed class AlwaysTrue { public bool Value => true; }
-
     [BepInPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
@@ -25,7 +22,7 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<string> CfgHostIP = null!;
         internal ConfigEntry<int> CfgPort = null!;
         internal ConfigEntry<bool> CfgAutoConnect = null!;
-        internal readonly AlwaysTrue CfgPvP = new();
+        internal ConfigEntry<bool> CfgPvP = null!;
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
 
@@ -49,7 +46,7 @@ namespace SeapowerMultiplayer
             CfgHostIP      = Config.Bind("Network", "HostIP",       "127.0.0.1", "Host IP address (used when IsHost=false)");
             CfgPort        = Config.Bind("Network", "Port",         7777,        "UDP port");
             CfgAutoConnect = Config.Bind("Network", "AutoConnect",  false,       "Connect/host automatically on game launch");
-            // PvP is always on — no config entry needed
+            CfgPvP         = Config.Bind("Network", "PvP",          true,        "True = PvP mode (opposing taskforces); False = co-op (shared ally control)");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
 
