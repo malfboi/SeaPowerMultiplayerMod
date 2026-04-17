@@ -620,6 +620,14 @@ namespace SeapowerMultiplayer
             int savedUid = Singleton<SceneCreator>.Instance._UID;
             var reassignments = new List<(ObjectBase obj, int hostId)>();
 
+            // PvP: the state update contains the remote player's units. After PvP
+            // taskforce swap, those units are in our EnemyTaskforce locally. Only
+            // match against enemy units to prevent accidentally remapping our own
+            // aircraft to remote IDs (which would make our aircraft invisible to
+            // the remote side).
+            bool isPvP = Plugin.Instance.CfgPvP.Value;
+            Taskforce alignFilter = isPvP ? GetEnemyTaskforce() : null;
+
             foreach (var state in msg.Units)
             {
                 if (StateSerializer.FindById(state.EntityId) != null)
@@ -634,7 +642,7 @@ namespace SeapowerMultiplayer
                 Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
                 Vector3 worldPos = new Vector3(local.x, state.Y, local.y);
 
-                var best = FindLocalByPosition(worldPos, state.Kind);
+                var best = FindLocalByPosition(worldPos, state.Kind, alignFilter);
                 if (best != null && best.UniqueID != state.EntityId)
                     reassignments.Add((best, state.EntityId));
             }
@@ -657,7 +665,27 @@ namespace SeapowerMultiplayer
             Plugin.Log.LogInfo($"[StateApplier] Alignment: {reassignments.Count} units remapped from first state update");
         }
 
-        private static ObjectBase FindLocalByPosition(Vector3 worldPos, UnitType kind)
+        /// <summary>
+        /// Returns the enemy taskforce (the remote player's taskforce).
+        /// In PvP, the state update contains the remote player's units,
+        /// which are in our local EnemyTaskforce after the PvP swap.
+        /// </summary>
+        private static Taskforce GetEnemyTaskforce()
+        {
+            var playerTf = Globals._playerTaskforce;
+            if (playerTf == null || !Singleton<TaskforceManager>.InstanceExists(false))
+                return null;
+
+            foreach (var tf in Singleton<TaskforceManager>.Instance._taskForces)
+            {
+                if (tf != playerTf)
+                    return tf;
+            }
+            return null;
+        }
+
+        private static ObjectBase FindLocalByPosition(Vector3 worldPos, UnitType kind,
+            Taskforce taskforceFilter = null)
         {
             ObjectBase best = null;
             float bestDist = float.MaxValue;
@@ -667,6 +695,7 @@ namespace SeapowerMultiplayer
                 var obj = all[i];
                 if (obj == null || obj.IsDestroyed) continue;
                 if (!KindMatches(obj, kind)) continue;
+                if (taskforceFilter != null && obj._taskforce != taskforceFilter) continue;
                 float d = (obj.transform.position - worldPos).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; best = obj; }
             }

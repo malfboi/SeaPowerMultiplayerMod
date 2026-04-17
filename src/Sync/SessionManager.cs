@@ -84,6 +84,8 @@ namespace SeapowerMultiplayer
             ProjectileIdMapper.Clear();
             Patch_Submarine_SetDepth.Reset();
             OrderDeduplicator.Clear();
+            FlightOpsHandler.Clear();
+            ChangeTracker.Clear();
 
             // PvP: flush stale engage tasks on enemy puppet units so they don't
             // consume auth tokens when the remote player issues fire orders.
@@ -229,6 +231,8 @@ namespace SeapowerMultiplayer
                 Patch_WeaponBase_CommonLaunchSettings.ClearSpawnTimes();
                 Patch_Submarine_SetDepth.Reset();
                 OrderDeduplicator.Clear();
+                FlightOpsHandler.Clear();
+                ChangeTracker.Clear();
 
                 _pendingRngSeed = msg.RngSeed;
                 _pendingGameSeconds = msg.GameSeconds;

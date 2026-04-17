@@ -67,9 +67,14 @@ namespace SeapowerMultiplayer
 
         private static readonly Dictionary<int, int> _missingAircraftSightings = new();
         private static readonly Dictionary<int, float> _recoveryRequested = new();
+        private static readonly Dictionary<int, int> _recoveryAttempts = new();
         private static readonly HashSet<int> _recoveryInProgress = new();
+        private static readonly HashSet<int> _recoveryAbandoned = new();
         private const int RecoveryDetectionThreshold = 3;
         private const float RecoveryCooldown = 2f;
+        private const int MaxRecoveryAttempts = 10;
+        private const float RecoveryLogInterval = 10f;
+        private static readonly Dictionary<int, float> _recoveryLogTime = new();
 
         // ── Stats (read by UI) ──────────────────────────────────────────────
 
@@ -102,6 +107,16 @@ namespace SeapowerMultiplayer
         /// Retried each frame via Tick() in FIFO order.
         /// </summary>
         private static readonly List<FlightOpsMessage> _deferredSpawns = new();
+
+        /// <summary>Tracks when each deferred spawn was first added (by safe ID).</summary>
+        private static readonly Dictionary<int, float> _deferredSpawnTime = new();
+
+        /// <summary>Maximum time (seconds) to keep retrying a deferred spawn before discarding.</summary>
+        private const float DeferredSpawnTimeout = 30f;
+
+        /// <summary>Rate-limit deferred spawn logging: last log time per safe ID.</summary>
+        private static readonly Dictionary<int, float> _deferredLogTime = new();
+        private const float DeferredLogInterval = 5f;
 
         public static void Apply(FlightOpsMessage msg)
         {
@@ -239,9 +254,15 @@ namespace SeapowerMultiplayer
 
                 if (elevator == null)
                 {
-                    // All elevators busy — defer and retry next frame
-                    Plugin.Log.LogInfo($"[FlightOps] SpawnVehicle deferred: all elevators busy on vessel {msg.VesselId} " +
-                        $"(safeId={msg.SpawnedUnitId}, deferred count={_deferredSpawns.Count})");
+                    // All elevators busy — defer and retry next frame (rate-limit logging)
+                    float now = Time.unscaledTime;
+                    if (!_deferredLogTime.TryGetValue(msg.SpawnedUnitId, out float lastLog)
+                        || now - lastLog >= DeferredLogInterval)
+                    {
+                        _deferredLogTime[msg.SpawnedUnitId] = now;
+                        Plugin.Log.LogInfo($"[FlightOps] SpawnVehicle deferred: all elevators busy on vessel {msg.VesselId} " +
+                            $"(safeId={msg.SpawnedUnitId}, deferred count={_deferredSpawns.Count})");
+                    }
                     return false;
                 }
             }
@@ -296,16 +317,40 @@ namespace SeapowerMultiplayer
         /// <summary>
         /// Called from Plugin.Update() to process deferred spawns.
         /// Processes in FIFO order to preserve authoritative spawn sequence.
+        /// Discards entries that have been retrying beyond the timeout.
         /// </summary>
         internal static void Tick()
         {
             if (_deferredSpawns.Count == 0) return;
 
+            var first = _deferredSpawns[0];
+            int safeId = first.SpawnedUnitId;
+
+            // Track when this spawn was first deferred
+            float now = Time.unscaledTime;
+            if (!_deferredSpawnTime.ContainsKey(safeId))
+                _deferredSpawnTime[safeId] = now;
+
+            // Timeout: discard if retrying too long
+            if (now - _deferredSpawnTime[safeId] > DeferredSpawnTimeout)
+            {
+                Plugin.Log.LogWarning($"[FlightOps] SpawnVehicle timed out after {DeferredSpawnTimeout}s: " +
+                    $"vessel={first.VesselId} safeId={safeId} — discarding");
+                _deferredSpawns.RemoveAt(0);
+                _deferredSpawnTime.Remove(safeId);
+                _deferredLogTime.Remove(safeId);
+                return;
+            }
+
             // Process from front (oldest first) to maintain spawn order.
             // Only process one per frame to avoid elevator contention within
             // the same tick (launchVehicle marks elevator busy immediately).
-            if (ApplySpawnVehicle(_deferredSpawns[0]))
+            if (ApplySpawnVehicle(first))
+            {
                 _deferredSpawns.RemoveAt(0);
+                _deferredSpawnTime.Remove(safeId);
+                _deferredLogTime.Remove(safeId);
+            }
         }
 
         /// <summary>
@@ -332,6 +377,7 @@ namespace SeapowerMultiplayer
         {
             if (PipelineAircraftIds.Contains(aircraftId)) return;
             if (_recoveryInProgress.Contains(aircraftId)) return;
+            if (_recoveryAbandoned.Contains(aircraftId)) return;
 
             _missingAircraftSightings.TryGetValue(aircraftId, out int count);
             count++;
@@ -342,12 +388,31 @@ namespace SeapowerMultiplayer
                 && Time.unscaledTime - lastTime < RecoveryCooldown)
                 return;
 
-            Plugin.Log.LogInfo($"[FlightOps] Recovery: requesting info for missing aircraft {aircraftId} " +
-                $"(seen {count} times in state updates)");
+            // Check if we've exceeded max recovery attempts
+            _recoveryAttempts.TryGetValue(aircraftId, out int attempts);
+            if (attempts >= MaxRecoveryAttempts)
+            {
+                _recoveryAbandoned.Add(aircraftId);
+                Plugin.Log.LogWarning($"[FlightOps] Recovery: giving up on aircraft {aircraftId} " +
+                    $"after {MaxRecoveryAttempts} attempts");
+                CleanupRecoveryTracking(aircraftId);
+                return;
+            }
+            _recoveryAttempts[aircraftId] = attempts + 1;
+
+            // Rate-limit logging
+            float now = Time.unscaledTime;
+            if (!_recoveryLogTime.TryGetValue(aircraftId, out float lastLog)
+                || now - lastLog >= RecoveryLogInterval)
+            {
+                _recoveryLogTime[aircraftId] = now;
+                Plugin.Log.LogInfo($"[FlightOps] Recovery: requesting info for missing aircraft {aircraftId} " +
+                    $"(seen {count} times, attempt {attempts + 1}/{MaxRecoveryAttempts})");
+            }
 
             var req = new AircraftRecoveryRequestMessage { MissingAircraftId = aircraftId };
             NetworkManager.Instance.SendToOther(req, DeliveryMethod.ReliableOrdered);
-            _recoveryRequested[aircraftId] = Time.unscaledTime;
+            _recoveryRequested[aircraftId] = now;
         }
 
         /// <summary>
@@ -374,7 +439,13 @@ namespace SeapowerMultiplayer
             else if (aircraft is Helicopter heli) inFlight = heli._isInFlight;
             if (!inFlight)
             {
-                Plugin.Log.LogInfo($"[FlightOps] Recovery: aircraft {id} not yet airborne, deferring response");
+                float now = Time.unscaledTime;
+                if (!_recoveryLogTime.TryGetValue(id, out float lastLog)
+                    || now - lastLog >= RecoveryLogInterval)
+                {
+                    _recoveryLogTime[id] = now;
+                    Plugin.Log.LogInfo($"[FlightOps] Recovery: aircraft {id} not yet airborne, deferring response");
+                }
                 return;
             }
 
@@ -440,7 +511,13 @@ namespace SeapowerMultiplayer
             int vehicleIndex = FindVehicleIndexByType(fd, msg.VehicleTypeName);
             if (vehicleIndex < 0)
             {
-                Plugin.Log.LogWarning($"[FlightOps] Recovery: no '{msg.VehicleTypeName}' found on carrier {msg.CarrierVesselId}");
+                float now = Time.unscaledTime;
+                if (!_recoveryLogTime.TryGetValue(id, out float lastLog)
+                    || now - lastLog >= RecoveryLogInterval)
+                {
+                    _recoveryLogTime[id] = now;
+                    Plugin.Log.LogWarning($"[FlightOps] Recovery: no '{msg.VehicleTypeName}' found on carrier {msg.CarrierVesselId}");
+                }
                 CleanupRecoveryTracking(id);
                 return;
             }
@@ -486,10 +563,15 @@ namespace SeapowerMultiplayer
             NetworkSyncedVessels.Clear();
             PipelineAircraftIds.Clear();
             _deferredSpawns.Clear();
+            _deferredSpawnTime.Clear();
+            _deferredLogTime.Clear();
             _spawnRecords.Clear();
             _missingAircraftSightings.Clear();
             _recoveryRequested.Clear();
+            _recoveryAttempts.Clear();
             _recoveryInProgress.Clear();
+            _recoveryAbandoned.Clear();
+            _recoveryLogTime.Clear();
             _idRangeInitialized = false;
             _nextSafeId = 0;
         }
