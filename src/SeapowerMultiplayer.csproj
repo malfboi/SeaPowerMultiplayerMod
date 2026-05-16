@@ -76,21 +76,24 @@
 
 
 	<PropertyGroup>
-    <GameDir2>C:\Users\hughe\Desktop\Sea Power</GameDir2>
+    <GameDir2 Condition="'$(GameDir2)' == ''"></GameDir2>
   </PropertyGroup>
 
-  <Target Name="CopyToPlugins" AfterTargets="Build">
-    <!-- Copy our plugin DLL -->
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameDir)\BepInEx\plugins\" />
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
+  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true'">
+    <ItemGroup>
+      <PluginCopyDirs Include="$(GameDir)" Condition="'$(GameDir)' != ''" />
+      <PluginCopyDirs Include="$(GameDir2)" Condition="'$(GameDir2)' != ''" />
+    </ItemGroup>
+
     <!-- Copy NuGet dependency DLLs (e.g. LiteNetLib) that BepInEx needs at runtime -->
     <ItemGroup>
       <PluginDeps Include="$(OutputPath)*.dll" Exclude="$(OutputPath)$(AssemblyName).dll;$(OutputPath)System.*.dll;$(OutputPath)mscorlib.dll;$(OutputPath)netstandard.dll" />
     </ItemGroup>
-    <Copy SourceFiles="@(PluginDeps)" DestinationFolder="$(GameDir)\BepInEx\plugins\" />
-    <Copy SourceFiles="@(PluginDeps)" DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
-    <Message Text="Copied plugin + dependencies to $(GameDir)\BepInEx\plugins\" Importance="high" />
-    <Message Text="Copied plugin + dependencies to $(GameDir2)\BepInEx\plugins\" Importance="high" />
+
+    <!-- Copy our plugin DLL and runtime dependencies to each requested game directory. -->
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="%(PluginCopyDirs.Identity)\BepInEx\plugins\" />
+    <Copy SourceFiles="@(PluginDeps)" DestinationFolder="%(PluginCopyDirs.Identity)\BepInEx\plugins\" />
+    <Message Text="Copied plugin + dependencies to %(PluginCopyDirs.Identity)\BepInEx\plugins\" Importance="high" />
   </Target>
 
 </Project>

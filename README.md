@@ -121,6 +121,8 @@ The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on f
 | `Port` | `7777` | UDP port (must match on both sides) |
 | `AutoConnect` | `false` | Automatically host/connect on game launch |
 | `TransportType` | `LiteNetLib` | Network transport - `LiteNetLib` or `Steam` |
+| `LogLevel` | `Info` | Minimum log level - `Error`, `Warning`, `Info`, `Debug`, or `Trace` |
+| `VerboseLogging` | `false` | Compatibility switch for detailed debug diagnostics |
 
 ### Network Requirements
 

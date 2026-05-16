@@ -65,9 +65,15 @@ namespace SeapowerMultiplayer
         private bool _foldUnits = true;
         private bool _foldProjectiles, _foldMissileState, _foldFlightOps;
         private bool _foldFireAuth, _foldCombatEvents;
+        private bool _foldNetworkTraffic = true;
 
         // Toggle for showing/hiding sync health section panels
         private bool _syncPanelsVisible = false;
+
+        // Editable LiteNet connection fields.
+        private bool _connectionFieldsInitialized;
+        private string _hostIpInput = "";
+        private string _portInput = "";
 
         // Panel expand/collapse state (clickable header toggle)
         private bool _panelExpanded = true;
@@ -485,6 +491,13 @@ namespace SeapowerMultiplayer
 
         private void DrawConnectionLiteNet()
         {
+            if (!_connectionFieldsInitialized)
+            {
+                _hostIpInput = Plugin.Instance.CfgHostIP.Value;
+                _portInput = Plugin.Instance.CfgPort.Value.ToString();
+                _connectionFieldsInitialized = true;
+            }
+
             bool isHost      = Plugin.Instance.CfgIsHost.Value;
             bool isConnected = NetworkManager.Instance.IsConnected;
             bool isHostRunning = NetworkManager.Instance.IsHostRunning;
@@ -521,6 +534,18 @@ namespace SeapowerMultiplayer
             GUI.color = prevColor;
             GUILayout.EndHorizontal();
 
+            if (!isConnected && !isHostRunning)
+            {
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Toggle(isHost, "Host", _buttonStyle, GUILayout.Width(78)) && !isHost)
+                    Plugin.Instance.CfgIsHost.Value = true;
+                if (GUILayout.Toggle(!isHost, "Client", _buttonStyle, GUILayout.Width(78)) && isHost)
+                    Plugin.Instance.CfgIsHost.Value = false;
+                GUILayout.EndHorizontal();
+
+                isHost = Plugin.Instance.CfgIsHost.Value;
+            }
+
             // Ping
             if (isConnected)
             {
@@ -528,11 +553,18 @@ namespace SeapowerMultiplayer
             }
             else
             {
-                // Port / IP info
-                if (isHost)
-                    GUILayout.Label($"Port: {Plugin.Instance.CfgPort.Value}", _labelStyle);
-                else
-                    GUILayout.Label($"Host: {Plugin.Instance.CfgHostIP.Value}:{Plugin.Instance.CfgPort.Value}", _labelStyle);
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Port:", _labelStyle, GUILayout.Width(42));
+                _portInput = GUILayout.TextField(_portInput, 6, GUILayout.Width(64));
+                GUILayout.EndHorizontal();
+
+                if (!isHost)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Host:", _labelStyle, GUILayout.Width(42));
+                    _hostIpInput = GUILayout.TextField(_hostIpInput, 64);
+                    GUILayout.EndHorizontal();
+                }
             }
 
             GUILayout.Space(4);
@@ -557,16 +589,28 @@ namespace SeapowerMultiplayer
 
                 if (GUILayout.Button(btnLabel, _buttonStyle))
                 {
+                    if (!int.TryParse(_portInput, out int port) || port <= 0 || port > 65535)
+                    {
+                        Plugin.Log.LogWarning($"[UI] Invalid port: {_portInput}");
+                        return;
+                    }
+
+                    Plugin.Instance.CfgPort.Value = port;
+
                     if (isHost && !isHostRunning)
                     {
-                        NetworkManager.Instance.StartHost(Plugin.Instance.CfgPort.Value);
+                        NetworkManager.Instance.StartHost(port);
                     }
                     else if (isHost && isHostRunning)
                     {
                         NetworkManager.Instance.Stop();
                     }
                     else
-                        NetworkManager.Instance.StartClient(Plugin.Instance.CfgHostIP.Value, Plugin.Instance.CfgPort.Value);
+                    {
+                        string hostIp = string.IsNullOrWhiteSpace(_hostIpInput) ? "127.0.0.1" : _hostIpInput.Trim();
+                        Plugin.Instance.CfgHostIP.Value = hostIp;
+                        NetworkManager.Instance.StartClient(hostIp, port);
+                    }
                 }
             }
             else
@@ -817,6 +861,16 @@ namespace SeapowerMultiplayer
             return SyncStatus.OK;
         }
 
+        private SyncStatus SectionStatus_NetworkTraffic()
+        {
+            var stats = NetworkManager.Instance.Diagnostics;
+            if (stats.FragmentDrops > 0 || stats.OversizeDrops > 0 || NetworkManager.Instance.LastSendFailed)
+                return SyncStatus.Issues;
+            if (stats.PendingFragments > 0)
+                return SyncStatus.Degraded;
+            return SyncStatus.OK;
+        }
+
         private bool DrawSectionHeader(string label, bool foldout, SyncStatus status)
         {
             string arrow  = foldout ? "\u25bc" : "\u25b6";
@@ -848,6 +902,13 @@ namespace SeapowerMultiplayer
 
             // Summary line
             GUILayout.Label($"  RTT: {NetworkManager.Instance.LastRttMs} ms  \u00b7  Orders queued: {OrderDelayQueue.PendingCount}", _dimLabelStyle);
+
+            GUILayout.Space(2);
+
+            // ── Network traffic ─────────────────────────────────────────────
+            _foldNetworkTraffic = DrawSectionHeader("Network", _foldNetworkTraffic, SectionStatus_NetworkTraffic());
+            if (_foldNetworkTraffic)
+                DrawNetworkTraffic();
 
             GUILayout.Space(2);
 
@@ -953,6 +1014,39 @@ namespace SeapowerMultiplayer
                 GUILayout.Label($"  Received: {CombatEventHandler.EventsReceived}  Not found: {CombatEventHandler.EventsNotFound}", _labelStyle);
             }
 
+        }
+
+        private void DrawNetworkTraffic()
+        {
+            var stats = NetworkManager.Instance.Diagnostics;
+            long drops = stats.FragmentDrops + stats.OversizeDrops;
+            GUIStyle dropStyle = drops > 0 ? _warningStyle! : _dimLabelStyle!;
+            GUIStyle pendingStyle = stats.PendingFragments > 0 ? _elevatedStyle! : _dimLabelStyle!;
+            GUIStyle stateStyle = NetworkManager.Instance.LastStateUpdateBytes > 1023 ? _elevatedStyle!
+                : NetworkManager.Instance.LastStateUpdateBytes > 900 ? _warningStyle! : _dimLabelStyle!;
+
+            GUILayout.Label($"  Transport: {NetworkManager.Instance.TransportName}  RTT: {NetworkManager.Instance.LastRttMs} ms", _labelStyle);
+            GUILayout.Label($"  Sent: {stats.MessagesSent} msg / {FormatBytes(stats.PayloadBytesSent)}", _dimLabelStyle);
+            GUILayout.Label($"  Recv: {stats.MessagesReceived} msg / {FormatBytes(stats.PayloadBytesReceived)}", _dimLabelStyle);
+            GUILayout.Label($"  Wire: out {FormatBytes(stats.WireBytesSent)} / in {FormatBytes(stats.WireBytesReceived)}", _dimLabelStyle);
+            GUILayout.Label($"  Fragmented: {stats.FragmentedMessagesSent} msg / {stats.FragmentsSent} chunks", _dimLabelStyle);
+            GUILayout.Label($"  Reassembled: {stats.ReassembledMessagesReceived} msg / {stats.FragmentsReceived} chunks", _dimLabelStyle);
+            GUILayout.Label($"  Pending fragments: {stats.PendingFragments}", pendingStyle);
+            GUILayout.Label($"  Drops: fragment {stats.FragmentDrops}  oversize {stats.OversizeDrops}", dropStyle);
+            GUILayout.Label($"  Last send/recv: {FormatBytes(stats.LastSentBytes)} / {FormatBytes(stats.LastReceivedBytes)}", _dimLabelStyle);
+            if (stats.LastFragmentedBytes > 0 || stats.LastReassembledBytes > 0)
+                GUILayout.Label($"  Last split: {FormatBytes(stats.LastFragmentedBytes)} x{stats.LastFragmentChunkCount}  reasm x{stats.LastReassembledChunkCount}", _dimLabelStyle);
+            GUILayout.Label($"  StateUpdate: {NetworkManager.Instance.LastStateUpdateBytes} B", stateStyle);
+            GUILayout.Label($"  Units {NetworkManager.Instance.LastStateUpdateUnits}  projectiles {NetworkManager.Instance.LastStateUpdateProjectiles}  large {NetworkManager.Instance.LargeStateUpdateSentCount}/{NetworkManager.Instance.StateUpdateSentCount}", stateStyle);
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes >= 1024L * 1024L)
+                return $"{bytes / (1024f * 1024f):F1} MB";
+            if (bytes >= 1024L)
+                return $"{bytes / 1024f:F1} KB";
+            return $"{bytes} B";
         }
     }
 }

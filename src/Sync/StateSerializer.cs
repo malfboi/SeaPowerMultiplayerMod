@@ -495,7 +495,7 @@ namespace SeapowerMultiplayer
             if (Time.time >= _nextDriftLogTime)
             {
                 _nextDriftLogTime = Time.time + 30f;
-                Plugin.Log.LogInfo($"[Drift] Ships: avg={ShipDriftAvg:F1}m max={ShipDriftMax:F1}m ({_shipCount} units) | Air: avg={AirDriftAvg:F1}m max={AirDriftMax:F1}m ({_airCount} units)");
+                MpLog.Debug("Drift", $"Ships: avg={ShipDriftAvg:F1}m max={ShipDriftMax:F1}m ({_shipCount} units) | Air: avg={AirDriftAvg:F1}m max={AirDriftMax:F1}m ({_airCount} units)");
             }
 
             // ── Game time drift correction (host is time authority) ──────────

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using BepInEx.Logging;
 using LiteNetLib;
 using LiteNetLib.Utils;
 using SeapowerMultiplayer.Messages;
@@ -23,11 +22,16 @@ namespace SeapowerMultiplayer
         private ITransport? _transport;
         private bool        _isHost;
         private bool        _running;
+        private long        _stateUpdateSentCount;
+        private long        _largeStateUpdateSentCount;
+        private int         _lastStateUpdateBytes;
+        private int         _lastStateUpdateUnits;
+        private int         _lastStateUpdateProjectiles;
+        private const int LiteNetStateUpdateSinglePacketBytes = 1023;
+        private const int StateUpdateLargeBytes = 900;
 
         private readonly ConcurrentQueue<Action> _mainThreadQueue = new();
         private readonly NetDataWriter           _writer          = new();
-
-        private static ManualLogSource Log => Plugin.Log;
 
         // ── Public API ────────────────────────────────────────────────────────────
 
@@ -41,25 +45,48 @@ namespace SeapowerMultiplayer
 
         public bool IsHost => _isHost;
         public bool IsHostRunning => _running && _isHost;
+        public string TransportName => _transport?.GetType().Name ?? Plugin.Instance.CfgTransport.Value;
+        public NetworkDiagnosticsSnapshot Diagnostics => _transport?.Diagnostics ?? default;
+        public long StateUpdateSentCount => _stateUpdateSentCount;
+        public long LargeStateUpdateSentCount => _largeStateUpdateSentCount;
+        public int LastStateUpdateBytes => _lastStateUpdateBytes;
+        public int LastStateUpdateUnits => _lastStateUpdateUnits;
+        public int LastStateUpdateProjectiles => _lastStateUpdateProjectiles;
 
         public void StartHost(int port)
         {
+            if (_running)
+                Stop();
+
+            Plugin.Instance.CfgIsHost.Value = true;
+            if (port > 0)
+                Plugin.Instance.CfgPort.Value = port;
+
             _isHost = true;
             _transport = CreateTransport();
             WireTransportEvents();
             _transport.Start(asHost: true);
             _running = true;
-            Log.LogInfo($"[Net] Hosting (transport={Plugin.Instance.CfgTransport.Value})");
+            MpLog.Info("Net", $"Hosting transport={Plugin.Instance.CfgTransport.Value} port={Plugin.Instance.CfgPort.Value}");
         }
 
         public void StartClient(string ip, int port)
         {
+            if (_running)
+                Stop();
+
+            Plugin.Instance.CfgIsHost.Value = false;
+            if (!string.IsNullOrWhiteSpace(ip))
+                Plugin.Instance.CfgHostIP.Value = ip;
+            if (port > 0)
+                Plugin.Instance.CfgPort.Value = port;
+
             _isHost = false;
             _transport = CreateTransport();
             WireTransportEvents();
             _transport.Start(asHost: false);
             _running = true;
-            Log.LogInfo($"[Net] Connecting as client (transport={Plugin.Instance.CfgTransport.Value})");
+            MpLog.Info("Net", $"Connecting transport={Plugin.Instance.CfgTransport.Value} host={Plugin.Instance.CfgHostIP.Value}:{Plugin.Instance.CfgPort.Value}");
         }
 
         /// <summary>Start as host or client for transports that don't need IP/port (Steam).</summary>
@@ -87,7 +114,7 @@ namespace SeapowerMultiplayer
             _transport?.Stop();
             _transport = null;
             _running = false;
-            Log.LogInfo("[Net] Stopped.");
+            MpLog.Info("Net", "Stopped.");
         }
 
         /// <summary>Called from Plugin.Update() — must run on Unity main thread.</summary>
@@ -110,6 +137,7 @@ namespace SeapowerMultiplayer
             _writer.Reset();
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
+            LogSerializedSize(msg, _writer.Length, delivery);
             _transport.SendToServer(_writer.Data, _writer.Length, MapDelivery(delivery));
         }
 
@@ -119,6 +147,7 @@ namespace SeapowerMultiplayer
             _writer.Reset();
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
+            LogSerializedSize(msg, _writer.Length, delivery);
             _transport.BroadcastToClients(_writer.Data, _writer.Length, MapDelivery(delivery));
         }
 
@@ -158,16 +187,50 @@ namespace SeapowerMultiplayer
             _ => TransportDelivery.ReliableOrdered,
         };
 
+        private void LogSerializedSize(INetMessage msg, int length, DeliveryMethod delivery)
+        {
+            if (msg.Type != MessageType.StateUpdate) return;
+
+            var state = msg as StateUpdateMessage;
+            _stateUpdateSentCount++;
+            _lastStateUpdateBytes = length;
+            _lastStateUpdateUnits = state?.Units.Count ?? 0;
+            _lastStateUpdateProjectiles = state?.Projectiles.Count ?? 0;
+
+            string detail = state == null
+                ? $"bytes={length}"
+                : $"bytes={length} units={state.Units.Count} projectiles={state.Projectiles.Count}";
+
+            if (length > StateUpdateLargeBytes)
+            {
+                _largeStateUpdateSentCount++;
+                if (Plugin.Instance.CfgTransport.Value == "LiteNetLib" &&
+                    length > LiteNetStateUpdateSinglePacketBytes)
+                {
+                    MpLog.InfoThrottle("StateUpdateWillFragment", "Net",
+                        $"StateUpdate will fragment {detail} delivery={delivery} threshold={LiteNetStateUpdateSinglePacketBytes}", 2f);
+                }
+                else
+                {
+                    MpLog.Trace("Net", $"Large StateUpdate {detail} delivery={delivery}");
+                }
+            }
+            else
+            {
+                MpLog.Trace("Net", $"StateUpdate {detail} delivery={delivery}");
+            }
+        }
+
         // ── Transport event handlers ────────────────────────────────────────────
 
         private void OnPeerConnected()
         {
-            Log.LogInfo("[Net] Peer connected");
+            MpLog.Info("Net", "Peer connected");
         }
 
         private void OnPeerDisconnected()
         {
-            Log.LogInfo("[Net] Peer disconnected");
+            MpLog.Warn("Net", "Peer disconnected");
             _mainThreadQueue.Enqueue(() =>
             {
                 OrderDelayQueue.Clear();
@@ -194,7 +257,7 @@ namespace SeapowerMultiplayer
 
             if (type != MessageType.StateUpdate && type != MessageType.MissileStateSync
                 && type != MessageType.PlayerOrder && type != MessageType.DamageState)
-                Log.LogDebug($"[Net] Received {type}");
+                MpLog.Trace("Net", $"Received {type}");
 
             switch (type)
             {
@@ -212,7 +275,7 @@ namespace SeapowerMultiplayer
                     if (msg.Order == Messages.OrderType.AutoFireWeapon)
                     {
                         if (Plugin.Instance.CfgVerboseDebug.Value)
-                            Log.LogDebug($"[AutoFire DIAG] t={enqueueMs}ms ENQUEUE (bg thread) " +
+                            MpLog.Debug("AutoFire", $"t={enqueueMs}ms ENQUEUE (bg thread) " +
                                 $"unit={msg.SourceEntityId} ammo={msg.AmmoId} target={msg.TargetEntityId} " +
                                 $"shots={msg.ShotsToFire}");
                     }
@@ -222,7 +285,7 @@ namespace SeapowerMultiplayer
                         {
                             long applyMs = AIAutoFireState.DiagMs;
                             if (Plugin.Instance.CfgVerboseDebug.Value)
-                                Log.LogDebug($"[AutoFire DIAG] t={applyMs}ms DEQUEUE (main thread, " +
+                                MpLog.Debug("AutoFire", $"t={applyMs}ms DEQUEUE (main thread, " +
                                     $"waited {applyMs - enqueueMs}ms) unit={msg.SourceEntityId} ammo={msg.AmmoId}");
                         }
                         OrderHandler.Apply(msg);
@@ -254,7 +317,7 @@ namespace SeapowerMultiplayer
                 case MessageType.CombatEvent:
                 {
                     var msg = CombatEventMessage.Deserialize(reader);
-                    Log.LogDebug($"[Net] Deserialized CombatEvent: {msg.EventType} target={msg.TargetEntityId} source={msg.SourceEntityId}");
+                    MpLog.Debug("Net", $"Deserialized CombatEvent: {msg.EventType} target={msg.TargetEntityId} source={msg.SourceEntityId}");
                     _mainThreadQueue.Enqueue(() => CombatEventHandler.Apply(msg));
                     break;
                 }
@@ -284,7 +347,7 @@ namespace SeapowerMultiplayer
                     // loop that produces infinite interceptors.
                     if (Plugin.Instance.CfgIsHost.Value && !Plugin.Instance.CfgPvP.Value)
                     {
-                        Plugin.Log.LogWarning($"[Net] Dropping unexpected ProjectileSpawn on co-op host (source unit {msg.SourceUnitId}, ammo={msg.AmmoName})");
+                        MpLog.Warn("Net", $"Dropping unexpected ProjectileSpawn on co-op host (source unit {msg.SourceUnitId}, ammo={msg.AmmoName})");
                         break;
                     }
                     _mainThreadQueue.Enqueue(() => ProjectileIdMapper.OnHostSpawnReceived(
@@ -337,7 +400,7 @@ namespace SeapowerMultiplayer
                 }
 
                 default:
-                    Log.LogWarning($"[Net] Unknown message type: {type}");
+                    MpLog.Warn("Net", $"Unknown message type: {type}");
                     break;
             }
         }

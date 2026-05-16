@@ -64,6 +64,45 @@ namespace SeapowerMultiplayer.Transport
 
         public int RttMs { get; private set; }
         public bool LastSendFailed { get; private set; }
+        public NetworkDiagnosticsSnapshot Diagnostics => new(
+            _messagesSent,
+            _payloadBytesSent,
+            _wireBytesSent,
+            _messagesReceived,
+            _payloadBytesReceived,
+            _wireBytesReceived,
+            _fragmentedMessagesSent,
+            _fragmentsSent,
+            _fragmentsReceived,
+            _reassembledMessagesReceived,
+            _fragmentDrops,
+            _oversizeDrops,
+            _pendingFragments.Count,
+            _lastSentBytes,
+            _lastReceivedBytes,
+            _lastFragmentedBytes,
+            _lastFragmentChunkCount,
+            _lastReassembledBytes,
+            _lastReassembledChunkCount);
+
+        private long _messagesSent;
+        private long _payloadBytesSent;
+        private long _wireBytesSent;
+        private long _messagesReceived;
+        private long _payloadBytesReceived;
+        private long _wireBytesReceived;
+        private long _fragmentedMessagesSent;
+        private long _fragmentsSent;
+        private long _fragmentsReceived;
+        private long _reassembledMessagesReceived;
+        private long _fragmentDrops;
+        private long _oversizeDrops;
+        private int _lastSentBytes;
+        private int _lastReceivedBytes;
+        private int _lastFragmentedBytes;
+        private int _lastFragmentChunkCount;
+        private int _lastReassembledBytes;
+        private int _lastReassembledChunkCount;
 
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;
@@ -162,6 +201,8 @@ namespace SeapowerMultiplayer.Transport
             {
                 if (!SendRaw(conn, data, length, delivery))
                     LastSendFailed = true;
+                else
+                    RecordPayloadSent(length, length);
                 return;
             }
 
@@ -170,12 +211,23 @@ namespace SeapowerMultiplayer.Transport
             {
                 Log.LogWarning($"[SteamTransport] Unreliable message too large ({length} bytes), sending anyway");
                 if (!SendRaw(conn, data, length, delivery))
+                {
                     LastSendFailed = true;
+                    _oversizeDrops++;
+                }
+                else
+                    RecordPayloadSent(length, length);
                 return;
             }
 
             uint fragmentId = _nextFragmentId++;
             int totalChunks = (length + MaxChunkPayload - 1) / MaxChunkPayload;
+            _messagesSent++;
+            _payloadBytesSent += length;
+            _fragmentedMessagesSent++;
+            _lastSentBytes = length;
+            _lastFragmentedBytes = length;
+            _lastFragmentChunkCount = totalChunks;
 
             Log.LogInfo($"[SteamTransport] Fragmenting message: {length} bytes → {totalChunks} chunks (id={fragmentId})");
 
@@ -212,6 +264,8 @@ namespace SeapowerMultiplayer.Transport
                     if (SendRaw(conn, chunk, chunkLen, delivery))
                     {
                         sent = true;
+                        _wireBytesSent += chunkLen;
+                        _fragmentsSent++;
                         break;
                     }
                 }
@@ -273,13 +327,32 @@ namespace SeapowerMultiplayer.Transport
                 // Check for fragment marker
                 if (length >= FragmentHeaderSize && data[0] == FragmentMarker)
                 {
+                    _fragmentsReceived++;
+                    _wireBytesReceived += length;
                     HandleFragment(data, length);
                 }
                 else
                 {
+                    RecordPayloadReceived(length, length);
                     OnDataReceived?.Invoke(data, length);
                 }
             }
+        }
+
+        private void RecordPayloadSent(int payloadBytes, int wireBytes)
+        {
+            _messagesSent++;
+            _payloadBytesSent += payloadBytes;
+            _wireBytesSent += wireBytes;
+            _lastSentBytes = payloadBytes;
+        }
+
+        private void RecordPayloadReceived(int payloadBytes, int wireBytes)
+        {
+            _messagesReceived++;
+            _payloadBytesReceived += payloadBytes;
+            _wireBytesReceived += wireBytes;
+            _lastReceivedBytes = payloadBytes;
         }
 
         private void HandleFragment(byte[] data, int length)
@@ -291,6 +364,7 @@ namespace SeapowerMultiplayer.Transport
             if (totalChunks <= 0 || chunkIndex < 0 || chunkIndex >= totalChunks)
             {
                 Log.LogWarning($"[SteamTransport] Invalid fragment header: id={fragmentId} chunk={chunkIndex}/{totalChunks}");
+                _fragmentDrops++;
                 return;
             }
 
@@ -323,6 +397,12 @@ namespace SeapowerMultiplayer.Transport
                 }
 
                 _pendingFragments.Remove(fragmentId);
+                _reassembledMessagesReceived++;
+                _messagesReceived++;
+                _payloadBytesReceived += buffer.TotalLength;
+                _lastReceivedBytes = buffer.TotalLength;
+                _lastReassembledBytes = buffer.TotalLength;
+                _lastReassembledChunkCount = totalChunks;
                 Log.LogInfo($"[SteamTransport] Reassembled fragment id={fragmentId}: {totalChunks} chunks → {buffer.TotalLength} bytes");
                 OnDataReceived?.Invoke(reassembled, buffer.TotalLength);
             }
@@ -353,6 +433,7 @@ namespace SeapowerMultiplayer.Transport
                 {
                     var buf = _pendingFragments[id];
                     Log.LogWarning($"[SteamTransport] Discarding stale fragment id={id}: {buf.ReceivedCount}/{buf.Chunks.Length} chunks received");
+                    _fragmentDrops++;
                     _pendingFragments.Remove(id);
                 }
             }

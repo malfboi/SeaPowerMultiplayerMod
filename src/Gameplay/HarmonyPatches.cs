@@ -968,12 +968,13 @@ namespace SeapowerMultiplayer
             {
                 bool isPvPSono = Plugin.Instance.CfgPvP.Value;
                 bool isHostSono = Plugin.Instance.CfgIsHost.Value;
+                var targetPosition = engageTask.TargetPosition;
 
                 if (isPvPSono)
                 {
                     // PvP: encode as GeoPosition (floating-origin safe) and send to opponent
                     var geo = Utils.worldPositionFromUnityToLongLat(
-                        engageTask._targetPosition, Globals._currentCenterTile);
+                        targetPosition, Globals._currentCenterTile);
                     var msg = new PlayerOrderMessage
                     {
                         SourceEntityId = __instance.UniqueID,
@@ -994,9 +995,9 @@ namespace SeapowerMultiplayer
                         SourceEntityId = __instance.UniqueID,
                         Order          = OrderType.DropSonobuoy,
                         AmmoId         = engageTask._ammoId,
-                        DestX          = engageTask._targetPosition.x,
-                        DestY          = engageTask._targetPosition.y,
-                        DestZ          = engageTask._targetPosition.z,
+                        DestX          = targetPosition.x,
+                        DestY          = targetPosition.y,
+                        DestZ          = targetPosition.z,
                     };
                     NetworkManager.Instance.SendToServer(msg);
                     Plugin.Log.LogInfo($"[Sonobuoy] Co-op client sent drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");
@@ -1009,9 +1010,9 @@ namespace SeapowerMultiplayer
                         SourceEntityId = __instance.UniqueID,
                         Order          = OrderType.DropSonobuoy,
                         AmmoId         = engageTask._ammoId,
-                        DestX          = engageTask._targetPosition.x,
-                        DestY          = engageTask._targetPosition.y,
-                        DestZ          = engageTask._targetPosition.z,
+                        DestX          = targetPosition.x,
+                        DestY          = targetPosition.y,
+                        DestZ          = targetPosition.z,
                     };
                     NetworkManager.Instance.BroadcastToClients(msg);
                     Plugin.Log.LogInfo($"[Sonobuoy] Co-op host broadcast drop: unit={__instance.UniqueID} ammo={engageTask._ammoId}");

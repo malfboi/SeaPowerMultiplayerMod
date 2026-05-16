@@ -335,7 +335,7 @@ namespace SeapowerMultiplayer
                     if (weapon?._ap?._ammunitionFileName != ammoName) continue;
 
                     var weaponRef = weapon; // capture before launch() removes it from _weapons
-                    launcher.launch(i, launchTarget, launchPos, Vector3.zero);
+                    launcher.launch(i, launchTarget, launchPos, Vector3.zero, 0f);
                     ApplyLaunchDirection(weaponRef, launchDir, ammoName, sourceUnitId);
                     Plugin.Log.LogInfo($"[ForceSpawn] Force-spawned ammo={ammoName} unit={sourceUnitId} container={i}");
                     return true;
@@ -389,7 +389,7 @@ namespace SeapowerMultiplayer
                     if (!loaded) continue;
 
                     var weaponRef = container._weapons[0]; // capture before launch() removes it
-                    launcher.launch(i, launchTarget, launchPos, Vector3.zero);
+                    launcher.launch(i, launchTarget, launchPos, Vector3.zero, 0f);
                     ApplyLaunchDirection(weaponRef, launchDir, ammoName, sourceUnitId);
                     Plugin.Log.LogInfo($"[ForceSpawn] Force-spawned (reload) ammo={ammoName} unit={sourceUnitId} container={i}");
                     return true;

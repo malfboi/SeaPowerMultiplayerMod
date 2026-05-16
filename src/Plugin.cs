@@ -28,6 +28,7 @@ namespace SeapowerMultiplayer
 
         // Debug config
         internal ConfigEntry<bool> CfgVerboseDebug = null!;
+        internal ConfigEntry<string> CfgLogLevel = null!;
 
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
@@ -51,6 +52,8 @@ namespace SeapowerMultiplayer
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
 
             // Debug
+            CfgLogLevel = Config.Bind("Debug", "LogLevel", "Info",
+                "Minimum log level: Error, Warning, Info, Debug, or Trace. VerboseLogging=true still enables Debug diagnostics.");
             CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
                 "Enable verbose per-tick debug logging (Serialize counts, AutoFire diagnostics, Net received)");
 
@@ -68,9 +71,9 @@ namespace SeapowerMultiplayer
             // Initialize Steam lobby callbacks (safe even if transport is LiteNetLib)
             SteamLobbyManager.Init();
 
-            Log.LogInfo($"SeapowerMultiplayer v{PluginInfo.PLUGIN_VERSION} loaded.");
-            Log.LogInfo($"Transport: {CfgTransport.Value}  Mode: {(CfgIsHost.Value ? "HOST" : "CLIENT")}  Port: {CfgPort.Value}");
-            Log.LogInfo("Press F9 in-game to toggle the multiplayer UI overlay.");
+            MpLog.Info("Plugin", $"SeapowerMultiplayer v{PluginInfo.PLUGIN_VERSION} loaded.");
+            MpLog.Info("Plugin", $"Transport={CfgTransport.Value} Mode={(CfgIsHost.Value ? "HOST" : "CLIENT")} Port={CfgPort.Value} LogLevel={CfgLogLevel.Value} Verbose={CfgVerboseDebug.Value}");
+            MpLog.Info("Plugin", "Press Ctrl+F9 in-game to toggle the multiplayer UI overlay.");
 
             // Check for +connect_lobby launch arg (Steam invite while game was closed)
             if (CfgTransport.Value == "Steam")
