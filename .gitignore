@@ -1,16 +1,44 @@
 # Build output
 bin/
 obj/
+artifacts/
+publish/
+TestResults/
 
-# Local files
+# .NET generated packages/cache
+*.lscache
+*.nupkg
+*.snupkg
+
+# Logs and local scratch files
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Local notes/work-in-progress
 docs/
 TODO.md
 
-# Visual Studio
+# IDE/editor state
 .vs/
+.vscode/
+.idea/
 *.user
 *.suo
+*.userosscache
+*.sln.docstates
+_ReSharper*/
+*.DotSettings.user
 
-# Rider
-.idea/
+# Codex/Claude local workspace state
+.codex/
+.claude/
 
+openspec/
+
+# OS files
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/

@@ -102,7 +102,9 @@ namespace SeapowerMultiplayer
                     try { BroadcastState(); }
                     catch (System.Exception ex)
                     {
-                        Plugin.Log.LogError($"[Broadcast] Exception in BroadcastState: {ex}");
+                        MpLog.WarnThrottle("BroadcastStateException", "Broadcast",
+                            $"Exception in BroadcastState: {ex.GetType().Name}: {ex.Message}", 2f);
+                        MpLog.Debug("Broadcast", ex.ToString());
                     }
                 }
             }
