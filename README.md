@@ -27,17 +27,16 @@ Combat is resolved by the **target** of the engagement. If Player A fires a miss
 
 ## Getting Started
 
-There are three ways to install the mod. Pick whichever suits you best.
+The mod is loaded by **[Anchor Chain](https://seapower-modders.github.io/AnchorChain/)**, the community chainloader for Sea Power. There is no launcher to run - all settings are edited in-game.
 
 <details>
-<summary><b>Option 1: Use the Launcher (Recommended)</b></summary>
+<summary><b>Option 1: Steam Workshop (Recommended)</b></summary>
 
-The launcher handles everything automatically - it installs BepInEx, copies the plugin, and launches the game.
+1. Subscribe to **Anchor Chain** on the Steam Workshop and follow its [installation guide](https://seapower-modders.github.io/AnchorChain/) to install the BepInEx preloader.
+2. Subscribe to **Seapower Multiplayer** on the Steam Workshop.
+3. Launch the game, open the mod menu and **tick Seapower Multiplayer**, then **fully close and reopen the game**.
 
-1. Download **SeapowerMultiplayer.Launcher.exe** from the [Releases](../../releases) page.
-2. Run the launcher.
-3. It will auto-detect your Sea Power installation, install BepInEx if needed, and copy the plugin DLL into the correct folder.
-4. Click **Launch** to start the game with the mod loaded.
+> Applying a mod change only reloads the scene (`SceneManager.LoadScene(0)`), it does not restart the process. Anchor Chain loads plugins once per process, so enabling or disabling any code mod needs a full restart to take effect.
 
 </details>
 
@@ -46,11 +45,9 @@ The launcher handles everything automatically - it installs BepInEx, copies the 
 
 If you prefer to manage things yourself:
 
-1. Download and install **[BepInEx 5.4.x](https://github.com/BepInEx/BepInEx/releases)** into your Sea Power game directory.
-   - Extract the BepInEx zip so that `BepInEx/` sits alongside `Sea Power.exe`.
-   - Run the game once to let BepInEx generate its folder structure, then close it.
-2. Download **SeapowerMultiplayer.dll** from the [Releases](../../releases) page.
-3. Copy the DLL into `Sea Power/BepInEx/plugins/`.
+1. Install **Anchor Chain** and its preloader as above (this also installs BepInEx).
+2. Download **SeapowerMultiplayer.dll** and **_info.ini** from the [Releases](../../releases) page.
+3. Create a folder `Sea Power/Sea Power_Data/StreamingAssets/SeapowerMultiplayer/` and put both files inside it.
 4. Launch the game normally.
 
 </details>
@@ -62,7 +59,7 @@ If you prefer to manage things yourself:
    ```bash
    git clone https://github.com/malfboi/SeaPowerMultiplayerMod.git
    ```
-2. Make sure **BepInEx 5.4.x** is installed in your game directory (see Option 2 above).
+2. Make sure **Anchor Chain** (and therefore BepInEx 5.4.x) is installed in your game directory (see Option 2 above).
 3. Build the plugin:
    ```bash
    dotnet build src/SeapowerMultiplayer.csproj
@@ -71,7 +68,7 @@ If you prefer to manage things yourself:
    ```bash
    dotnet build src/SeapowerMultiplayer.csproj /p:GameDir="D:\Games\Steam\steamapps\common\Sea Power"
    ```
-   The build automatically copies the DLL and its dependencies into `BepInEx/plugins/`.
+   The build merges LiteNetLib into the DLL and copies it, with `_info.ini`, into `Sea Power_Data/StreamingAssets/SeapowerMultiplayer/`. Nothing else needs copying.
 
 </details>
 
@@ -112,15 +109,21 @@ Both players use the normal game controls. In PvP, both sides are authoritative 
 
 ## Configuration
 
-The mod generates a config file at `BepInEx/config/SeapowerMultiplayer.cfg` on first launch.
+Press **Ctrl+F9** in-game and open the **Settings** section of the overlay. Changes are saved immediately - there is no file to edit and no restart needed.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `IsHost` | `true` | Run as host (server) or client |
-| `HostIP` | `127.0.0.1` | IP to connect to (client only) |
+| `Role` | `HOST` | Run as host (server) or client |
+| `Transport` | `Direct IP` | Network transport - `Direct IP` (LiteNetLib) or `Steam` |
+| `Host IP` | `127.0.0.1` | IP to connect to (client only) |
 | `Port` | `7777` | UDP port (must match on both sides) |
-| `AutoConnect` | `false` | Automatically host/connect on game launch |
-| `TransportType` | `LiteNetLib` | Network transport - `LiteNetLib` or `Steam` |
+| `Mode` | `PvP` | PvP (opposing taskforces) or Co-op (shared control) |
+| `Auto-connect` | off | Automatically host/connect on game launch |
+| `Time vote` | off | Both players must agree on time compression changes |
+
+Network settings are locked while a session is running - disconnect to change them. The **Advanced** subsection holds state-stream rates and debug options, which apply live.
+
+Settings are still persisted to `BepInEx/config/com.seapowermultiplayer.plugin.cfg`, so the file can be edited directly if you prefer.
 
 ### Network Requirements
 
@@ -147,12 +150,12 @@ Contributions are welcome! Whether it's a bug fix, new feature, or documentation
 ### Getting set up
 
 1. **Fork & clone** the repository.
-2. **Install [BepInEx 5.4.x](https://github.com/BepInEx/BepInEx/releases)** into your Sea Power game directory.
+2. **Install [Anchor Chain](https://seapower-modders.github.io/AnchorChain/)** (and its BepInEx preloader) into your Sea Power game directory.
 3. **Build:**
    ```bash
    dotnet build src/SeapowerMultiplayer.csproj /p:GameDir="<your Sea Power install path>"
    ```
-4. The DLL is automatically copied to `BepInEx/plugins/` on successful build.
+4. The DLL is automatically copied to `Sea Power_Data/StreamingAssets/SeapowerMultiplayer/` on successful build.
 
 ### Guidelines
 

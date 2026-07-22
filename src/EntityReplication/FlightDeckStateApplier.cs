@@ -67,13 +67,50 @@ namespace SeapowerMultiplayer
                     existing.launchAllowed     = t.LaunchAllowed;
                     existing.FlightDeckTaskLabel = t.Label;
                     existing.Info              = t.Info;
+                    SyncLaunchCommand(carrier, existing, t.AwaitingLaunch);
                 }
                 else
                 {
                     var task = BuildDisplayTask(fd, vob, t);
-                    if (task != null) tasks.Add(task);
+                    if (task != null)
+                    {
+                        tasks.Add(task);
+                        SyncLaunchCommand(carrier, task, t.AwaitingLaunch);
+                    }
                 }
             }
+        }
+
+        /// <summary>The task row's LAUNCH command is normally added by
+        /// HandleAwaitSpawnTask.onEnter - a deck state the client never reaches, since its
+        /// task pump is suppressed. Without this a readied aircraft offers only ABORT on
+        /// the client and can never be sent. Mirror the host's AwaitSpawn state onto the
+        /// display task's command list, wired to an upstream AllowLaunch order (the game's
+        /// own AllowLaunchFunc only flips local state, which the next snapshot would undo).
+        /// The client's frozen task only ever holds ABORT at index 0, so command count is
+        /// a sufficient presence test.</summary>
+        private static void SyncLaunchCommand(ObjectBase carrier, PendingLaunchTask task, bool awaitingLaunch)
+        {
+            bool has = task.Commands.Count > 1;
+            if (awaitingLaunch == has) return;
+
+            if (!awaitingLaunch) { task.Commands.RemoveAt(1); return; }
+
+            int carrierId = carrier.UniqueID;
+            var uid = task._uid;
+            task.Commands.Add(new SeapowerUI.ViewModels.ContextMenuItem(
+                Singleton<LanguageResourceHandler>.Instance.getText("Windows", "Launch"), null,
+                new DelegateCommand(delegate
+                {
+                    NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+                    {
+                        SourceEntityId = carrierId,
+                        Order          = OrderType.AllowLaunch,
+                        AmmoId         = uid.ToString(),
+                    });
+                    Telemetry.Count("v2.clientAllowLaunchUpstream");
+                    Plugin.Log.LogInfo($"[FlightOps] Upstream allow launch: carrier={carrierId} uid={uid}");
+                })));
         }
 
         private static PendingLaunchTask FindByUid(

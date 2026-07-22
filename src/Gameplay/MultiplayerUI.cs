@@ -10,7 +10,7 @@ namespace SeapowerMultiplayer
     /// In-game overlay. Toggle with Ctrl+F9.
     /// Shows connection status, ping, time compression controls, and sync health.
     /// </summary>
-    public class MultiplayerUI : MonoBehaviour
+    public partial class MultiplayerUI : MonoBehaviour
     {
         private bool _visible = true;
 
@@ -80,7 +80,10 @@ namespace SeapowerMultiplayer
         private void Update()
         {
             if ((Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.F9))
+            {
                 _visible = !_visible;
+                if (!_visible) ReleaseTextFocus();
+            }
 
             _unitCountTimer -= Time.deltaTime;
             if (_unitCountTimer <= 0f)
@@ -351,6 +354,10 @@ namespace SeapowerMultiplayer
         {
             InitStyles();
 
+            // Cleared every pass; DrawSettings re-asserts it while a field holds focus,
+            // so a hidden or collapsed panel can never keep the game's hotkeys muted.
+            TextInputFocused = false;
+
             // Vote popup is always visible, even when the main panel is hidden
             DrawTimeVotePopup();
 
@@ -397,8 +404,29 @@ namespace SeapowerMultiplayer
                 return;
             }
 
+            // Outside a scenario the game's Noesis UI owns the mouse and nothing
+            // in this panel can be clicked, so say so rather than showing controls
+            // that silently do nothing.
+            if (!InScenario())
+            {
+                GUILayout.Space(4);
+                DrawMenuNotice();
+
+                GUILayout.EndVertical();
+                if (Event.current.type == EventType.Repaint)
+                    _contentHeight = GUILayoutUtility.GetLastRect().height;
+
+                if (needsScroll)
+                    GUILayout.EndScrollView();
+
+                GUILayout.EndArea();
+                return;
+            }
+
             GUILayout.Space(4);
             DrawConnection();
+            GUILayout.Space(6);
+            DrawSettings();
             GUILayout.Space(6);
             DrawTimeControls();
             GUILayout.Space(6);
@@ -418,6 +446,33 @@ namespace SeapowerMultiplayer
                 GUILayout.EndScrollView();
 
             GUILayout.EndArea();
+        }
+
+        // ── Main-menu notice ─────────────────────────────────────────────────
+
+        /// <summary>
+        /// True once a mission is loaded. SceneCreator only exists in a scenario,
+        /// which is the same signal SessionManager's scene-ready path waits on.
+        /// </summary>
+        private static bool InScenario()
+            => Singleton<SceneCreator>.InstanceExists(false)
+               && Singleton<SceneCreator>.Instance.IsLoadingDone;
+
+        private GUIStyle? _noticeStyle;
+
+        private void DrawMenuNotice()
+        {
+            // The dim label doesn't wrap, and this text is a paragraph.
+            _noticeStyle ??= new GUIStyle(_dimLabelStyle!) { wordWrap = true };
+
+            GUILayout.BeginVertical(_alertBoxStyle!);
+            GUILayout.Label("⚠  Load a mission first", _warningStyle);
+            GUILayout.Label(
+                "The game's menus capture the mouse, so this panel can't be used here. " +
+                "Start or load a scenario, then press Ctrl+F9 to host, invite a player, " +
+                "and change settings.",
+                _noticeStyle);
+            GUILayout.EndVertical();
         }
 
         // ── Time Vote Popup ──────────────────────────────────────────────────

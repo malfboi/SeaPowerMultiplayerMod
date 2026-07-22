@@ -13,6 +13,17 @@ using VesselStates;
 
 namespace SeapowerMultiplayer
 {
+    /// <summary>
+    /// While a settings text field in the F9 overlay owns keyboard focus, mute the
+    /// game's hotkey pump - IMGUI can't consume input the game reads through
+    /// Input.GetKeyDown, so typing an IP would otherwise also issue unit commands.
+    /// </summary>
+    [HarmonyPatch(typeof(InputHandler), nameof(InputHandler.OnUpdate))]
+    public static class Patch_InputHandler_OnUpdate
+    {
+        static bool Prefix() => !MultiplayerUI.TextInputFocused;
+    }
+
     // ── UnitRegistry lifecycle hooks ────────────────────────────────────────
     // Harmony patches ObjectBase.Awake (non-virtual, public) and OnDestroy (private)
     // to maintain the UnitRegistry without per-frame FindObjectsByType calls.

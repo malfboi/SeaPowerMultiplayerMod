@@ -37,6 +37,8 @@ namespace SeapowerMultiplayer.Messages
             public byte   CallsignIdx;
             public short  LaunchCount;
             public bool   LaunchAllowed;
+            public bool   AwaitingLaunch; // host task sits in HandleAwaitSpawnTask - the
+                                          // player's LAUNCH command releases it
             public string Label;        // host-computed FlightDeckTaskLabel (state text)
             public string Info;         // host-computed Info (progress / remaining text)
         }
@@ -75,6 +77,7 @@ namespace SeapowerMultiplayer.Messages
                 writer.Put(t.CallsignIdx);
                 writer.Put(t.LaunchCount);
                 writer.Put(t.LaunchAllowed);
+                writer.Put(t.AwaitingLaunch);
                 writer.Put(t.Label ?? "");
                 writer.Put(t.Info ?? "");
             }
@@ -118,7 +121,8 @@ namespace SeapowerMultiplayer.Messages
                     SquadronIdx   = reader.GetByte(),
                     CallsignIdx   = reader.GetByte(),
                     LaunchCount   = reader.GetShort(),
-                    LaunchAllowed = reader.GetBool(),
+                    LaunchAllowed  = reader.GetBool(),
+                    AwaitingLaunch = reader.GetBool(),
                     Label         = reader.GetString(),
                     Info          = reader.GetString(),
                 });

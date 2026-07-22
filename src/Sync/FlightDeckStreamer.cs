@@ -88,6 +88,7 @@ namespace SeapowerMultiplayer
                     CallsignIdx   = (byte)Clamp(plt._callsignIndex),
                     LaunchCount   = (short)plt.LaunchCount,
                     LaunchAllowed = plt.launchAllowed,
+                    AwaitingLaunch = plt._stateMachine?.CurrentState is HandleAwaitSpawnTask,
                     Label         = plt.FlightDeckTaskLabel,
                     Info          = plt.Info,
                 });
@@ -117,6 +118,7 @@ namespace SeapowerMultiplayer
                 var t = m.Tasks[i];
                 _sb.Append(t.Uid).Append(',').Append(t.LaunchCount).Append(',')
                    .Append(t.LaunchAllowed ? '1' : '0').Append(',')
+                   .Append(t.AwaitingLaunch ? '1' : '0').Append(',')
                    .Append(t.Label).Append(',').Append(t.Info).Append(';');
             }
             return _sb.ToString();

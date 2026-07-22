@@ -11,13 +11,99 @@ using UnityEngine;
 
 namespace SeapowerMultiplayer
 {
-    [BepInPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
-    public class Plugin : BaseUnityPlugin
+    /// <summary>
+    /// Mod runtime. Loaded by Anchor Chain (see <see cref="AnchorChainEntry"/>),
+    /// not by BepInEx directly, so this is a plain MonoBehaviour rather than a
+    /// BaseUnityPlugin - <see cref="Boot"/> does the hosting BepInEx used to do.
+    /// BepInEx itself is still present (Anchor Chain's preloader is a BepInEx
+    /// plugin), so its logging and config file remain available.
+    /// </summary>
+    public class Plugin : MonoBehaviour
     {
         internal static ManualLogSource Log = null!;
         internal static Plugin Instance = null!;
 
-        // --- Config entries (edit BepInEx/config/SeapowerMultiplayer.cfg in-game folder) ---
+        /// <summary>Set by <see cref="Boot"/> before the component is added, because
+        /// AddComponent runs Awake() synchronously and Awake() binds against it.</summary>
+        internal static ConfigFile Config = null!;
+
+        private static bool _booted;
+
+        /// <summary>
+        /// Entry point called by Anchor Chain. Creates the persistent host
+        /// GameObject and the logger/config that BepInEx would otherwise provide.
+        /// </summary>
+        internal static void Boot()
+        {
+            if (_booted)
+            {
+                Log?.LogWarning("Boot() called twice - ignoring the second load.");
+                return;
+            }
+            _booted = true;
+
+            Log = BepInEx.Logging.Logger.CreateLogSource(PluginInfo.PLUGIN_NAME);
+
+            // Anchor Chain loads every DLL in every search directory without
+            // consulting the game's mod checkboxes, so unticking us in the mod
+            // menu would otherwise do nothing. Honour it ourselves.
+            if (!IsEnabledInModMenu())
+            {
+                Log.LogInfo("Disabled in the game's mod menu - not loading. " +
+                            "Tick \"Seapower Multiplayer\" there to enable it.");
+                return;
+            }
+            // GUID-named, matching what BaseUnityPlugin used to create, so existing
+            // installs keep their settings instead of silently reverting to defaults.
+            Config = new ConfigFile(
+                System.IO.Path.Combine(Paths.ConfigPath, PluginInfo.PLUGIN_GUID + ".cfg"), true);
+
+            var go = new GameObject(PluginInfo.PLUGIN_NAME);
+            UnityEngine.Object.DontDestroyOnLoad(go);
+            go.AddComponent<Plugin>();
+        }
+
+        /// <summary>
+        /// Looks up the SearchDirectory this assembly was loaded from and returns
+        /// its tick state from the game's mod menu.
+        ///
+        /// Fails open: if the directory can't be identified, load anyway. A mod
+        /// that silently refuses to start is far worse to diagnose than one that
+        /// ignores a checkbox.
+        /// </summary>
+        private static bool IsEnabledInModMenu()
+        {
+            try
+            {
+                string here = System.IO.Path.GetFullPath(
+                    System.IO.Path.GetDirectoryName(typeof(Plugin).Assembly.Location) ?? "");
+                if (here.Length == 0) return true;
+
+                foreach (var sd in Singleton<FileManager>.Instance.Directories)
+                {
+                    var di = sd?.DirectoryInfo;
+                    if (di == null) continue;
+
+                    // Anchor Chain scans recursively, so we may sit in a subfolder
+                    // of the search directory rather than its root.
+                    string root = System.IO.Path.GetFullPath(di.FullName)
+                                  .TrimEnd(System.IO.Path.DirectorySeparatorChar);
+                    if (here.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+                        here.StartsWith(root + System.IO.Path.DirectorySeparatorChar,
+                                        StringComparison.OrdinalIgnoreCase))
+                        return sd.IsChecked;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning($"Could not read the mod menu state ({ex.Message}); loading anyway.");
+            }
+
+            return true;
+        }
+
+        // --- Config entries (edited in-game from the F9 overlay's SETTINGS section,
+        //     persisted to BepInEx/config/com.seapowermultiplayer.plugin.cfg) ---
         internal ConfigEntry<bool> CfgIsHost = null!;
         internal ConfigEntry<string> CfgHostIP = null!;
         internal ConfigEntry<int> CfgPort = null!;
@@ -45,7 +131,6 @@ namespace SeapowerMultiplayer
         private void Awake()
         {
             Instance = this;
-            Log = Logger;
 
             // Bind config
             CfgIsHost      = Config.Bind("Network", "IsHost",       true,        "True = run as server, False = connect as client");
@@ -76,6 +161,12 @@ namespace SeapowerMultiplayer
             // Two-instance test harness: SPMP_* environment variables override the
             // shared config file so one install can run host + client instances.
             ApplyEnvOverrides();
+
+            // Workshop builds are Steam-only: there is no launcher to configure a
+            // direct-IP session and no UI to pick a transport. Forced after the env
+            // overrides so a stale cfg value can't select a transport that the mod
+            // no longer exposes.
+            CfgTransport.Value = "Steam";
 
             // Attach helper MonoBehaviours to this same GameObject
             gameObject.AddComponent<StateBroadcaster>();

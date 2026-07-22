@@ -71,11 +71,24 @@
       <HintPath>$(GameDir)\Sea Power_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Anchor Chain chainloader (ACPlugin attribute + IAnchorChainMod).
+         Checked-in copy of AnchorChain.dll from the releases dev.zip. -->
+    <Reference Include="AnchorChain">
+      <HintPath>..\lib\AnchorChain.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- AnchorChain is built against netstandard 2.1; reference the Unity facade
+         so net472 can consume it. -->
+    <Reference Include="netstandard">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\netstandard.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
-  <!-- LiteNetLib — UDP networking -->
+  <!-- LiteNetLib — UDP networking. Merged into our DLL by ILRepack below. -->
   <ItemGroup>
     <PackageReference Include="LiteNetLib" Version="1.3.5" />
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.34.2" PrivateAssets="all" />
   </ItemGroup>
 
 
@@ -83,18 +96,50 @@
     <GameDir2>C:\Users\hughe\Desktop\Sea Power</GameDir2>
   </PropertyGroup>
 
-  <Target Name="CopyToPlugins" AfterTargets="Build">
-    <!-- Copy our plugin DLL -->
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameDir)\BepInEx\plugins\" />
-    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
-    <!-- Copy NuGet dependency DLLs (e.g. LiteNetLib) that BepInEx needs at runtime -->
+  <!-- Merge LiteNetLib into our assembly.
+       Anchor Chain calls GetExportedTypes() on every candidate DLL *before* any
+       of our code runs, so an unresolved LiteNetLib reference throws
+       ReflectionTypeLoadException at discovery and the mod is skipped entirely.
+       No runtime resolver can help that (ours would not have been installed
+       yet), so the reference has to not exist: ILRepack folds LiteNetLib in. -->
+  <Target Name="ILRepackMerge" AfterTargets="Build">
     <ItemGroup>
-      <PluginDeps Include="$(OutputPath)*.dll" Exclude="$(OutputPath)$(AssemblyName).dll;$(OutputPath)System.*.dll;$(OutputPath)mscorlib.dll;$(OutputPath)netstandard.dll" />
+      <MergeInputs Include="$(OutputPath)$(AssemblyName).dll" />
+      <MergeInputs Include="$(OutputPath)LiteNetLib.dll" />
+      <MergeLibDirs Include="$(OutputPath)" />
+      <MergeLibDirs Include="..\lib" />
+      <MergeLibDirs Include="$(GameDir)\Sea Power_Data\Managed" />
+      <MergeLibDirs Include="$(GameDir)\BepInEx\core" />
     </ItemGroup>
-    <Copy SourceFiles="@(PluginDeps)" DestinationFolder="$(GameDir)\BepInEx\plugins\" />
-    <Copy SourceFiles="@(PluginDeps)" DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
-    <Message Text="Copied plugin + dependencies to $(GameDir)\BepInEx\plugins\" Importance="high" />
-    <Message Text="Copied plugin + dependencies to $(GameDir2)\BepInEx\plugins\" Importance="high" />
+    <ILRepack
+      Parallel="true"
+      Internalize="true"
+      InputAssemblies="@(MergeInputs)"
+      LibraryPath="@(MergeLibDirs)"
+      TargetKind="Dll"
+      OutputFile="$(OutputPath)merged\$(AssemblyName).dll" />
+  </Target>
+
+  <!-- Anchor Chain loads mods from a folder under StreamingAssets (or a workshop
+       item dir). The merged DLL plus _info.ini (the game's own mod manifest, which
+       gates the "incompatible version" prompt) are the whole workshop item. The
+       build output path is deliberately NOT set to StreamingAssets, per the
+       Anchor Chain docs' warning about IDEs clobbering that folder. -->
+  <!-- Set SkipDeploy=true when testing the Steam Workshop copy: two installs of
+       the same GUID make Anchor Chain load both and keep whichever it happens to
+       see first, which may be the one you meant to disable. -->
+  <Target Name="CopyToStreamingAssets" AfterTargets="ILRepackMerge" Condition="'$(SkipDeploy)' != 'true'">
+    <PropertyGroup>
+      <ModDir>Sea Power_Data\StreamingAssets\SeapowerMultiplayer</ModDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <ModFiles Include="$(OutputPath)merged\$(AssemblyName).dll" />
+      <ModFiles Include="..\workshop\_info.ini" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir)\$(ModDir)\" />
+    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir2)\$(ModDir)\" />
+    <Message Text="Copied plugin to $(GameDir)\$(ModDir)\" Importance="high" />
+    <Message Text="Copied plugin to $(GameDir2)\$(ModDir)\" Importance="high" />
   </Target>
 
 </Project>

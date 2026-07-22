@@ -113,6 +113,12 @@ namespace SeapowerMultiplayer.Transport
             LobbyId = new CSteamID(result.m_ulSteamIDLobby);
             Log.LogInfo($"[SteamLobby] Lobby created: {LobbyId}");
 
+            // Creating the lobby is what makes us the host. There is no Role
+            // setting any more, so this is the only thing that sets CfgIsHost -
+            // without it a player who previously joined someone else's lobby would
+            // keep running the client-side logic while hosting the transport.
+            Plugin.Instance.CfgIsHost.Value = true;
+
             // Set lobby metadata
             HostSteamId = SteamUser.GetSteamID();
             SteamMatchmaking.SetLobbyData(LobbyId, "host_steamid", HostSteamId.ToString());

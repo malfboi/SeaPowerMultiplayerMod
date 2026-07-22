@@ -30,6 +30,7 @@ namespace SeapowerMultiplayer.Messages
         AbortLaunch     = 23,  // v2: client aborts a pending carrier launch → host (AmmoId = task Guid string)
         LaunchNoisemaker = 24, // v2: client manual noisemaker (Shift+D) → host (decoy replicates back as a spawn)
         SetRudder       = 25,  // manual rudder keys (A/D) → host (Speed = rudder angle, -25..+25)
+        AllowLaunch     = 26,  // v2: client releases a readied pending launch → host (AmmoId = task Guid string)
     }
 
     /// <summary>

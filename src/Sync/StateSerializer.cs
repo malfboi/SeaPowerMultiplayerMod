@@ -388,6 +388,28 @@ namespace SeapowerMultiplayer
                         break;
                     }
 
+                    case Messages.OrderType.AllowLaunch:
+                    {
+                        // v2: client pressed LAUNCH on a readied pending task - release it
+                        // host-side; the state change streams back via FlightDeckState.
+                        var fd = unit._obp?._flightDeck;
+                        if (fd != null && System.Guid.TryParse(msg.AmmoId, out var allowUid))
+                        {
+                            var tasks = fd.FlightDeckTasks;
+                            for (int t = 0; t < tasks.Count; t++)
+                            {
+                                if (!(tasks[t] is PendingLaunchTask plt) || plt._uid != allowUid) continue;
+                                // AllowLaunchFunc removes Commands[1] - only valid while the
+                                // task is parked in AwaitSpawn, which is what added it.
+                                if (plt._stateMachine?.CurrentState is HandleAwaitSpawnTask)
+                                    plt.AllowLaunchFunc(null);
+                                Plugin.Log.LogInfo($"[Order] AllowLaunch: carrier={unit.UniqueID} uid={allowUid}");
+                                break;
+                            }
+                        }
+                        break;
+                    }
+
                     // SetHeading removed - setRudderAngle patch was semantically wrong
                     // (sent rudder angle as heading). Heading syncs via waypoints + state corrections.
 
