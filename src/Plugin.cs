@@ -305,6 +305,7 @@ namespace SeapowerMultiplayer
 
             // v2: drive kinematic weapon replicas (client) + keep defence switch asserted
             WeaponReplicaDriver.Tick();
+            UnitReplicaDriver.Tick();
             DeckPuppetDriver.Tick();
             CarrierOpsHandler.Tick();
             WeaponHatchHandler.Tick();
