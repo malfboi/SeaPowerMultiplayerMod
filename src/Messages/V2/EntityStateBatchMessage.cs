@@ -8,7 +8,7 @@ namespace SeapowerMultiplayer.Messages
     /// <summary>
     /// One quantized unit-state record. Positions ride as int32 fixed-point 1e-7°
     /// (decoded to LonDeg/LatDeg doubles on receive); angles/speed quantized per
-    /// GeoCodec. Wire size: 33 bytes.
+    /// GeoCodec. Wire size: 35 bytes.
     /// </summary>
     public struct EntityState
     {
@@ -24,11 +24,14 @@ namespace SeapowerMultiplayer.Messages
         public sbyte    Telegraph;
         public sbyte    RudderQ;       // 0.5° steps
         public float    DesiredAlt;    // raw DesiredAltitude.Value domain (negative = sub depth)
-        public byte     Flags;         // bit0 destroyed, bit1 sinking
+        public short    CmdSpeedQ;     // custom commanded knots ×10, signed; only with FlagCustomSpeed
+        public byte     Flags;         // bit0 destroyed, bit1 sinking, bit2 custom speed command
         public byte     Integrity;     // 0.5% steps (IntegrityPercentage ×2)
 
-        public const byte FlagDestroyed = 1;
-        public const byte FlagSinking   = 2;
+        public const byte FlagDestroyed   = 1;
+        public const byte FlagSinking     = 2;
+        /// <summary>Speed is a slider/typed value, not a preset telegraph - read CmdSpeedQ, not Telegraph.</summary>
+        public const byte FlagCustomSpeed = 4;
     }
 
     /// <summary>
@@ -46,7 +49,7 @@ namespace SeapowerMultiplayer.Messages
         public MessageType Type => MessageType.EntityStateBatch;
 
         /// <summary>Serialized size of one entry (wire bytes).</summary>
-        public const int EntryWireSize = 33;
+        public const int EntryWireSize = 35;
         public const int HeaderWireSize = 1 + 4 + 4 + 2; // msgType + tick + gameSeconds + count
 
         public void Reset()
@@ -76,6 +79,7 @@ namespace SeapowerMultiplayer.Messages
                 writer.Put(e.Telegraph);
                 writer.Put(e.RudderQ);
                 writer.Put(e.DesiredAlt);
+                writer.Put(e.CmdSpeedQ);
                 writer.Put(e.Flags);
                 writer.Put(e.Integrity);
             }
@@ -105,6 +109,7 @@ namespace SeapowerMultiplayer.Messages
                     Telegraph  = reader.GetSByte(),
                     RudderQ    = reader.GetSByte(),
                     DesiredAlt = reader.GetFloat(),
+                    CmdSpeedQ  = reader.GetShort(),
                     Flags      = reader.GetByte(),
                     Integrity  = reader.GetByte(),
                 });

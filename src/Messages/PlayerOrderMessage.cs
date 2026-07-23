@@ -31,6 +31,8 @@ namespace SeapowerMultiplayer.Messages
         LaunchNoisemaker = 24, // v2: client manual noisemaker (Shift+D) → host (decoy replicates back as a spawn)
         SetRudder       = 25,  // manual rudder keys (A/D) → host (Speed = rudder angle, -25..+25)
         AllowLaunch     = 26,  // v2: client releases a readied pending launch → host (AmmoId = task Guid string)
+        SetSpeedCustom  = 27,  // speed slider / typed entry (Speed = commanded knots)
+        SetHeightCustom = 28,  // depth or altitude slider / typed entry (Speed = DesiredAltitude, Unity units)
     }
 
     /// <summary>

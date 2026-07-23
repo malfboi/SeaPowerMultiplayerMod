@@ -1,3 +1,4 @@
+using System.Reflection;
 using HarmonyLib;
 using SeaPower;
 using SeaPowerAI;
@@ -430,6 +431,59 @@ namespace SeapowerMultiplayer
                 $"{__instance.name} ({__instance._ap?._ammunitionFileName}) — suppression leak, report this");
             __instance.gameObject.SetActive(false);
             return false;
+        }
+    }
+
+    /// <summary>CLIENT-side: formation flight physics ends every FixedUpdate by
+    /// copying the LEADER's commanded altitude and speed onto the wingman
+    /// (FormationFlightPhysics.OnFixedUpdate). On a replica that fights the host
+    /// stream, which carries each wingman's OWN DesiredAltitude: the stream sets
+    /// the wingman's value, local formation physics overwrites it with the
+    /// leader's on the next physics tick, and the stream only re-asserts on change
+    /// or on the idle heartbeat - so a wingman ordered low under a leader at 20k
+    /// visibly oscillates between the two, and after rejoining sits at whatever
+    /// the leader commanded rather than what the host has it doing.
+    ///
+    /// The host is authoritative for both values, so they are preserved across the
+    /// call. Everything else formation physics does (station keeping, g-load,
+    /// thrust) is left alone - it only drives local motion, which the replica
+    /// driver corrects anyway.
+    ///
+    /// Note the speed restore has two cases: the game REPLACES SpeedCommand when it
+    /// is not already a ConstantMach, but MUTATES it in place when it is - so
+    /// holding the reference alone does not preserve the value.</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_Client_FormationFlight_KeepOwnCommand
+    {
+        static MethodBase? TargetMethod()
+        {
+            var type = AccessTools.TypeByName("SeaPower.FormationFlightPhysics");
+            var method = type == null ? null : AccessTools.Method(type, "OnFixedUpdate");
+            if (method == null)
+                Plugin.Log.LogWarning("[Suppression] FormationFlightPhysics.OnFixedUpdate not found - " +
+                    "client wingmen will follow the leader's altitude/speed instead of the host's");
+            return method;
+        }
+
+        static void Prefix(ObjectBase ____ac, out (bool held, float alt, ISpeedCommand? cmd, float mach) __state)
+        {
+            __state = default;
+            if (!Suppression.ClientActive || ____ac == null) return;
+            var cmd = ____ac.SpeedCommand?.Value;
+            __state = (true, ____ac.DesiredAltitude.Value, cmd, cmd?.SpeedInMach ?? 0f);
+        }
+
+        static void Postfix(ObjectBase ____ac, (bool held, float alt, ISpeedCommand? cmd, float mach) __state)
+        {
+            if (!__state.held || ____ac == null) return;
+
+            ____ac.DesiredAltitude.Value = __state.alt;
+
+            if (__state.cmd == null) return;
+            if (!ReferenceEquals(____ac.SpeedCommand.Value, __state.cmd))
+                ____ac.SpeedCommand.Value = __state.cmd;          // ours was swapped out
+            else if (__state.cmd is ConstantMach cm)
+                cm.SetSpeedInMach(__state.mach);                  // ours was mutated in place
         }
     }
 }

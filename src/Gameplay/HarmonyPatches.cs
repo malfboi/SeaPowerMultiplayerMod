@@ -242,6 +242,15 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<int, int> _remoteCommanded = new();
         internal static void Reset() => _remoteCommanded.Clear();
 
+        /// <summary>A custom (slider) speed matches no telegraph, so record a value no
+        /// telegraph can equal - the sub's own logic is then locked out of the speed
+        /// entirely, exactly as it is once the remote player commands a preset.</summary>
+        internal static void NoteRemoteCustomSpeed(Submarine s)
+        {
+            if (Suppression.HostSuppressesRemoteTfAi(s))
+                _remoteCommanded[s.UniqueID] = int.MinValue;
+        }
+
         static PlayerOrderMessage Msg(Submarine s, int telegraph) => new PlayerOrderMessage
         {
             SourceEntityId = s.UniqueID,
@@ -1032,6 +1041,17 @@ namespace SeapowerMultiplayer
             _lockTime.Clear();
         }
 
+        /// <summary>Register a depth commanded outside setDepth (the depth slider writes
+        /// DesiredAltitude directly). Without this the lock holds a stale value: internal
+        /// reverts are no longer suppressed, and a later preset that happens to match the
+        /// stale entry is treated as "already applied" and never sent.
+        /// <paramref name="depth"/> is positive-down Unity units, i.e. -DesiredAltitude.</summary>
+        internal static void NoteCommandedDepth(Submarine s, float depth)
+        {
+            _lockedDepth[s.UniqueID] = depth;
+            _lockTime[s.UniqueID] = Time.unscaledTime;
+        }
+
         static bool Prefix(Submarine __instance, float depth, out bool __state)
         {
             __state = false; // Postfix broadcast flag
@@ -1326,6 +1346,9 @@ namespace SeapowerMultiplayer
                 // game to one per 0.5 s. Value-dedup would suppress a repeat of an
                 // angle the other side's autopilot has since moved off.
                 case OrderType.SetRudder:
+                // A depth/altitude slider commit is one deliberate player action, never
+                // a per-frame call - and it has no shared cache slot to keep current.
+                case OrderType.SetHeightCustom:
                     return true;
             }
 
@@ -1367,15 +1390,22 @@ namespace SeapowerMultiplayer
                 OrderType.SensorToggle => (int)msg.Heading, // sensor group
                 _ => 0,
             };
-            return (msg.SourceEntityId, msg.Order, subKey);
+            // Preset and custom speed are the same setting reached two ways, so they
+            // share one cache slot: switching between them always looks like a change
+            // (the fingerprints differ in V3), while a true repeat is still suppressed.
+            // On separate slots, re-picking the preset that was active before a custom
+            // detour would fingerprint-match its own stale entry and never be sent.
+            var order = msg.Order == OrderType.SetSpeedCustom ? OrderType.SetSpeed : msg.Order;
+            return (msg.SourceEntityId, order, subKey);
         }
 
         private static Fingerprint MakeFingerprint(PlayerOrderMessage msg) => msg.Order switch
         {
-            OrderType.EditWaypoint => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
-            OrderType.MoveTo       => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
-            OrderType.SensorToggle => new Fingerprint { V1 = msg.Speed },
-            _                      => new Fingerprint { V1 = msg.Speed, V2 = msg.Heading },
+            OrderType.EditWaypoint   => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
+            OrderType.MoveTo         => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
+            OrderType.SensorToggle   => new Fingerprint { V1 = msg.Speed },
+            OrderType.SetSpeedCustom => new Fingerprint { V1 = msg.Speed, V3 = 1f },
+            _                        => new Fingerprint { V1 = msg.Speed, V2 = msg.Heading },
         };
     }
 
@@ -2077,6 +2107,121 @@ namespace SeapowerMultiplayer
             };
 
             return OrderSyncHelper.Prefix(ac, msg);
+        }
+    }
+
+    // ── Custom speed / depth / altitude (slider + typed entry) ──────────────
+    //
+    // The player can command an arbitrary speed, depth or altitude instead of a
+    // preset. Every one of those commits bypasses the methods the preset patches
+    // hook: speed goes straight to SetSpeedCommand(new ConstantSpeed/ConstantMach)
+    // rather than setTelegraph, and depth/altitude write DesiredAltitude directly
+    // rather than going through setDepth/setPresetHeight. Nothing reached the wire.
+    //
+    // All five commit sites are ISliderValueEntry.CommitSliderValue() on internal
+    // SeapowerUI.ViewModels types, so they are resolved by name and share one
+    // postfix - the commit has already applied locally, we read the result off the
+    // unit and forward it. Patching the commit (rather than SetSpeedCommand or the
+    // DesiredAltitude property) keeps this to the player's own deliberate action:
+    // AI and autopilot drive the same engine calls every tick.
+
+    [HarmonyPatch]
+    public static class Patch_SliderEntry_Commit
+    {
+        private const string Ns = "SeapowerUI.ViewModels.";
+
+        // Speed view models; ObjectAirVehicleVelocity's subclasses inherit its commit.
+        private static readonly string[] SpeedViewModels =
+        {
+            "ObjectVesselVelocityViewModel",
+            "ObjectSubmarineVelocityViewModel",
+            "ObjectAirVehicleVelocity",
+        };
+
+        private static readonly string[] HeightViewModels =
+        {
+            "ObjectSubmarineDepthViewModel",
+            "ObjectAirVehicleAltitudeViewModel",
+        };
+
+        // Each view model holds its unit in a differently named private field.
+        private static readonly string[] UnitFields = { "_vessel", "_submarine", "_objectBase", "_airVehicle" };
+
+        private static readonly HashSet<Type> _heightTypes = new();
+        private static readonly Dictionary<Type, FieldInfo?> _unitFieldCache = new();
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (var m in Resolve(SpeedViewModels)) yield return m;
+            foreach (var m in Resolve(HeightViewModels)) { _heightTypes.Add(m.DeclaringType); yield return m; }
+        }
+
+        private static IEnumerable<MethodBase> Resolve(string[] typeNames)
+        {
+            foreach (var name in typeNames)
+            {
+                var type = AccessTools.TypeByName(Ns + name);
+                var method = type == null ? null : AccessTools.Method(type, "CommitSliderValue");
+                if (method != null) yield return method;
+                else Plugin.Log.LogWarning($"[Patch] slider commit not found: {Ns}{name} - custom values will not sync for it");
+            }
+        }
+
+        private static ObjectBase? ResolveUnit(object vm)
+        {
+            var type = vm.GetType();
+            if (!_unitFieldCache.TryGetValue(type, out var field))
+            {
+                foreach (var name in UnitFields)
+                {
+                    field = AccessTools.Field(type, name);
+                    if (field != null) break;
+                }
+                _unitFieldCache[type] = field;
+            }
+            return field?.GetValue(vm) as ObjectBase;
+        }
+
+        static void Postfix(object __instance, MethodBase __originalMethod)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            var unit = ResolveUnit(__instance);
+            if (unit == null || unit.UniqueID == 0) return;
+
+            PlayerOrderMessage msg;
+            if (_heightTypes.Contains(__originalMethod.DeclaringType))
+            {
+                msg = new PlayerOrderMessage
+                {
+                    SourceEntityId = unit.UniqueID,
+                    Order          = OrderType.SetHeightCustom,
+                    Speed          = unit.DesiredAltitude.Value,
+                };
+            }
+            else
+            {
+                float knots = StateSerializer.CustomCommandKnots(unit);
+                if (float.IsNaN(knots)) return; // commit did not take - nothing to send
+                msg = new PlayerOrderMessage
+                {
+                    SourceEntityId = unit.UniqueID,
+                    Order          = OrderType.SetSpeedCustom,
+                    Speed          = knots,
+                };
+            }
+
+            // A false verdict means this unit does not take local commands (host-driven
+            // replica, or ally-locked) - so don't record the depth either, or the lock
+            // would hold a value the unit never took.
+            if (!OrderSyncHelper.Prefix(unit, msg)) return;
+
+            if (msg.Order == OrderType.SetHeightCustom && unit is Submarine sub)
+                Patch_Submarine_SetDepth.NoteCommandedDepth(sub, -msg.Speed);
+
+            OrderSyncHelper.Postfix(unit, msg);
         }
     }
 

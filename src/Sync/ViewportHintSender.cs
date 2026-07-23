@@ -1,5 +1,6 @@
 using SeaPower;
 using SeapowerMultiplayer.Messages;
+using SeapowerMultiplayer.Net2;
 using UnityEngine;
 
 namespace SeapowerMultiplayer
@@ -13,12 +14,9 @@ namespace SeapowerMultiplayer
     {
         private const float SendIntervalSec = 0.5f;
 
-        // The world's axes are not the same scale: horizontal is ~67 m per Unity unit
-        // (see UnitReplicaDriver.UnityPerKnotSecond) while transform.y is raw metres,
-        // so camera height has to be converted before it can be used as a horizontal
-        // radius. Getting this wrong pins the radius at its ceiling and quietly makes
-        // every unit "near".
-        private const float MetresPerUnityUnit = 67.2f;
+        // Camera height is metres but the radius is horizontal Unity units, so it has
+        // to be converted (see GeoCodec.MetresPerUnityUnit). Getting this wrong pins
+        // the radius at its ceiling and quietly makes every unit "near".
 
         // The camera sits above what it looks at, so its height is a fair proxy for how
         // much world is on screen. Slightly wider than the strict frustum, so a unit is
@@ -50,7 +48,7 @@ namespace SeapowerMultiplayer
                 LonDeg      = geo._longitude,
                 LatDeg      = geo._latitude,
                 RadiusUnity = Mathf.Clamp(
-                    cam.getCameraHeight() / MetresPerUnityUnit * ViewFactor,
+                    cam.getCameraHeight() / GeoCodec.MetresPerUnityUnit * ViewFactor,
                     MinRadiusUnity, MaxRadiusUnity),
             }, LiteNetLib.DeliveryMethod.Unreliable);
         }

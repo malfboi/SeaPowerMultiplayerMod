@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 208; // ViewportHint (client→host) drives near-unit stream rate
+        public const ushort ProtocolVersion = 209; // custom (slider) speed/depth/altitude orders + CmdSpeedQ in the state stream
 
         /// <summary>LiteNetLib connection key - versioned so old/new builds cannot pair.</summary>
         public static string ConnectKey => $"{PluginInfo.PLUGIN_GUID}/p{ProtocolVersion}";

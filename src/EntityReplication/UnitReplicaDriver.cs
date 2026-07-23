@@ -50,16 +50,33 @@ namespace SeapowerMultiplayer
         // their own tiers inline in DriveAircraft.
         private const float ShipSnapThreshold = 75f;
 
+        // Aircraft position tolerance tiers, in UNITY UNITS - transform.y is a Unity
+        // unit like x/z (~67.2 m each), NOT metres. The old bare 50/500 therefore
+        // meant a 3.4 km accept band and a 34 km snap: a wingman could sit ~11,000 ft
+        // off the host's altitude indefinitely and never be corrected (and the drift
+        // figure it reported was measured over units that were never touched).
+        // Horizontal keeps the numbers it was tuned to; vertical is sized in metres.
+        private const float AirAcceptXZ = 50f;
+        private const float AirSnapXZ   = 500f;
+        private const float AirAcceptY  = 30f  / GeoCodec.MetresPerUnityUnit;   // ~100 ft
+        private const float AirSnapY    = 600f / GeoCodec.MetresPerUnityUnit;   // ~2000 ft
+
         // Unity units per (knot · game-second) - the game's own conversion
         private const float UnityPerKnotSecond = 0.0076554087f;
 
         // Past this age the sample is guesswork: the local sim (running on the
         // host's mirrored telegraph + rudder) tracks better than a stale target,
         // so stop correcting rather than drag the unit back to where it was.
-        // Kept just above the host's 1.5 s idle heartbeat (HostEntityStreamer)
-        // so an unchanged unit never falls into an uncorrected window and then
-        // gets swept back when its heartbeat finally lands.
-        private const float MaxSampleAgeRealSec = 1.6f;
+        //
+        // This is bounded by the host's idle heartbeat, not by anything local: a
+        // unit whose quantized state is unchanged (a ship at anchor or holding a
+        // slow steady course) only appears in the stream that often. Sized to
+        // survive one LOST heartbeat plus transit and jitter - at merely
+        // heartbeat + epsilon, a single dropped packet on a high-ping link drops
+        // every slow ship out of correction entirely, and because the drift stats
+        // are then measured over nothing the overlay reports a reassuring 0.0.
+        private static float MaxSampleAgeRealSec =>
+            HostEntityStreamer.HeartbeatInterval * 2f + 0.5f;
 
         // Ceiling on dead reckoning, in REAL seconds - converted to game-seconds
         // against the current compression. A stalled stream, a clock disagreement
@@ -269,6 +286,11 @@ namespace SeapowerMultiplayer
                     // Reordered or duplicate stamp: drop it, the buffer must stay ordered.
                     if (dtSec <= 0f) continue;
 
+                    // Grade the motion model against ground truth BEFORE anything from
+                    // this sample is folded in - in particular before the turn rate is
+                    // updated, or the new heading would leak into its own prediction.
+                    RecordPredictionError(s, hostSec, in e);
+
                     // Over a long gap the previous rate says nothing about now, and
                     // carrying it forward would swing the unit off its track.
                     s.TurnRateDegSec = dtSec < 5f
@@ -295,6 +317,65 @@ namespace SeapowerMultiplayer
                 s.RecordRealTime = Time.unscaledTime;
                 s.WarnedFarDrift = false;
             }
+        }
+
+        // ── Prediction error ─────────────────────────────────────────────────
+        // How wrong the motion model was, graded against ground truth each time a
+        // fresh host sample lands. This is deliberately NOT the drift figure: drift
+        // is the controller residual (distance to the target the driver just
+        // computed) and the per-frame correction drives it to near-zero whatever the
+        // state rate, so it says nothing about replication accuracy. This does - it
+        // is the error the correction is there to hide, and it is what climbs when
+        // the stream rate is lowered.
+        //
+        // Horizontal only, so it stays a real distance: y is metres while x/z are
+        // ~67 m units, and mixing them (as the air drift figure does) yields a
+        // number that is not a length at all.
+        private const float PredictErrWindowSec = 5f;
+
+        private static float _predErrShipSum, _predErrShipMax;
+        private static float _predErrAirSum,  _predErrAirMax;
+        private static int   _predErrShipN,   _predErrAirN;
+        private static float _predErrWindowEnd;
+
+        private static void RecordPredictionError(Sample s, float hostSec, in EntityState e)
+        {
+            Pose predicted = ResolvePose(s, hostSec);
+
+            Vector2 actual = Utils.longLatToLocal(
+                new GeoPosition(e.LatDeg, e.LonDeg, e.HeightM), Globals._currentCenterTile);
+            float dx = actual.x - predicted.Position.x;
+            float dz = actual.y - predicted.Position.z;
+            float err = Mathf.Sqrt(dx * dx + dz * dz);
+
+            if (e.Kind == UnitType.Aircraft || e.Kind == UnitType.Helicopter)
+            {
+                _predErrAirSum += err;
+                if (err > _predErrAirMax) _predErrAirMax = err;
+                _predErrAirN++;
+            }
+            else
+            {
+                _predErrShipSum += err;
+                if (err > _predErrShipMax) _predErrShipMax = err;
+                _predErrShipN++;
+            }
+
+            // Publish per window, so avg and max describe the same interval and the
+            // max reflects recent behaviour rather than the worst spike since the
+            // session began (usually the first sample after a join, which is
+            // meaningless). n is the sample count over that window, not a unit count.
+            float now = Time.unscaledTime;
+            if (now < _predErrWindowEnd) return;
+
+            _predErrWindowEnd = now + PredictErrWindowSec;
+            StateApplier.ReportPredictionError(
+                _predErrShipN > 0 ? _predErrShipSum / _predErrShipN : 0f, _predErrShipMax, _predErrShipN,
+                _predErrAirN  > 0 ? _predErrAirSum  / _predErrAirN  : 0f, _predErrAirMax,  _predErrAirN);
+
+            _predErrShipSum = _predErrShipMax = 0f;
+            _predErrAirSum  = _predErrAirMax  = 0f;
+            _predErrShipN   = _predErrAirN    = 0;
         }
 
         /// <summary>
@@ -491,8 +572,8 @@ namespace SeapowerMultiplayer
             }
 
             StateApplier.ReportDrift(
-                shipCount > 0 ? shipDriftSum / shipCount : 0f, shipDriftMax,
-                airCount  > 0 ? airDriftSum  / airCount  : 0f, airDriftMax);
+                shipCount > 0 ? shipDriftSum / shipCount : 0f, shipDriftMax, shipCount,
+                airCount  > 0 ? airDriftSum  / airCount  : 0f, airDriftMax,  airCount);
         }
 
         /// <summary>
@@ -549,33 +630,33 @@ namespace SeapowerMultiplayer
             Vector3 target = pose.Position;   // y carries the streamed height directly
             bool isOnDeck = target.y < 2.0f;
 
-            float kPos;
+            float kXZ, kY;
             if (isOnDeck)
             {
-                kPos = Ease(AirNearSharpness, dt);
+                kXZ = kY = Ease(AirNearSharpness, dt);
             }
             else
             {
                 float yDrift  = Mathf.Abs(pos.y - target.y);
                 float xzDrift = Vector2.Distance(new Vector2(pos.x, pos.z), new Vector2(target.x, target.z));
 
-                if (yDrift < 50f && xzDrift < 50f)
+                // Horizontal keeps its tuned band. Vertical gets its own, and is
+                // corrected independently: altitude is commanded precisely and moves
+                // slowly, so it needs a real tolerance - but tightening it must not
+                // drag the horizontal axes into constant correction with it.
+                kXZ = xzDrift < AirAcceptXZ ? 0f
+                    : xzDrift < AirSnapXZ   ? Ease(AirFarSharpness, dt)
+                    : 1f;
+                kY  = yDrift < AirAcceptY ? 0f
+                    : yDrift < AirSnapY   ? Ease(AirFarSharpness, dt)
+                    : 1f;
+
+                if ((kXZ >= 1f || kY >= 1f) && !s.WarnedFarDrift)
                 {
-                    kPos = 0f; // accept zone - AFCS chases
-                }
-                else if (yDrift < 500f && xzDrift < 500f)
-                {
-                    kPos = Ease(AirFarSharpness, dt);
-                }
-                else
-                {
-                    kPos = 1f;
-                    if (!s.WarnedFarDrift)
-                    {
-                        s.WarnedFarDrift = true;
-                        Plugin.Log.LogWarning($"[UnitReplica] Aircraft {unit.name} drift " +
-                            $"Y={yDrift:F0} XZ={xzDrift:F0} exceeded 500, force-snapped");
-                    }
+                    s.WarnedFarDrift = true;
+                    Plugin.Log.LogWarning($"[UnitReplica] Aircraft {unit.name} drift " +
+                        $"Y={yDrift * GeoCodec.MetresPerUnityUnit:F0} m " +
+                        $"XZ={xzDrift * GeoCodec.MetresPerUnityUnit:F0} m, force-snapped");
                 }
             }
 
@@ -584,7 +665,11 @@ namespace SeapowerMultiplayer
             if (drift > driftMax) driftMax = drift;
             count++;
 
-            if (kPos > 0f) tr.position = Vector3.Lerp(pos, target, kPos);
+            if (kXZ > 0f || kY > 0f)
+                tr.position = new Vector3(
+                    Mathf.Lerp(pos.x, target.x, kXZ),
+                    Mathf.Lerp(pos.y, target.y, kY),
+                    Mathf.Lerp(pos.z, target.z, kXZ));
 
             float kAng = Ease(AirAttitudeSharpness, dt);
             var eul = tr.eulerAngles;
@@ -602,14 +687,34 @@ namespace SeapowerMultiplayer
         /// <summary>Mirror the host's command-state so local sim targets it between corrections.</summary>
         private static void ApplyCommandState(ObjectBase unit, in EntityState e)
         {
-            // Telegraph (vessels + subs) - only when changed; suppress patch re-send
-            if ((e.Kind == UnitType.Vessel || e.Kind == UnitType.Submarine)
-                && unit.getTelegraph() != e.Telegraph)
+            // Speed command - only when changed; suppress patch re-send.
+            // A slider/typed speed is not a telegraph, so it comes down its own
+            // field and must not be reduced back to the (stale) preset.
+            if ((e.Flags & EntityState.FlagCustomSpeed) != 0)
             {
-                bool prev = OrderHandler.ApplyingFromNetwork;
-                OrderHandler.ApplyingFromNetwork = true;
-                try { unit.setTelegraph(e.Telegraph); }
-                finally { OrderHandler.ApplyingFromNetwork = prev; }
+                float kts = e.CmdSpeedQ / 10f;
+                float cur = StateSerializer.CustomCommandKnots(unit);
+                if (float.IsNaN(cur) || Mathf.Abs(cur - kts) > 0.5f)
+                {
+                    bool prev = OrderHandler.ApplyingFromNetwork;
+                    OrderHandler.ApplyingFromNetwork = true;
+                    try { StateSerializer.ApplyCustomSpeed(unit, kts); }
+                    finally { OrderHandler.ApplyingFromNetwork = prev; }
+                }
+            }
+            else if (e.Kind == UnitType.Vessel || e.Kind == UnitType.Submarine)
+            {
+                // Re-assert the telegraph when the value differs OR when we are still
+                // holding a custom command the host has since dropped - _telegraph does
+                // not move while a custom speed is set, so it alone can read "in sync".
+                if (unit.getTelegraph() != e.Telegraph
+                    || !float.IsNaN(StateSerializer.CustomCommandKnots(unit)))
+                {
+                    bool prev = OrderHandler.ApplyingFromNetwork;
+                    OrderHandler.ApplyingFromNetwork = true;
+                    try { unit.setTelegraph(e.Telegraph); }
+                    finally { OrderHandler.ApplyingFromNetwork = prev; }
+                }
             }
 
             // Rudder steering target (vessels) - direct field write, no patches fire
@@ -660,6 +765,10 @@ namespace SeapowerMultiplayer
             _emaTransitGameSec = 0f;
             _emaTransitDevGameSec = 0f;
             _lastBatchHostSec = -1f;
+            _predErrShipSum = _predErrShipMax = 0f;
+            _predErrAirSum  = _predErrAirMax  = 0f;
+            _predErrShipN   = _predErrAirN    = 0;
+            _predErrWindowEnd = 0f;
         }
     }
 }

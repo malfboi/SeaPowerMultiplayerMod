@@ -16,6 +16,15 @@ namespace SeapowerMultiplayer.Net2
     {
         public const double LatLonScale = 1e7;
 
+        /// <summary>
+        /// Horizontal world scale. Derived from the game's own knots-to-Unity constant:
+        /// one knot-second is 0.514444 m and 0.0076554087 Unity units, so a unit is
+        /// ~67.2 m. (Utils.longLatToLocal agrees - it maps 0.2 deg of latitude onto
+        /// 330.71396 units.) Note this applies to X/Z only: transform.y is raw metres,
+        /// so the axes are NOT the same scale and must never be mixed in one distance.
+        /// </summary>
+        public const float MetresPerUnityUnit = 67.2f;
+
         public static int PackLatLon(double degrees) => (int)Math.Round(degrees * LatLonScale);
         public static double UnpackLatLon(int fixedPoint) => fixedPoint / LatLonScale;
 

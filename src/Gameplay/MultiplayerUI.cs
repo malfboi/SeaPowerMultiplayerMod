@@ -1052,14 +1052,43 @@ namespace SeapowerMultiplayer
                         GUILayout.Label($"  Land: {_ownLand + _enemyLand}", _labelStyle);
                 }
 
-                // Per-category position drift
-                var shipDriftStyle = StateApplier.ShipDriftMax > 100f ? _warningStyle
-                    : StateApplier.ShipDriftAvg > 20f ? _elevatedStyle : _dimLabelStyle;
-                GUILayout.Label($"  Ship drift: {StateApplier.ShipDriftAvg:F1} avg / {StateApplier.ShipDriftMax:F1} max", shipDriftStyle);
+                // Per-category position drift. The n= count matters as much as the
+                // figures: n=0 means nothing was measured (every unit's sample went
+                // stale and is running uncorrected), which otherwise displays as a
+                // healthy-looking 0.0.
+                // Shown in metres: the raw figures are horizontal Unity units (~67 m
+                // each), so one decimal place hid everything under 3 m as "0.0".
+                // Thresholds still compare the raw values.
+                const float M = SeapowerMultiplayer.Net2.GeoCodec.MetresPerUnityUnit;
 
-                var airDriftStyle = StateApplier.AirDriftMax > 200f ? _warningStyle
+                bool shipsUnmeasured = StateApplier.ShipDriftCount == 0
+                                       && _ownVessels + _enemyVessels + _ownSubs + _enemySubs > 0;
+                var shipDriftStyle = shipsUnmeasured ? _warningStyle
+                    : StateApplier.ShipDriftMax > 100f ? _warningStyle
+                    : StateApplier.ShipDriftAvg > 20f ? _elevatedStyle : _dimLabelStyle;
+                GUILayout.Label($"  Ship drift: {StateApplier.ShipDriftAvg * M:F0} m avg / " +
+                                $"{StateApplier.ShipDriftMax * M:F0} m max  (n={StateApplier.ShipDriftCount})",
+                                shipDriftStyle);
+
+                bool airUnmeasured = StateApplier.AirDriftCount == 0
+                                     && _ownAir + _enemyAir > 0;
+                var airDriftStyle = airUnmeasured ? _warningStyle
+                    : StateApplier.AirDriftMax > 200f ? _warningStyle
                     : StateApplier.AirDriftAvg > 40f ? _elevatedStyle : _dimLabelStyle;
-                GUILayout.Label($"  Air drift:  {StateApplier.AirDriftAvg:F1} avg / {StateApplier.AirDriftMax:F1} max", airDriftStyle);
+                // Left unscaled: the air figure sums metres (y) and Unity units (xz),
+                // so it is not a length and converting it would only look authoritative.
+                GUILayout.Label($"  Air drift:  {StateApplier.AirDriftAvg:F1} avg / {StateApplier.AirDriftMax:F1} max" +
+                                $"  (n={StateApplier.AirDriftCount}, mixed units)", airDriftStyle);
+
+                // Prediction error - how wrong the motion model was at the moment a
+                // fresh host sample landed. This is the figure that responds to stream
+                // rate; drift does not. Uncoloured: no calibrated baseline yet.
+                GUILayout.Label($"  Predict err: {StateApplier.ShipPredictErrAvg * M:F0} m avg / " +
+                                $"{StateApplier.ShipPredictErrMax * M:F0} m max  " +
+                                $"(n={StateApplier.ShipPredictErrCount} ships)", _dimLabelStyle);
+                GUILayout.Label($"               {StateApplier.AirPredictErrAvg * M:F0} m avg / " +
+                                $"{StateApplier.AirPredictErrMax * M:F0} m max  " +
+                                $"(n={StateApplier.AirPredictErrCount} air)", _dimLabelStyle);
             }
 
             GUILayout.Space(2);

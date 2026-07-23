@@ -85,6 +85,42 @@ namespace SeapowerMultiplayer
             }
         }
 
+        // ── Custom (slider-entry) speed ─────────────────────────────────────
+        //
+        // Speed is commanded as an ISpeedCommand object: a preset telegraph builds a
+        // TelegraphSpeed (carried on the wire as the Telegraph field), the speed
+        // slider builds a ConstantSpeed (ships/subs) or ConstantMach (aircraft).
+        // Anything that is not a TelegraphSpeed is a custom command and has to ride
+        // its own field, because getTelegraph() does not move when it changes.
+
+        /// <summary>Commanded knots of a custom speed order, or NaN when the unit is
+        /// running a preset telegraph (or has no speed command at all).</summary>
+        public static float CustomCommandKnots(ObjectBase unit)
+        {
+            var cmd = unit?.SpeedCommand?.Value;
+            if (cmd == null || cmd is TelegraphSpeed) return float.NaN;
+            // ConstantSpeed knows its raw commanded knots; ConstantMach reports NaN
+            // there and has to be re-derived from mach at the unit's current height.
+            float kts = cmd.CommandSpeedInKnots;
+            return float.IsNaN(kts) ? cmd.GetDemandedSpeedInKnots(unit) : kts;
+        }
+
+        /// <summary>Apply a custom speed order, mirroring what the slider commit does:
+        /// aircraft hold a mach number (converted at their current height), everything
+        /// else holds knots directly.</summary>
+        public static void ApplyCustomSpeed(ObjectBase unit, float knots)
+        {
+            if (unit is Aircraft ac)
+            {
+                float sos = Atmosphere.SpeedOfSound(ac.getHeightInMeters());
+                ac.SetSpeedCommand(new ConstantMach(sos > 0.01f ? knots / (sos * 1.94384f) : 0f, ac));
+            }
+            else
+            {
+                unit.SetSpeedCommand(new ConstantSpeed(knots, unit));
+            }
+        }
+
         /// <summary>
         /// Find any ObjectBase by UniqueID. Uses SceneCreator's fast dictionary first,
         /// falls back to global search for dynamically spawned objects (missiles, torpedoes)
@@ -121,12 +157,43 @@ namespace SeapowerMultiplayer
         public static float AirDriftAvg { get; private set; }
         public static float AirDriftMax { get; private set; }
 
-        internal static void ReportDrift(float shipAvg, float shipMax, float airAvg, float airMax)
+        // How many units the figures above were actually measured over. Without
+        // this a category with nothing to measure reports 0.0 and is indistinguishable
+        // from perfect tracking - which reads as good news while units are in fact
+        // running uncorrected.
+        public static int ShipDriftCount { get; private set; }
+        public static int AirDriftCount { get; private set; }
+
+        internal static void ReportDrift(float shipAvg, float shipMax, int shipCount,
+                                         float airAvg, float airMax, int airCount)
         {
-            ShipDriftAvg = shipAvg;
-            ShipDriftMax = shipMax;
-            AirDriftAvg  = airAvg;
-            AirDriftMax  = airMax;
+            ShipDriftAvg   = shipAvg;
+            ShipDriftMax   = shipMax;
+            ShipDriftCount = shipCount;
+            AirDriftAvg    = airAvg;
+            AirDriftMax    = airMax;
+            AirDriftCount  = airCount;
+        }
+
+        // ── Prediction error (published by UnitReplicaDriver on sample arrival) ──
+        // Unlike drift, this is not erased by the correction that follows it, so it
+        // is the figure that actually responds to stream rate and motion-model quality.
+        public static float ShipPredictErrAvg { get; private set; }
+        public static float ShipPredictErrMax { get; private set; }
+        public static int   ShipPredictErrCount { get; private set; }
+        public static float AirPredictErrAvg { get; private set; }
+        public static float AirPredictErrMax { get; private set; }
+        public static int   AirPredictErrCount { get; private set; }
+
+        internal static void ReportPredictionError(float shipAvg, float shipMax, int shipCount,
+                                                   float airAvg, float airMax, int airCount)
+        {
+            ShipPredictErrAvg   = shipAvg;
+            ShipPredictErrMax   = shipMax;
+            ShipPredictErrCount = shipCount;
+            AirPredictErrAvg    = airAvg;
+            AirPredictErrMax    = airMax;
+            AirPredictErrCount  = airCount;
         }
 
         internal static void RunAlignmentFromUnitStates(List<UnitState> units)
@@ -231,6 +298,10 @@ namespace SeapowerMultiplayer
         {
             ShipDriftAvg = ShipDriftMax = 0f;
             AirDriftAvg  = AirDriftMax  = 0f;
+            ShipDriftCount = AirDriftCount = 0;
+            ShipPredictErrAvg = ShipPredictErrMax = 0f;
+            AirPredictErrAvg  = AirPredictErrMax  = 0f;
+            ShipPredictErrCount = AirPredictErrCount = 0;
         }
     }
 
@@ -458,6 +529,24 @@ namespace SeapowerMultiplayer
 
                     case Messages.OrderType.SetDepth:
                         if (unit is Submarine sub) sub.setDepth(msg.Speed);
+                        break;
+
+                    // Speed slider / typed entry. Not a telegraph, so it cannot go
+                    // through setTelegraph - it replaces the whole speed command.
+                    case Messages.OrderType.SetSpeedCustom:
+                        StateSerializer.ApplyCustomSpeed(unit, msg.Speed);
+                        if (unit is Submarine spdSub)
+                            Patch_Submarine_SetTelegraph.NoteRemoteCustomSpeed(spdSub);
+                        break;
+
+                    // Depth / altitude slider or typed entry. The game's own commit
+                    // writes DesiredAltitude directly (no setDepth / setPresetHeight),
+                    // so mirror exactly that.
+                    case Messages.OrderType.SetHeightCustom:
+                        unit.DesiredAltitude.Value = msg.Speed;
+                        unit.setPlayerHeightControl(false);
+                        if (unit is Submarine depthSub)
+                            Patch_Submarine_SetDepth.NoteCommandedDepth(depthSub, -msg.Speed);
                         break;
 
                     // Manual rudder (A/D). InputHandler flags the player override

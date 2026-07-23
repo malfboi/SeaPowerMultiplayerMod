@@ -28,8 +28,11 @@ namespace SeapowerMultiplayer
             (ProtocolInfo.MaxStatePacketBytes - EntityStateBatchMessage.HeaderWireSize)
             / EntityStateBatchMessage.EntryWireSize;
 
-        // Idle heartbeat (mirrors v1 ChangeTracker semantics, quantized domain)
-        private const float HeartbeatInterval = 1.5f;
+        // Idle heartbeat (mirrors v1 ChangeTracker semantics, quantized domain).
+        // Internal because the client's sample-staleness window is derived from it -
+        // an unchanged unit appears no more often than this, so anything shorter on
+        // the client silently stops correcting slow-moving units.
+        internal const float HeartbeatInterval = 1.5f;
         private const int   StaggerBuckets    = 15;
 
         // Change thresholds in the QUANTIZED domain
@@ -38,6 +41,7 @@ namespace SeapowerMultiplayer
         private const int HeadingQThreshold = 91;   // ~0.5°
         private const int AngleQThreshold   = 200;  // 2° (pitch/roll, centideg)
         private const int SpeedQThreshold   = 2;    // 0.2 kt
+        private const int CmdSpeedQThreshold = 5;   // 0.5 kt
         private const int RudderQThreshold  = 2;    // 1°
         private const float DesiredAltThreshold = 5f;
         private const int IntegrityThreshold = 2;   // 1%
@@ -287,7 +291,14 @@ namespace SeapowerMultiplayer
 
                 float rudder = unit is Vessel v ? StateSerializer.GetRudderAngle(v) : 0f;
 
+                // A slider/typed speed does not move getTelegraph(), so it needs its
+                // own field - otherwise the client's local sim keeps chasing the
+                // stale preset and fights the position corrections.
+                float cmdKts = StateSerializer.CustomCommandKnots(unit);
+                bool customSpeed = !float.IsNaN(cmdKts);
+
                 byte flags = 0;
+                if (customSpeed) flags |= EntityState.FlagCustomSpeed;
                 if (unit.IsDestroyed) flags |= EntityState.FlagDestroyed;
                 var comps = unit.Compartments;
                 if (comps != null && comps._isSinking) flags |= EntityState.FlagSinking;
@@ -308,6 +319,9 @@ namespace SeapowerMultiplayer
                     Telegraph  = (sbyte)Mathf.Clamp(unit.getTelegraph(), sbyte.MinValue, sbyte.MaxValue),
                     RudderQ    = (sbyte)Mathf.Clamp(Mathf.RoundToInt(rudder * 2f), sbyte.MinValue, sbyte.MaxValue),
                     DesiredAlt = desiredAlt,
+                    CmdSpeedQ  = customSpeed
+                        ? (short)Mathf.Clamp(Mathf.RoundToInt(cmdKts * 10f), short.MinValue, short.MaxValue)
+                        : (short)0,
                     Flags      = flags,
                     Integrity  = (byte)Mathf.Clamp(Mathf.RoundToInt(integrity * 2f), 0, 255),
                 });
@@ -329,6 +343,9 @@ namespace SeapowerMultiplayer
             if (hdgDiff > HeadingQThreshold) return true;
 
             if (Mathf.Abs(a.SpeedQ - b.SpeedQ) > SpeedQThreshold) return true;
+            // Aircraft hold a mach number, so their commanded knots drift with height -
+            // a wider band than SpeedQ keeps that from re-sending every tick.
+            if (Mathf.Abs(a.CmdSpeedQ - b.CmdSpeedQ) > CmdSpeedQThreshold) return true;
             if (Mathf.Abs(a.RudderQ - b.RudderQ) > RudderQThreshold) return true;
             if (Mathf.Abs(a.Integrity - b.Integrity) > IntegrityThreshold) return true;
             if (Mathf.Abs(a.DesiredAlt - b.DesiredAlt) > DesiredAltThreshold) return true;
