@@ -560,6 +560,7 @@ namespace SeapowerMultiplayer
                 Log.LogInfo($"[Session] SimState set to {SimSyncManager.CurrentState}");
                 NetworkManager.Instance.SendToServer(new SessionReadyMessage { IsReady = true });
                 Log.LogInfo("[Session] Sent SessionReady to host — waiting for unpause");
+                ReconnectManager.OnLocalResyncComplete();
             }
             else
             {

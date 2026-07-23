@@ -31,6 +31,10 @@ namespace SeapowerMultiplayer.Transport
         // here would violate the delivery contract - real loss is retransmitted
         // below this layer); latency delays everything uniformly (FIFO, so
         // ReliableOrdered streams keep their order).
+        //
+        // Jitter varies the delay per packet. A constant delay cannot reproduce
+        // the class of bug that arrival-time variance causes, which is exactly
+        // what the replica driver has to survive on a real high-ping link.
         private struct DelayedPacket
         {
             public long ReleaseAtMs;
@@ -40,6 +44,8 @@ namespace SeapowerMultiplayer.Transport
 
         private float _simLossPct;
         private int _simLatencyMs;
+        private int _simJitterMs;
+        private long _lastReleaseAtMs;
         private readonly Queue<DelayedPacket> _delayQueue = new();
         private readonly Random _simRng = new();
         private static readonly Stopwatch _clock = Stopwatch.StartNew();
@@ -59,12 +65,25 @@ namespace SeapowerMultiplayer.Transport
         public void Start(bool asHost)
         {
             _isHost = asHost;
-            _net = new NetManager(this) { AutoRecycle = true, ReuseAddress = true };
+            // DisconnectTimeout defaults to 5s, which a 300ms-RTT link loses to
+            // routinely: one stalled frame plus a burst of reliable traffic is
+            // enough to starve the keepalive. PingInterval is tightened at the same
+            // time so the timeout is measured from frequent, cheap probes rather
+            // than from whatever gameplay traffic happens to be flowing.
+            _net = new NetManager(this)
+            {
+                AutoRecycle = true,
+                ReuseAddress = true,
+                DisconnectTimeout = Plugin.Instance.CfgDisconnectTimeoutSec.Value * 1000,
+                PingInterval = 1000,
+            };
 
             _simLossPct   = Plugin.Instance.CfgNetSimLossPct.Value;
             _simLatencyMs = Plugin.Instance.CfgNetSimLatencyMs.Value;
+            _simJitterMs  = Plugin.Instance.CfgNetSimJitterMs.Value;
             if (_simLossPct > 0f || _simLatencyMs > 0)
-                Log.LogWarning($"[LiteNet] NETWORK SIMULATION ACTIVE: loss={_simLossPct}% latency={_simLatencyMs}ms (testing only)");
+                Log.LogWarning($"[LiteNet] NETWORK SIMULATION ACTIVE: loss={_simLossPct}% " +
+                               $"latency={_simLatencyMs}ms jitter=±{_simJitterMs}ms (testing only)");
 
             if (asHost)
             {
@@ -87,6 +106,7 @@ namespace SeapowerMultiplayer.Transport
             _net?.Stop();
             _serverPeer = null;
             _delayQueue.Clear();
+            _lastReleaseAtMs = 0;
             Log.LogInfo("[LiteNet] Stopped.");
         }
 
@@ -174,9 +194,22 @@ namespace SeapowerMultiplayer.Transport
             {
                 var copy = new byte[length];
                 Buffer.BlockCopy(reader.RawData, reader.Position, copy, 0, length);
+
+                long delay = _simLatencyMs;
+                if (_simJitterMs > 0)
+                    delay += _simRng.Next(-_simJitterMs, _simJitterMs + 1);
+                if (delay < 0) delay = 0;
+
+                // The queue drains FIFO, so a packet must never be scheduled ahead
+                // of one already queued - that would reorder the stream instead of
+                // jittering it, which is a different (and unrealistic) fault.
+                long releaseAt = _clock.ElapsedMilliseconds + delay;
+                if (releaseAt < _lastReleaseAtMs) releaseAt = _lastReleaseAtMs;
+                _lastReleaseAtMs = releaseAt;
+
                 _delayQueue.Enqueue(new DelayedPacket
                 {
-                    ReleaseAtMs = _clock.ElapsedMilliseconds + _simLatencyMs,
+                    ReleaseAtMs = releaseAt,
                     Data = copy,
                     Length = length,
                 });

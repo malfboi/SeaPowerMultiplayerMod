@@ -361,6 +361,10 @@ namespace SeapowerMultiplayer
             // Vote popup is always visible, even when the main panel is hidden
             DrawTimeVotePopup();
 
+            // Same for the disconnect popup - a hidden overlay is exactly how a
+            // dropped player used to keep playing without noticing.
+            DrawConnectionLostPopup();
+
             if (!_visible) return;
 
             float x = Screen.width - PanelWidth - Margin;
@@ -503,6 +507,74 @@ namespace SeapowerMultiplayer
             if (GUILayout.Button("\u2716  Decline", _buttonStyle))
                 TimeSyncManager.DeclineProposal();
             GUILayout.EndHorizontal();
+
+            GUILayout.EndArea();
+        }
+
+        // ── Connection lost popup ────────────────────────────────────────────
+
+        private GUIStyle? _lostBodyStyle;
+
+        /// <summary>
+        /// Centre-screen modal shown for the whole disconnect/reconnect cycle. It
+        /// is deliberately loud and unconditional: the bug this exists for is a
+        /// player who never realised the session had dropped.
+        /// </summary>
+        private void DrawConnectionLostPopup()
+        {
+            if (!ReconnectManager.IsFrozen) return;
+
+            bool isHost = NetworkManager.Instance.IsHost;
+
+            const float popupWidth  = 380f;
+            const float popupHeight = 168f;
+            float px = (Screen.width  - popupWidth)  / 2f;
+            float py = (Screen.height - popupHeight) / 2f;
+
+            GUILayout.BeginArea(new Rect(px, py, popupWidth, popupHeight), _popupBoxStyle);
+
+            _lostBodyStyle ??= new GUIStyle(_dimLabelStyle!) { wordWrap = true };
+
+            GUILayout.Label("⚠  Connection Lost", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Space(6);
+
+            string status = ReconnectManager.State switch
+            {
+                LinkState.Reconnecting => $"Reconnecting…  (attempt {ReconnectManager.Attempts})",
+                LinkState.Resyncing    => "Reconnected — syncing the session…",
+                _ => isHost
+                    ? "Waiting for the other player to reconnect…"
+                    : $"Retrying in {ReconnectManager.RetryCountdown:F0}s",
+            };
+            GUILayout.Label(status, _warningStyle);
+
+            GUILayout.Space(4);
+            GUILayout.Label(
+                "The game is paused for both players and will resume automatically once "
+                + "the session has synced again.",
+                _lostBodyStyle);
+            GUILayout.Space(8);
+
+            // No controls at all during the resync - pressing anything here would
+            // only interrupt the transfer that is already fixing the problem.
+            if (ReconnectManager.State != LinkState.Resyncing)
+            {
+                GUILayout.BeginHorizontal();
+
+                if (!isHost && GUILayout.Button("⟳  Reconnect Now", _buttonStyle))
+                    ReconnectManager.BeginReconnect();
+
+                if (isHost && SteamLobbyManager.InLobby
+                    && GUILayout.Button("✉  Re-invite", _buttonStyle))
+                    SteamLobbyManager.InviteFriend();
+
+                GUILayout.Space(6);
+
+                if (GUILayout.Button(isHost ? "Continue Solo" : "Leave Session", _buttonStyle))
+                    ReconnectManager.AbandonSession();
+
+                GUILayout.EndHorizontal();
+            }
 
             GUILayout.EndArea();
         }

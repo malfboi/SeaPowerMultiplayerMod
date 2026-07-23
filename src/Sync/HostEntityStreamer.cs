@@ -45,6 +45,37 @@ namespace SeapowerMultiplayer
         private uint _serverTick;
         private float _nextMissileSend;
         private float _nextUnitSend;
+        private float _nextNearSend;
+
+        // ── Client viewport (interest management) ────────────────────────────
+        // Only a handful of units are ever on screen, and they are the only ones
+        // whose smoothness the player can judge. Streaming those faster costs very
+        // little. Until a hint arrives every unit is "far", which is exactly the
+        // flat-rate behaviour this had before.
+        private static Vector3 _clientFocus;
+        private static float _clientFocusRadiusSq;
+        private static bool _hasClientFocus;
+
+        public static void OnViewportHint(Messages.ViewportHintMessage msg)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            _clientFocus = msg.ToLocalUnity();
+            _clientFocusRadiusSq = msg.RadiusUnity * msg.RadiusUnity;
+            _hasClientFocus = true;
+        }
+
+        public static void ClearViewportHint() => _hasClientFocus = false;
+
+        /// <summary>Horizontal distance only: y is metres while x/z are ~67 m Unity
+        /// units, so a 3D compare would measure altitude against a horizontal radius
+        /// and never call an airborne unit near.</summary>
+        private static bool IsNearClient(Vector3 worldPos)
+        {
+            if (!_hasClientFocus) return false;
+            float dx = worldPos.x - _clientFocus.x;
+            float dz = worldPos.z - _clientFocus.z;
+            return dx * dx + dz * dz <= _clientFocusRadiusSq;
+        }
 
         private readonly EntityStateBatchMessage _msg = new();
         private readonly List<EntityState> _captured = new(256);
@@ -68,11 +99,14 @@ namespace SeapowerMultiplayer
                 float now = Time.unscaledTime;
                 bool missileTick = now >= _nextMissileSend;
                 bool unitTick    = now >= _nextUnitSend;
-                if (!missileTick && !unitTick) continue;
+                bool nearTick    = now >= _nextNearSend;
+                if (!missileTick && !unitTick && !nearTick) continue;
                 if (missileTick)
                     _nextMissileSend = now + 1f / Mathf.Clamp(Plugin.Instance.CfgMissileStateHz.Value, 1, 60);
                 if (unitTick)
                     _nextUnitSend = now + 1f / Mathf.Clamp(Plugin.Instance.CfgUnitStateHz.Value, 1, 60);
+                if (nearTick)
+                    _nextNearSend = now + 1f / Mathf.Clamp(Plugin.Instance.CfgUnitStateHzNear.Value, 1, 60);
 
                 if (!Plugin.Instance.CfgIsHost.Value) continue;
                 if (!NetworkManager.Instance.IsEstablished) continue;
@@ -81,7 +115,7 @@ namespace SeapowerMultiplayer
 
                 try
                 {
-                    CaptureAndSend(missileTick, unitTick);
+                    CaptureAndSend(missileTick, unitTick, nearTick);
                     EntityCensusManager.HostTick();
                     if (unitTick) FlightDeckStreamer.HostTick();
                 }
@@ -98,25 +132,29 @@ namespace SeapowerMultiplayer
             _nextHeartbeat.Clear();
         }
 
-        private void CaptureAndSend(bool missileTick, bool unitTick)
+        private void CaptureAndSend(bool missileTick, bool unitTick, bool nearTick)
         {
             _serverTick++;
 
             _captured.Clear();
-            if (unitTick)
+            if (unitTick || nearTick)
             {
-                CaptureUnits(UnitType.Vessel,     UnitRegistry.Vessels);
-                CaptureUnits(UnitType.Submarine,  UnitRegistry.Submarines);
-                CaptureUnits(UnitType.Aircraft,   UnitRegistry.AircraftList);
-                CaptureUnits(UnitType.Helicopter, UnitRegistry.Helicopters);
-                CaptureUnits(UnitType.LandUnit,   UnitRegistry.LandUnits);
-                CaptureUnits(UnitType.Torpedo,    UnitRegistry.Torpedoes);
+                // On a near-only tick, skip everything outside the client's view
+                // before doing any per-unit work - the geo conversion is the
+                // expensive part and far units are not due to send yet.
+                bool nearOnly = !unitTick;
+                CaptureUnits(UnitType.Vessel,     UnitRegistry.Vessels,     nearOnly);
+                CaptureUnits(UnitType.Submarine,  UnitRegistry.Submarines,  nearOnly);
+                CaptureUnits(UnitType.Aircraft,   UnitRegistry.AircraftList, nearOnly);
+                CaptureUnits(UnitType.Helicopter, UnitRegistry.Helicopters, nearOnly);
+                CaptureUnits(UnitType.LandUnit,   UnitRegistry.LandUnits,   nearOnly);
+                CaptureUnits(UnitType.Torpedo,    UnitRegistry.Torpedoes,   nearOnly);
             }
             // Missiles/bombs: always-dirty while flying - bypass the heartbeat filter
             if (missileTick)
             {
-                CaptureUnits(UnitType.Missile,    UnitRegistry.Missiles);
-                CaptureUnits(UnitType.Bomb,       UnitRegistry.Bombs);
+                CaptureUnits(UnitType.Missile,    UnitRegistry.Missiles, false);
+                CaptureUnits(UnitType.Bomb,       UnitRegistry.Bombs,    false);
             }
 
             // Deck-phase aircraft ride a carrier-relative channel instead of the
@@ -219,7 +257,7 @@ namespace SeapowerMultiplayer
             }
         }
 
-        private void CaptureUnits<T>(UnitType kind, IReadOnlyList<T> units) where T : ObjectBase
+        private void CaptureUnits<T>(UnitType kind, IReadOnlyList<T> units, bool nearOnly) where T : ObjectBase
         {
             bool weaponKind = kind == UnitType.Missile || kind == UnitType.Torpedo || kind == UnitType.Bomb;
             bool airKind    = kind == UnitType.Aircraft || kind == UnitType.Helicopter;
@@ -227,6 +265,7 @@ namespace SeapowerMultiplayer
             {
                 var unit = units[i];
                 if (unit == null) continue;
+                if (nearOnly && !IsNearClient(unit.transform.position)) continue;
                 // Destroyed weapons leave the stream (Impact/Despawn events own the ending).
                 // Un-launched (mounted/racked) weapons are transform children of their
                 // platform - streaming them world-space rips them off the wing.

@@ -116,13 +116,19 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgVerboseDebug = null!;
         internal ConfigEntry<float> CfgNetSimLossPct = null!;
         internal ConfigEntry<int> CfgNetSimLatencyMs = null!;
+        internal ConfigEntry<int> CfgNetSimJitterMs = null!;
 
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
 
+        // Connection resilience
+        internal ConfigEntry<int> CfgDisconnectTimeoutSec = null!;
+
         // State stream rates (host)
         internal ConfigEntry<int> CfgMissileStateHz = null!;
         internal ConfigEntry<int> CfgUnitStateHz = null!;
+        internal ConfigEntry<bool> CfgReplicaInterpolation = null!;
+        internal ConfigEntry<int> CfgUnitStateHzNear = null!;
 
         private Harmony _harmony = null!;
         private int _sceneReadyFrames;
@@ -140,6 +146,11 @@ namespace SeapowerMultiplayer
             CfgPvP         = Config.Bind("Network", "PvP",          true,        "True = PvP mode (opposing taskforces); False = co-op (shared ally control)");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
+            CfgDisconnectTimeoutSec = Config.Bind("Network", "DisconnectTimeoutSec", 20,
+                "Seconds of silence before the link is declared dead. The stock transport defaults " +
+                "(LiteNetLib 5s, Steam 10s) drop high-latency players during ordinary stalls. " +
+                "A dead link now freezes the session rather than silently splitting it, so a slower " +
+                "verdict costs nothing.");
 
             // Debug
             CfgVerboseDebug = Config.Bind("Debug", "VerboseLogging", false,
@@ -148,6 +159,10 @@ namespace SeapowerMultiplayer
                 "TESTING ONLY: drop this percentage of incoming Unreliable packets (LiteNetLib transport)");
             CfgNetSimLatencyMs = Config.Bind("Debug", "NetSimLatencyMs", 0,
                 "TESTING ONLY: delay all incoming packets by this many milliseconds (LiteNetLib transport)");
+            CfgNetSimJitterMs = Config.Bind("Debug", "NetSimJitterMs", 0,
+                "TESTING ONLY: vary NetSimLatencyMs by ±this many milliseconds per packet. " +
+                "A constant delay cannot reproduce arrival-time variance, which is what " +
+                "high-ping links actually inflict on the replica stream. Needs NetSimLatencyMs > 0.");
 
             // PvP sync tuning
             CfgDamageSyncInterval   = Config.Bind("Sync", "DamageSyncInterval",     2f,   "Seconds between damage state corrections (default 2)");
@@ -155,6 +170,15 @@ namespace SeapowerMultiplayer
             // State stream rates (host → client)
             CfgMissileStateHz = Config.Bind("Sync", "MissileStateHz", 20,
                 "Host missile state stream rate in Hz (1-60, default 20)");
+            CfgUnitStateHzNear = Config.Bind("Sync", "UnitStateHzNear", 25,
+                "Host stream rate in Hz for units inside the client's camera view (1-60, default 25). " +
+                "Only a handful of units are ever on screen, so the extra bandwidth is small and it " +
+                "buys smoothness exactly where the player can see it. Falls back to UnitStateHz for " +
+                "everything else, and for all units until the client reports a viewport.");
+            CfgReplicaInterpolation = Config.Bind("Sync", "ReplicaInterpolation", true,
+                "Client renders remote units slightly in the host's past and interpolates between " +
+                "received states, instead of extrapolating past the newest one. This is what keeps " +
+                "link jitter out of unit motion. Turn off to A/B against pure extrapolation.");
             CfgUnitStateHz    = Config.Bind("Sync", "UnitStateHz",    10,
                 "Host unit/torpedo state stream rate in Hz (1-60, default 10)");
 
@@ -234,9 +258,11 @@ namespace SeapowerMultiplayer
             string? transport = V("SPMP_TRANSPORT");
             string? simLoss   = V("SPMP_NETSIM_LOSS");
             string? simLat    = V("SPMP_NETSIM_LATMS");
+            string? simJitter = V("SPMP_NETSIM_JITTERMS");
 
             if (role == null && hostIp == null && port == null && pvp == null
-                && autoConn == null && transport == null && simLoss == null && simLat == null)
+                && autoConn == null && transport == null && simLoss == null && simLat == null
+                && simJitter == null)
                 return;
 
             Config.SaveOnConfigSet = false; // keep dev overrides out of the shared cfg
@@ -249,10 +275,12 @@ namespace SeapowerMultiplayer
             if (transport != null) CfgTransport.Value   = transport;
             if (simLoss != null && float.TryParse(simLoss, out float l)) CfgNetSimLossPct.Value = l;
             if (simLat != null && int.TryParse(simLat, out int ms))      CfgNetSimLatencyMs.Value = ms;
+            if (simJitter != null && int.TryParse(simJitter, out int j)) CfgNetSimJitterMs.Value = j;
 
             Log.LogWarning($"[Config] SPMP_* env overrides active (role={(CfgIsHost.Value ? "host" : "client")}, " +
                 $"ip={CfgHostIP.Value}, port={CfgPort.Value}, pvp={CfgPvP.Value}, autoConnect={CfgAutoConnect.Value}, " +
-                $"transport={CfgTransport.Value}, simLoss={CfgNetSimLossPct.Value}%, simLat={CfgNetSimLatencyMs.Value}ms). " +
+                $"transport={CfgTransport.Value}, simLoss={CfgNetSimLossPct.Value}%, " +
+                $"simLat={CfgNetSimLatencyMs.Value}ms, simJitter=±{CfgNetSimJitterMs.Value}ms). " +
                 "Config persistence disabled for this run.");
         }
 
@@ -313,6 +341,12 @@ namespace SeapowerMultiplayer
 
             // Check for pending session sync retries (failed sends)
             SessionManager.TickRetry();
+
+            // Hold the sim frozen while a dropped peer is being recovered
+            ReconnectManager.Tick();
+
+            // Tell the host what we're looking at, so it streams those units faster
+            ViewportHintSender.Tick();
 
             // Ctrl+F10: manual hard sync
             if (Input.GetKeyDown(KeyCode.F10) &&

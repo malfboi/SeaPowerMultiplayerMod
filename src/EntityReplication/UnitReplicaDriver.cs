@@ -56,7 +56,28 @@ namespace SeapowerMultiplayer
         // Past this age the sample is guesswork: the local sim (running on the
         // host's mirrored telegraph + rudder) tracks better than a stale target,
         // so stop correcting rather than drag the unit back to where it was.
-        private const float MaxSampleAgeRealSec = 0.75f;
+        // Kept just above the host's 1.5 s idle heartbeat (HostEntityStreamer)
+        // so an unchanged unit never falls into an uncorrected window and then
+        // gets swept back when its heartbeat finally lands.
+        private const float MaxSampleAgeRealSec = 1.6f;
+
+        // Ceiling on dead reckoning, in REAL seconds - converted to game-seconds
+        // against the current compression. A stalled stream, a clock disagreement
+        // or a paused host must never fling a unit across the map.
+        private const float MaxExtrapolationRealSec = 0.6f;
+
+        // Turn rates above this are measurement noise, not a ship manoeuvring.
+        private const float MaxTurnRateDegPerGameSec = 15f;
+
+        // Mission clock wraps at midnight; a jump more negative than this is a
+        // day rollover rather than the client running ahead of the host.
+        private const float DayGameSeconds = 86400f;
+
+        // Render-delay bounds, in REAL seconds (scaled by compression at use).
+        // The floor keeps a LAN from paying for jitter it does not have; the
+        // ceiling stops a pathological link from parking units visibly in the past.
+        private const float MinRenderDelayRealSec = 0.05f;
+        private const float MaxRenderDelayRealSec = 0.5f;
 
         // Compiled setter for Vessel._setRudderAngle (autopilot steering target).
         // SetRudderToHeading writes this field directly, so a method patch can't
@@ -77,20 +98,57 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>Latest host sample for one unit, held until the next packet.</summary>
-        private sealed class Sample
+        private struct Snapshot
         {
-            public ObjectBase Unit = null!;
-            public UnitType Kind;
             public double LonDeg, LatDeg;
             public float HeightM, Heading, Pitch, Roll, Speed;
-            public float RecordGameTime;   // GameTime.time at arrival (pauses with the sim)
-            public float RecordRealTime;   // Time.unscaledTime at arrival
-            public float LatencyGameSec;   // one-way flight time, in game-seconds
+            public float HostMissionSec;   // host's mission clock at capture
+        }
+
+        /// <summary>State the driver resolved for one unit at the render time.</summary>
+        private struct Pose
+        {
+            public Vector3 Position;
+            public float Heading, Pitch, Roll, Speed;
+        }
+
+        private sealed class Sample
+        {
+            public const int Capacity = 4;
+
+            public ObjectBase Unit = null!;
+            public UnitType Kind;
+            public float RecordRealTime;   // Time.unscaledTime at arrival (staleness only)
+            public float TurnRateDegSec;   // derived from consecutive snapshots
+            public bool  HasPrev;
             public bool  WarnedFarDrift;
+
+            public readonly Snapshot[] Buf = new Snapshot[Capacity];
+            public int Count;
+            public int Head = Capacity - 1;  // first Push lands on 0
+
+            /// <summary>0 = newest, 1 = the one before it, ...</summary>
+            public Snapshot At(int back)
+                => Buf[((Head - back) % Capacity + Capacity) % Capacity];
+
+            public void Push(in Snapshot snap)
+            {
+                Head = (Head + 1) % Capacity;
+                Buf[Head] = snap;
+                if (Count < Capacity) Count++;
+            }
         }
 
         private static readonly Dictionary<int, Sample> _samples = new();
         private static readonly List<int> _toRemove = new();
+
+        // ── Link cadence, measured in game-seconds ───────────────────────────
+        // Interval is the host's send cadence (steady). Transit deviation is the
+        // link's arrival jitter - the quantity the render delay has to hide.
+        private static float _emaIntervalGameSec;
+        private static float _emaTransitGameSec;
+        private static float _emaTransitDevGameSec;
+        private static float _lastBatchHostSec = -1f;
 
         // ── Alignment (first batch after scene load re-keys local IDs) ───────
         private static bool _pendingAlignment;
@@ -118,7 +176,12 @@ namespace SeapowerMultiplayer
             // Keep the client's auto-defence switch asserted (cheap re-check)
             Suppression.EnforceDefenseFlag();
 
-            float latencyGame = LatencyGameSeconds();
+            // The host stamps every batch with its own mission clock. Both sides run
+            // the same clock, so (localNow - hostStamp) already contains the packet's
+            // flight time - no RTT term is needed, and the link's jitter therefore
+            // never reaches the extrapolation distance.
+            float hostSec = msg.GameSeconds;
+            TrackCadence(hostSec);
 
             for (int i = 0; i < msg.Entries.Count; i++)
             {
@@ -194,33 +257,187 @@ namespace SeapowerMultiplayer
                     s = new Sample();
                     _samples[e.EntityId] = s;
                 }
+
+                // Turn rate from consecutive snapshots. Heading is quantized to
+                // 0.0055 deg, so the derivative is clean at any real ship's turn
+                // rate and costs nothing on the wire.
+                if (s.HasPrev)
+                {
+                    var prev = s.At(0);
+                    float dtSec = hostSec - prev.HostMissionSec;
+
+                    // Reordered or duplicate stamp: drop it, the buffer must stay ordered.
+                    if (dtSec <= 0f) continue;
+
+                    // Over a long gap the previous rate says nothing about now, and
+                    // carrying it forward would swing the unit off its track.
+                    s.TurnRateDegSec = dtSec < 5f
+                        ? Mathf.Clamp(Mathf.DeltaAngle(prev.Heading, heading) / dtSec,
+                                      -MaxTurnRateDegPerGameSec, MaxTurnRateDegPerGameSec)
+                        : 0f;
+                }
+                s.HasPrev = true;
+
+                s.Push(new Snapshot
+                {
+                    LonDeg         = e.LonDeg,
+                    LatDeg         = e.LatDeg,
+                    HeightM        = e.HeightM,
+                    Heading        = heading,
+                    Pitch          = GeoCodec.UnpackAngleCdeg(e.PitchQ),
+                    Roll           = GeoCodec.UnpackAngleCdeg(e.RollQ),
+                    Speed          = speed,
+                    HostMissionSec = hostSec,
+                });
+
                 s.Unit           = unit;
                 s.Kind           = e.Kind;
-                s.LonDeg         = e.LonDeg;
-                s.LatDeg         = e.LatDeg;
-                s.HeightM        = e.HeightM;
-                s.Heading        = heading;
-                s.Pitch          = GeoCodec.UnpackAngleCdeg(e.PitchQ);
-                s.Roll           = GeoCodec.UnpackAngleCdeg(e.RollQ);
-                s.Speed          = speed;
-                s.RecordGameTime = GameTime.time;
                 s.RecordRealTime = Time.unscaledTime;
-                s.LatencyGameSec = latencyGame;
                 s.WarnedFarDrift = false;
             }
         }
 
         /// <summary>
-        /// One-way network latency expressed in game-seconds - how far the sim
-        /// advanced while the packet was in flight. Scales with time compression
-        /// (at 30x a 60 ms RTT is nearly a game-second of travel) and collapses
-        /// to zero while paused.
+        /// Track the link's cadence on the host's own clock. Send interval is steady;
+        /// the spread of transit times is the jitter the render delay has to cover.
         /// </summary>
-        private static float LatencyGameSeconds()
+        private static void TrackCadence(float hostSec)
         {
-            if (GameTime.IsPaused()) return 0f;
-            float oneWaySec = NetworkManager.Instance.LastRttMs / 2000f;
-            return oneWaySec * GameTime.TimeCompression;
+            const float Alpha = 0.1f;
+
+            // A tick that splits into several packets repeats one stamp - those carry
+            // no cadence information.
+            if (_lastBatchHostSec >= 0f)
+            {
+                float interval = hostSec - _lastBatchHostSec;
+                if (interval > 0f && interval < 5f)
+                    _emaIntervalGameSec = _emaIntervalGameSec <= 0f
+                        ? interval
+                        : Mathf.Lerp(_emaIntervalGameSec, interval, Alpha);
+            }
+            if (hostSec > _lastBatchHostSec) _lastBatchHostSec = hostSec;
+
+            float transit = LocalMissionSeconds() - hostSec;
+            if (transit < 0f || transit > 10f) return; // clock disagreement - ignore
+
+            if (_emaTransitGameSec <= 0f)
+            {
+                _emaTransitGameSec = transit;
+                return;
+            }
+            _emaTransitDevGameSec = Mathf.Lerp(
+                _emaTransitDevGameSec, Mathf.Abs(transit - _emaTransitGameSec), Alpha);
+            _emaTransitGameSec = Mathf.Lerp(_emaTransitGameSec, transit, Alpha);
+        }
+
+        /// <summary>
+        /// How far behind the local clock to render remote units, in game-seconds.
+        /// Sized to span two send intervals plus the measured jitter, so a bracketing
+        /// pair of snapshots is normally already in hand and the driver interpolates
+        /// instead of extrapolating. Zero disables interpolation entirely.
+        /// </summary>
+        private static float RenderDelayGameSec()
+        {
+            if (!Plugin.Instance.CfgReplicaInterpolation.Value) return 0f;
+
+            float tc = Mathf.Max(1f, GameTime.TimeCompression);
+            float delay = 2f * _emaIntervalGameSec + 2f * _emaTransitDevGameSec;
+            return Mathf.Clamp(delay, MinRenderDelayRealSec * tc, MaxRenderDelayRealSec * tc);
+        }
+
+        /// <summary>
+        /// The local mission clock, in the same domain the host stamps batches with
+        /// (<see cref="HostEntityStreamer"/> builds it identically). Continuous and
+        /// compression-scaled, and it stops dead while paused - which is exactly
+        /// what dead reckoning needs.
+        /// </summary>
+        private static float LocalMissionSeconds()
+        {
+            var env = Singleton<SeaPower.Environment>.Instance;
+            return env.Hour * 3600f + env.Minutes * 60f + env.Seconds;
+        }
+
+        private static Vector3 ToUnity(in Snapshot snap)
+        {
+            Vector2 flat = Utils.longLatToLocal(
+                new GeoPosition(snap.LatDeg, snap.LonDeg, snap.HeightM), Globals._currentCenterTile);
+            return new Vector3(flat.x, snap.HeightM, flat.y);
+        }
+
+        /// <summary>
+        /// Resolve where the host says this unit was at <paramref name="renderMissionSec"/>.
+        ///
+        /// Between two snapshots this interpolates, which is the whole point: an
+        /// interpolated target cannot carry arrival-time noise, because both ends are
+        /// states the host actually reported. Past the newest snapshot - a slow-updating
+        /// unit, or a loss burst - it falls back to arc extrapolation, clamped.
+        /// </summary>
+        private static Pose ResolvePose(Sample s, float renderMissionSec)
+        {
+            var newest = s.At(0);
+
+            if (s.Count >= 2 && renderMissionSec < newest.HostMissionSec)
+            {
+                for (int back = 0; back < s.Count - 1; back++)
+                {
+                    var newer = s.At(back);
+                    var older = s.At(back + 1);
+                    float span = newer.HostMissionSec - older.HostMissionSec;
+                    if (span <= 0f) continue;
+                    if (renderMissionSec < older.HostMissionSec) continue;
+
+                    float t = Mathf.Clamp01((renderMissionSec - older.HostMissionSec) / span);
+                    return new Pose
+                    {
+                        Position = Vector3.Lerp(ToUnity(older), ToUnity(newer), t),
+                        Heading  = Mathf.LerpAngle(older.Heading, newer.Heading, t),
+                        Pitch    = Mathf.LerpAngle(older.Pitch,   newer.Pitch,   t),
+                        Roll     = Mathf.LerpAngle(older.Roll,    newer.Roll,    t),
+                        Speed    = Mathf.Lerp(older.Speed, newer.Speed, t),
+                    };
+                }
+
+                // Older than everything buffered - hold the oldest rather than
+                // extrapolate backwards into a position the host never reported.
+                var oldest = s.At(s.Count - 1);
+                return new Pose
+                {
+                    Position = ToUnity(oldest),
+                    Heading  = oldest.Heading,
+                    Pitch    = oldest.Pitch,
+                    Roll     = oldest.Roll,
+                    Speed    = oldest.Speed,
+                };
+            }
+
+            // Extrapolate forward from the newest snapshot.
+            float age = renderMissionSec - newest.HostMissionSec;
+            if (age < -DayGameSeconds * 0.5f) age += DayGameSeconds; // midnight rollover
+            if (age < 0f) age = 0f;
+            age = Mathf.Min(age, MaxExtrapolationRealSec * Mathf.Max(1f, GameTime.TimeCompression));
+
+            Vector3 pos = ToUnity(newest);
+
+            // Follow the arc the unit is actually on: a ship mid-turn travels a curve,
+            // and projecting it down the sampled heading throws the target sideways by
+            // more the longer the extrapolation runs. Heading at the midpoint of the
+            // interval is the chord direction.
+            float distance = newest.Speed * UnityPerKnotSecond * age;
+            if (distance != 0f)
+            {
+                float rad = (newest.Heading + s.TurnRateDegSec * age * 0.5f) * Mathf.Deg2Rad;
+                pos.x += Mathf.Sin(rad) * distance;
+                pos.z += Mathf.Cos(rad) * distance;
+            }
+
+            return new Pose
+            {
+                Position = pos,
+                Heading  = newest.Heading + s.TurnRateDegSec * age,
+                Pitch    = newest.Pitch,
+                Roll     = newest.Roll,
+                Speed    = newest.Speed,
+            };
         }
 
         // ── Per-frame drive (called from Plugin.Update on the client) ─────────
@@ -234,8 +451,18 @@ namespace SeapowerMultiplayer
             float dt = Time.unscaledDeltaTime;
             if (dt <= 0f) return;
 
+            // Error accrues per game-second but the ease runs per real-second, so at
+            // high compression a real-time-only rate falls hopelessly behind. Scale
+            // by compression, capped: past ~10x the pull is already effectively
+            // immediate within a frame and more gain only amplifies residual noise.
+            float easeDt = dt * Mathf.Clamp(GameTime.TimeCompression, 1f, 10f);
+
             float realNow = Time.unscaledTime;
-            float gameNow = GameTime.time;
+
+            // Render remote units slightly in the host's past so a bracketing pair of
+            // snapshots is already in hand. This is what converts the link's arrival
+            // jitter from target noise into a fixed, invisible offset.
+            float renderMissionSec = LocalMissionSeconds() - RenderDelayGameSec();
 
             float shipDriftSum = 0f, shipDriftMax = 0f; int shipCount = 0;
             float airDriftSum  = 0f, airDriftMax  = 0f; int airCount  = 0;
@@ -245,24 +472,16 @@ namespace SeapowerMultiplayer
                 var s = kv.Value;
                 var unit = s.Unit;
                 if (unit == null || unit.IsDestroyed) { _toRemove.Add(kv.Key); continue; }
+                if (s.Count == 0) continue;
                 if (realNow - s.RecordRealTime > MaxSampleAgeRealSec) continue;
 
                 var tr = unit.transform;
                 bool isAir = s.Kind == UnitType.Aircraft || s.Kind == UnitType.Helicopter;
 
-                // Dead-reckon the sample to "now" along the host's own heading.
-                // Without this every moving unit is pulled back onto a position
-                // that is (latency + time since the packet) old, once per packet.
-                float ageGame = (gameNow - s.RecordGameTime) + s.LatencyGameSec;
-                Vector2 flat = Utils.longLatToLocal(
-                    new GeoPosition(s.LatDeg, s.LonDeg, s.HeightM), Globals._currentCenterTile);
-                Vector3 target = new Vector3(flat.x, s.HeightM, flat.y);
-                float rad = s.Heading * Mathf.Deg2Rad;
-                target.x += Mathf.Sin(rad) * (s.Speed * UnityPerKnotSecond * ageGame);
-                target.z += Mathf.Cos(rad) * (s.Speed * UnityPerKnotSecond * ageGame);
+                Pose pose = ResolvePose(s, renderMissionSec);
 
-                if (isAir) DriveAircraft(unit, tr, s, target, dt, ref airDriftSum, ref airDriftMax, ref airCount);
-                else       DriveSurface(unit, tr, s, target, dt, ref shipDriftSum, ref shipDriftMax, ref shipCount);
+                if (isAir) DriveAircraft(unit, tr, s, in pose, easeDt, ref airDriftSum, ref airDriftMax, ref airCount);
+                else       DriveSurface(unit, tr, s, in pose, easeDt, ref shipDriftSum, ref shipDriftMax, ref shipCount);
             }
 
             if (_toRemove.Count > 0)
@@ -282,11 +501,11 @@ namespace SeapowerMultiplayer
         /// their own depth physics (chasing the streamed DesiredAltitude), and
         /// pulling y toward the host's instantaneous value fights both.
         /// </summary>
-        private static void DriveSurface(ObjectBase unit, Transform tr, Sample s, Vector3 target,
+        private static void DriveSurface(ObjectBase unit, Transform tr, Sample s, in Pose pose,
             float dt, ref float driftSum, ref float driftMax, ref int count)
         {
             Vector3 pos = tr.position;
-            Vector3 err = target - pos;
+            Vector3 err = pose.Position - pos;
             err.y = 0f;
 
             float drift = err.magnitude;
@@ -299,10 +518,10 @@ namespace SeapowerMultiplayer
 
             if (drift > ShipSnapThreshold)
             {
-                tr.position = new Vector3(target.x, pos.y, target.z);
+                tr.position = new Vector3(pose.Position.x, pos.y, pose.Position.z);
                 tr.eulerAngles = new Vector3(
-                    syncAttitude ? s.Pitch : eul.x, s.Heading, syncAttitude ? s.Roll : eul.z);
-                unit._velocityInKnots = s.Speed;
+                    syncAttitude ? pose.Pitch : eul.x, pose.Heading, syncAttitude ? pose.Roll : eul.z);
+                unit._velocityInKnots = pose.Speed;
                 return;
             }
 
@@ -310,11 +529,11 @@ namespace SeapowerMultiplayer
 
             float kAng = Ease(ShipHeadingSharpness, dt);
             tr.eulerAngles = new Vector3(
-                syncAttitude ? Mathf.LerpAngle(eul.x, s.Pitch, kAng) : eul.x,
-                Mathf.LerpAngle(eul.y, s.Heading, kAng),
-                syncAttitude ? Mathf.LerpAngle(eul.z, s.Roll, kAng) : eul.z);
+                syncAttitude ? Mathf.LerpAngle(eul.x, pose.Pitch, kAng) : eul.x,
+                Mathf.LerpAngle(eul.y, pose.Heading, kAng),
+                syncAttitude ? Mathf.LerpAngle(eul.z, pose.Roll, kAng) : eul.z);
 
-            unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, s.Speed, Ease(ShipSpeedSharpness, dt));
+            unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, pose.Speed, Ease(ShipSpeedSharpness, dt));
         }
 
         /// <summary>
@@ -323,11 +542,12 @@ namespace SeapowerMultiplayer
         /// its own and the transform is left alone; only attitude and speed are
         /// corrected, which is where the airborne jitter came from.
         /// </summary>
-        private static void DriveAircraft(ObjectBase unit, Transform tr, Sample s, Vector3 target,
+        private static void DriveAircraft(ObjectBase unit, Transform tr, Sample s, in Pose pose,
             float dt, ref float driftSum, ref float driftMax, ref int count)
         {
             Vector3 pos = tr.position;
-            bool isOnDeck = s.HeightM < 2.0f;
+            Vector3 target = pose.Position;   // y carries the streamed height directly
+            bool isOnDeck = target.y < 2.0f;
 
             float kPos;
             if (isOnDeck)
@@ -369,11 +589,11 @@ namespace SeapowerMultiplayer
             float kAng = Ease(AirAttitudeSharpness, dt);
             var eul = tr.eulerAngles;
             tr.eulerAngles = new Vector3(
-                Mathf.LerpAngle(eul.x, s.Pitch, kAng),
-                Mathf.LerpAngle(eul.y, s.Heading, kAng),
-                Mathf.LerpAngle(eul.z, s.Roll, kAng));
+                Mathf.LerpAngle(eul.x, pose.Pitch, kAng),
+                Mathf.LerpAngle(eul.y, pose.Heading, kAng),
+                Mathf.LerpAngle(eul.z, pose.Roll, kAng));
 
-            unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, s.Speed, Ease(AirSpeedSharpness, dt));
+            unit._velocityInKnots = Mathf.Lerp(unit._velocityInKnots, pose.Speed, Ease(AirSpeedSharpness, dt));
         }
 
         /// <summary>Frame-rate-independent smoothing fraction for a rate of k per second.</summary>
@@ -436,6 +656,10 @@ namespace SeapowerMultiplayer
             _lastServerTick = 0;
             _samples.Clear();
             _toRemove.Clear();
+            _emaIntervalGameSec = 0f;
+            _emaTransitGameSec = 0f;
+            _emaTransitDevGameSec = 0f;
+            _lastBatchHostSec = -1f;
         }
     }
 }

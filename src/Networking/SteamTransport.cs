@@ -92,6 +92,7 @@ namespace SeapowerMultiplayer.Transport
             _connectionStatusCallback = Callback<SteamNetConnectionStatusChangedCallback_t>.Create(OnConnectionStatusChanged);
 
             ConfigureSendBuffer();
+            ConfigureTimeouts();
 
             if (asHost)
             {
@@ -108,6 +109,38 @@ namespace SeapowerMultiplayer.Transport
             }
 
             _running = true;
+        }
+
+        /// <summary>
+        /// Raise the connected-state timeout before any connection is created.
+        /// Steam declares a connection dead after 10s of silence by default, which
+        /// high-latency players lose to during ordinary stalls. A dead link now
+        /// freezes the session instead of silently splitting it, so waiting longer
+        /// before giving up costs nothing.
+        /// </summary>
+        private void ConfigureTimeouts()
+        {
+            int timeoutMs = Plugin.Instance.CfgDisconnectTimeoutSec.Value * 1000;
+            IntPtr valuePtr = Marshal.AllocHGlobal(sizeof(int));
+            try
+            {
+                Marshal.WriteInt32(valuePtr, timeoutMs);
+                bool ok = SteamNetworkingUtils.SetConfigValue(
+                    ESteamNetworkingConfigValue.k_ESteamNetworkingConfig_TimeoutConnected,
+                    ESteamNetworkingConfigScope.k_ESteamNetworkingConfig_Global,
+                    IntPtr.Zero,
+                    ESteamNetworkingConfigDataType.k_ESteamNetworkingConfig_Int32,
+                    valuePtr);
+
+                if (ok)
+                    Log.LogInfo($"[SteamTransport] TimeoutConnected set to {timeoutMs}ms");
+                else
+                    Log.LogWarning("[SteamTransport] Could not raise TimeoutConnected — high-ping players may drop early");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(valuePtr);
+            }
         }
 
         /// <summary>

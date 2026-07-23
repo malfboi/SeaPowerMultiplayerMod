@@ -281,6 +281,42 @@ namespace SeapowerMultiplayer
             }
         }
 
+        /// <summary>
+        /// Host: resume after a reconnect freeze, at the speed the session was
+        /// already running at. Deliberately bypasses vote mode - this is not a
+        /// player asking to change speed, it is the session returning to where it
+        /// was, and a vote popup here would strand both sides paused.
+        /// </summary>
+        public static void ForceResume(float timeScale)
+        {
+            _applyingFromNetwork = true;
+            try
+            {
+                if (timeScale <= 0f) GameTime.Pause(false);
+                else                 GameTime.SetTimeCompression(timeScale);
+            }
+            finally
+            {
+                _applyingFromNetwork = false;
+            }
+
+            // In normal mode the SetTimeCompression postfix has already broadcast
+            // this; vote mode skips that path, so send it explicitly there.
+            if (!Plugin.Instance.CfgTimeVote.Value) return;
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            NetworkManager.Instance.BroadcastToClients(new GameEventMessage
+            {
+                EventType      = GameEventType.TimeChanged,
+                Param          = timeScale,
+                SourceEntityId = System.BitConverter.ToInt32(
+                    System.BitConverter.GetBytes(Singleton<SeaPower.Environment>.Instance.Hour * 3600f
+                    + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
+                    + Singleton<SeaPower.Environment>.Instance.Seconds), 0),
+            });
+        }
+
         // ── Harmony patches ───────────────────────────────────────────────────
 
         /// <summary>Shared prefix logic: in vote mode, suppress all time changes unless applying from network.</summary>
@@ -292,11 +328,25 @@ namespace SeapowerMultiplayer
             return true;
         }
 
+        /// <summary>
+        /// While a disconnect freeze is active the clock must not restart - not from
+        /// a hotkey, not from the game's own UI. Network-applied changes are exempt:
+        /// the host's resume broadcast is precisely how the freeze is meant to end.
+        /// Pausing is never blocked, only restarting.
+        /// </summary>
+        private static bool BlockedByFreeze()
+        {
+            if (!ReconnectManager.IsFrozen || _applyingFromNetwork) return false;
+            Plugin.Log.LogDebug("[TimeSync] Time change blocked - session frozen pending reconnect");
+            return true;
+        }
+
         [HarmonyPatch(typeof(GameTime), nameof(GameTime.SetTimeCompression))]
         public static class Patch_GameTime_SetTimeCompression
         {
             static bool Prefix(float timeScale)
             {
+                if (BlockedByFreeze()) return false;
                 if (!NetworkManager.Instance.IsConnected) return true;
                 if (_applyingFromNetwork) return true;
                 if (ShouldSuppressForVoteMode())
@@ -334,6 +384,7 @@ namespace SeapowerMultiplayer
         {
             static bool Prefix()
             {
+                if (BlockedByFreeze()) return false;
                 if (!NetworkManager.Instance.IsConnected) return true;
                 if (_applyingFromNetwork) return true;
                 if (ShouldSuppressForVoteMode())
@@ -371,6 +422,7 @@ namespace SeapowerMultiplayer
         {
             static bool Prefix()
             {
+                if (BlockedByFreeze()) return false;
                 if (!NetworkManager.Instance.IsConnected) return true;
                 if (_applyingFromNetwork) return true;
                 if (ShouldSuppressForVoteMode())
@@ -413,6 +465,9 @@ namespace SeapowerMultiplayer
                 bool connected = NetworkManager.Instance.IsConnected;
                 Plugin.Log.LogInfo($"[TimeSync] Pause Prefix: isHost={isHost}, connected={connected}, applyingFromNet={_applyingFromNetwork}");
 
+                // Frozen: the pause is ours, apply it locally rather than asking a
+                // host we may not currently be talking to.
+                if (ReconnectManager.IsFrozen) return true;
                 if (isHost) return true;
                 if (!connected) return true;
                 if (_applyingFromNetwork) return true;
@@ -451,6 +506,7 @@ namespace SeapowerMultiplayer
                 bool connected = NetworkManager.Instance.IsConnected;
                 Plugin.Log.LogInfo($"[TimeSync] StopTimeCompression Prefix: isHost={isHost}, connected={connected}, applyingFromNet={_applyingFromNetwork}");
 
+                if (BlockedByFreeze()) return false;
                 if (isHost) return true;
                 if (!connected) return true;
                 if (_applyingFromNetwork) return true;

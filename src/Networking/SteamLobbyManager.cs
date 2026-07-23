@@ -121,6 +121,7 @@ namespace SeapowerMultiplayer.Transport
 
             // Set lobby metadata
             HostSteamId = SteamUser.GetSteamID();
+            Plugin.Instance.CfgIsHost.Value = true;
             SteamMatchmaking.SetLobbyData(LobbyId, "host_steamid", HostSteamId.ToString());
             SteamMatchmaking.SetLobbyData(LobbyId, "mod_version", PluginInfo.PLUGIN_VERSION);
             SteamMatchmaking.SetLobbyData(LobbyId, "pvp", Plugin.Instance.CfgPvP.Value.ToString());

@@ -31,6 +31,7 @@ namespace SeapowerMultiplayer.Messages
         FlightOpsAnim            = 27,  // host → client: aircraft/carrier animation events (gear, elevators, deflectors, steam)
         WeaponHatchEvent         = 28,  // host → client: VLS/torpedo-tube hatch open/close cosmetics
         FlightDeckState          = 29,  // host → client: per-carrier flight-ops queue + availability (UI mirror)
+        ViewportHint             = 30,  // client → host: where the client is looking (drives near-unit stream rate)
     }
 
     public interface INetMessage

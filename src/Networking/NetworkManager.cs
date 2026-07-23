@@ -95,6 +95,8 @@ namespace SeapowerMultiplayer
         public void Stop()
         {
             if (!_running) return;
+            // Tearing the transport down produces a disconnect event we asked for.
+            ReconnectManager.NotifyIntentionalDisconnect();
             Patch_Vehicle_UpdateAllData_PvP.ClearCache();
             Patch_ObjectBase_HandleEngageTasks.Reset();
             _transport?.Stop();
@@ -247,6 +249,10 @@ namespace SeapowerMultiplayer
             Log.LogInfo("[Net] Peer disconnected");
             _mainThreadQueue.Enqueue(() =>
             {
+                // Captured before the reset below: only a peer that got as far as
+                // Established was in a session worth freezing for.
+                bool wasEstablished = _handshake == HandshakeState.Established;
+
                 _handshake = HandshakeState.Disconnected;
                 _handshakeDeadline = -1f;
                 _refuseDisconnectAt = -1f;
@@ -257,6 +263,8 @@ namespace SeapowerMultiplayer
                 CarrierOpsHandler.Reset();
                 WeaponHatchHandler.Reset();
                 FlightDeckStreamer.Reset();
+                ViewportHintSender.Reset();
+                HostEntityStreamer.ClearViewportHint();
                 SpawnReplicator.Reset();
                 WeaponReplicaDriver.Reset();
                 EntityCensusManager.Reset();
@@ -273,6 +281,10 @@ namespace SeapowerMultiplayer
                 Patch_Compartments_UpdateWantedVelocityInKnots.ClearLogCache();
                 Patch_Vessel_ApplyRudderThrust.ClearLogCache();
                 Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();
+
+                // Last: the resets above have already handed local control back,
+                // so this is what stops the client drifting into a solo game.
+                ReconnectManager.OnPeerLost(wasEstablished);
             });
         }
 
@@ -407,10 +419,21 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.ViewportHint:
+                {
+                    var msg = ViewportHintMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => HostEntityStreamer.OnViewportHint(msg));
+                    break;
+                }
+
                 case MessageType.SessionReady:
                 {
                     var msg = SessionReadyMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => SimSyncManager.OnClientReady());
+                    _mainThreadQueue.Enqueue(() =>
+                    {
+                        SimSyncManager.OnClientReady();
+                        ReconnectManager.OnClientResynced();
+                    });
                     break;
                 }
 
@@ -495,6 +518,7 @@ namespace SeapowerMultiplayer
                 StateRateHz   = 10,
             });
             Log.LogInfo($"[Handshake] Client accepted (plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}). Established.");
+            ReconnectManager.OnPeerEstablished();
         }
 
         private void HandleWelcome(WelcomeMessage msg)
@@ -514,6 +538,7 @@ namespace SeapowerMultiplayer
             SessionParams = msg;
             _handshake = HandshakeState.Established;
             Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz).");
+            ReconnectManager.OnPeerEstablished();
         }
     }
 }

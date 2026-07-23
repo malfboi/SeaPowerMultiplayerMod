@@ -17,7 +17,7 @@
 
         <!-- Header -->
         <TextBlock Grid.Row="0"
-                   Text="v0.3.1 Release Notes"
+                   Text="v0.3.2 Release Notes"
                    Foreground="{StaticResource TextPrimary}"
                    FontSize="18"
                    FontWeight="Bold"
@@ -38,7 +38,7 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,4"
-                           Text="&#x2022; Units and missiles stutter on the client side. Can be smoothed with higher HZ updates but will take more bandwith. 20Hz missiles and 10Hz units works fine."/>
+                           Text="&#x2022; Units and missiles stutter on the client side. Can be smoothed with higher HZ updates but will take more bandwidth. 20Hz missiles and 10Hz units works fine."/>
                 <TextBlock Foreground="{StaticResource TextPrimary}"
                            FontSize="13"
                            TextWrapping="Wrap"
@@ -55,12 +55,13 @@
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Overhauled networking for greater stability and performance. This has moved the networking from a defender authorative model to a host authorative model. "/>
+                           Text="Improved networking to reduce stuttering for the client"/>
                 <TextBlock Foreground="{StaticResource TextSecondary}"
                            FontSize="13"
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
-                           Text="Fixed torpedoes and sonobuoys not syncing."/>                
+                           Text="Added disconnect detection"/>
+                               
                 <!-- Disclaimer -->
                 <Rectangle Height="1"
                            Fill="{StaticResource BorderColor}"
