@@ -47,6 +47,14 @@ namespace SeapowerMultiplayer
         /// <summary>Session parameters received in Welcome (client side only).</summary>
         public WelcomeMessage? SessionParams { get; private set; }
 
+        /// <summary>Set on both sides when a handshake fails on ProtocolVersion.
+        /// The F9 overlay shows a centre-screen prompt telling both players to
+        /// resubscribe on the Steam Workshop. Cleared on dismiss or a successful
+        /// handshake.</summary>
+        public static string? VersionMismatchNotice { get; private set; }
+
+        public static void DismissVersionMismatch() => VersionMismatchNotice = null;
+
         // ── Packet-loss sampling (rolling window for the F9 overlay) ─────────────
 
         private readonly List<(float time, long sent, long lost)> _lossSamples = new();
@@ -550,7 +558,10 @@ namespace SeapowerMultiplayer
 
             string? refusal = null;
             if (msg.ProtocolVersion != ProtocolInfo.ProtocolVersion)
+            {
                 refusal = $"Protocol mismatch: host v{ProtocolInfo.ProtocolVersion}, client v{msg.ProtocolVersion}. Both players need the same mod version.";
+                VersionMismatchNotice = refusal;
+            }
             else if (msg.IsPvP != Plugin.Instance.CfgPvP.Value)
                 refusal = $"Mode mismatch: host is {(Plugin.Instance.CfgPvP.Value ? "PvP" : "co-op")}, client is {(msg.IsPvP ? "PvP" : "co-op")}.";
 
@@ -567,6 +578,7 @@ namespace SeapowerMultiplayer
 
             _handshake = HandshakeState.Established;
             _handshakeDeadline = -1f;
+            VersionMismatchNotice = null;
             BroadcastToClients(new WelcomeMessage
             {
                 Accepted      = true,
@@ -587,6 +599,10 @@ namespace SeapowerMultiplayer
             {
                 Log.LogError($"[Handshake] Host refused connection: {msg.RefusalReason}");
                 Telemetry.Count("handshake.refused");
+                // The host's build generated this string, so the prefix check works
+                // against both older and newer hosts.
+                if (msg.RefusalReason.StartsWith("Protocol mismatch"))
+                    VersionMismatchNotice = msg.RefusalReason;
                 _handshake = HandshakeState.Refused;
                 Stop();
                 return;
@@ -594,6 +610,7 @@ namespace SeapowerMultiplayer
 
             SessionParams = msg;
             _handshake = HandshakeState.Established;
+            VersionMismatchNotice = null;
             Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz).");
             ReconnectManager.OnPeerEstablished();
         }

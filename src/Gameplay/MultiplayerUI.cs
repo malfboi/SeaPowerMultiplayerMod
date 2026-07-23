@@ -370,6 +370,10 @@ namespace SeapowerMultiplayer
             // dropped player used to keep playing without noticing.
             DrawConnectionLostPopup();
 
+            // And the version-mismatch prompt - the refusal used to be log-only,
+            // so neither player learned why the connection failed.
+            DrawVersionMismatchPopup();
+
             if (!_visible) return;
 
             float x = Screen.width - PanelWidth - Margin;
@@ -580,6 +584,85 @@ namespace SeapowerMultiplayer
 
                 GUILayout.EndHorizontal();
             }
+
+            GUILayout.EndArea();
+        }
+
+        // ── Version mismatch popup ───────────────────────────────────────────
+
+        private GUIStyle? _mismatchReasonStyle;
+        private GUIStyle? _mismatchBodyStyle;
+
+        /// <summary>
+        /// Workshop page of this mod, derived from the DLL's install path
+        /// (steamapps/workshop/content/&lt;app&gt;/&lt;fileId&gt;/).
+        /// Null for non-workshop installs (dev builds in StreamingAssets).
+        /// </summary>
+        private static readonly string? WorkshopUrl = ResolveWorkshopUrl();
+
+        private static string? ResolveWorkshopUrl()
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(
+                typeof(MultiplayerUI).Assembly.Location,
+                @"[\\/]workshop[\\/]content[\\/]\d+[\\/](\d+)[\\/]");
+            return m.Success
+                ? "https://steamcommunity.com/sharedfiles/filedetails/?id=" + m.Groups[1].Value
+                : null;
+        }
+
+        private static void OpenWorkshopPage(string url)
+        {
+            try
+            {
+                if (Steamworks.SteamUtils.IsOverlayEnabled())
+                {
+                    Steamworks.SteamFriends.ActivateGameOverlayToWebPage(url);
+                    return;
+                }
+            }
+            catch { /* fall through to the browser */ }
+            Application.OpenURL(url);
+        }
+
+        /// <summary>
+        /// Centre-screen prompt shown on both sides after a handshake failed on
+        /// ProtocolVersion. Steam often lags updating Workshop mods, so the fix
+        /// to offer is resubscribing, not just "update the mod".
+        /// </summary>
+        private void DrawVersionMismatchPopup()
+        {
+            string? notice = NetworkManager.VersionMismatchNotice;
+            if (notice == null) return;
+
+            const float popupWidth  = 420f;
+            const float popupHeight = 230f;
+            float px = (Screen.width  - popupWidth)  / 2f;
+            float py = (Screen.height - popupHeight) / 2f;
+
+            GUILayout.BeginArea(new Rect(px, py, popupWidth, popupHeight), _popupBoxStyle);
+
+            _mismatchReasonStyle ??= new GUIStyle(_warningStyle!)  { wordWrap = true };
+            _mismatchBodyStyle   ??= new GUIStyle(_dimLabelStyle!) { wordWrap = true };
+
+            GUILayout.Label("⚠  Mod Version Mismatch", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Space(6);
+            GUILayout.Label(notice, _mismatchReasonStyle);
+            GUILayout.Space(4);
+            GUILayout.Label(
+                "Steam does not always auto-update Workshop mods. Whichever of you "
+                + "is outdated: unsubscribe from Seapower Multiplayer on the Steam "
+                + "Workshop, resubscribe, then restart the game. If unsure, both "
+                + "players should do it.",
+                _mismatchBodyStyle);
+            GUILayout.Space(8);
+
+            GUILayout.BeginHorizontal();
+            if (WorkshopUrl != null && GUILayout.Button("Open Workshop Page", _buttonStyle))
+                OpenWorkshopPage(WorkshopUrl);
+            GUILayout.Space(6);
+            if (GUILayout.Button("Dismiss", _buttonStyle))
+                NetworkManager.DismissVersionMismatch();
+            GUILayout.EndHorizontal();
 
             GUILayout.EndArea();
         }
