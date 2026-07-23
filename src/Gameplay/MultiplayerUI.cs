@@ -374,6 +374,10 @@ namespace SeapowerMultiplayer
             // so neither player learned why the connection failed.
             DrawVersionMismatchPopup();
 
+            // And the fatal-init popup - a broken Awake used to surface only as
+            // a do-nothing lobby button.
+            DrawFatalErrorPopup();
+
             if (!_visible) return;
 
             float x = Screen.width - PanelWidth - Margin;
@@ -406,6 +410,24 @@ namespace SeapowerMultiplayer
             // If panel is collapsed, only show the header
             if (!_panelExpanded)
             {
+                GUILayout.EndVertical();
+                if (Event.current.type == EventType.Repaint)
+                    _contentHeight = GUILayoutUtility.GetLastRect().height;
+
+                if (needsScroll)
+                    GUILayout.EndScrollView();
+
+                GUILayout.EndArea();
+                return;
+            }
+
+            // A failed init means nothing below can work - show the error
+            // instead of a lobby button that does nothing.
+            if (Plugin.FatalInitError != null)
+            {
+                GUILayout.Space(4);
+                DrawFatalErrorNotice();
+
                 GUILayout.EndVertical();
                 if (Event.current.type == EventType.Repaint)
                     _contentHeight = GUILayoutUtility.GetLastRect().height;

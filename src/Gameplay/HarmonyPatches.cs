@@ -609,7 +609,7 @@ namespace SeapowerMultiplayer
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(AI), "HandleCarrierFunctions");
 
-        static bool Prefix(ObjectBase ___baseObject)
+        static bool Prefix(ObjectBase ____baseObject)
         {
             if (!NetworkManager.Instance.IsConnected) return true;
             if (SessionManager.SceneLoading) return true;
@@ -618,7 +618,7 @@ namespace SeapowerMultiplayer
             if (!Plugin.Instance.CfgIsHost.Value) return false;
             // PvP: vanilla only skips _playerTaskforce, so the host AI would run
             // the remote player's carriers (formations, threat maneuvers, CAP).
-            return !AutoAirOps.IsHumanTaskforce(___baseObject?._taskforce);
+            return !AutoAirOps.IsHumanTaskforce(____baseObject?._taskforce);
         }
     }
 
@@ -628,13 +628,13 @@ namespace SeapowerMultiplayer
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(AI), "LaunchAirstrike");
 
-        static bool Prefix(ObjectBase ___baseObject)
+        static bool Prefix(ObjectBase ____baseObject)
         {
             if (!NetworkManager.Instance.IsConnected) return true;
             // v2 unified host authority: airstrike decisions are host-only.
             if (!Plugin.Instance.CfgIsHost.Value) return false;
             // Human-controlled taskforces plan their own strikes.
-            return !AutoAirOps.IsHumanTaskforce(___baseObject?._taskforce);
+            return !AutoAirOps.IsHumanTaskforce(____baseObject?._taskforce);
         }
     }
 

@@ -24,9 +24,6 @@ namespace SeapowerMultiplayer
         /// <summary>True while the client is loading a scene. Suppresses patches that crash during load.</summary>
         public static bool SceneLoading { get; private set; }
 
-        /// <summary>True after OnSceneReady completes - means we have a live scene that must be unloaded before reloading.</summary>
-        private static bool _inGame;
-
         private static int _pendingRngSeed;
         private static float _pendingGameSeconds;
 
@@ -372,7 +369,16 @@ namespace SeapowerMultiplayer
         /// </summary>
         private static void DoUnloadAndLoad()
         {
-            if (_inGame)
+            // Detect a live scene directly (same signal OnSceneReady waits on)
+            // instead of tracking an MP-side flag: a scenario the player loaded
+            // on their own never went through OnSceneReady, and taking the menu
+            // branch with a scene live destroys TerrainManager mid-mission -
+            // AutogenManager then NREs every LateUpdate on the blank
+            // auto-created replacement (_biomesName is null until init()).
+            bool sceneLive = Singleton<SceneCreator>.InstanceExists(false)
+                          && Singleton<SceneCreator>.Instance.IsLoadingDone;
+
+            if (sceneLive)
             {
                 // Already in-game: use the game's proper unload-then-load path.
                 // DoUnload (99999) tears down terrain/textures, unloads scene 2, and
@@ -385,7 +391,6 @@ namespace SeapowerMultiplayer
                 // WaitForTerrainChunks coroutines eagerly, and destroying the instance
                 // would make those coroutines hang forever.
                 Log.LogInfo("[Session] In-game reload: unloading old scene first");
-                _inGame = false; // will be set true again in OnSceneReady
                 MissionManager.DoLoad(new List<LoadAction>
                 {
                     new LoadAction(99999, "UnloadOldMission", MissionManager.DoUnload(), 1),
@@ -479,7 +484,6 @@ namespace SeapowerMultiplayer
 
             Log.LogInfo("[Session] OnSceneReady — finalizing scene load");
             SceneLoading = false;
-            _inGame = true;
             StateApplier.ResetOrphanTracking();
             Patch_Vehicle_UpdateAllData_PvP.ClearCache();
             OrderDeduplicator.Clear();

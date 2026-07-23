@@ -134,6 +134,12 @@ namespace SeapowerMultiplayer
         private int _sceneReadyFrames;
         private const int SceneSettleFrames = 30; // ~0.5s buffer after IsLoadingDone
 
+        /// <summary>Set when Awake's patch/init sequence throws. Multiplayer is
+        /// dead for the session; the F9 overlay shows this instead of the
+        /// connection controls so the failure is loud rather than a silent
+        /// do-nothing lobby button.</summary>
+        public static string? FatalInitError { get; private set; }
+
         private void Awake()
         {
             Instance = this;
@@ -197,12 +203,24 @@ namespace SeapowerMultiplayer
             gameObject.AddComponent<HostEntityStreamer>();
             gameObject.AddComponent<MultiplayerUI>();
 
-            // Apply Harmony patches
-            _harmony = new Harmony(PluginInfo.PLUGIN_GUID);
-            _harmony.PatchAll();
+            // Apply Harmony patches. One bad patch used to abort Awake silently:
+            // Steam callbacks never registered and the lobby button did nothing.
+            // Fail loud instead - record the error for the F9 overlay and leave
+            // multiplayer disabled (unapplied patches are inert while offline).
+            try
+            {
+                _harmony = new Harmony(PluginInfo.PLUGIN_GUID);
+                _harmony.PatchAll();
 
-            // Initialize Steam lobby callbacks (safe even if transport is LiteNetLib)
-            SteamLobbyManager.Init();
+                // Initialize Steam lobby callbacks (safe even if transport is LiteNetLib)
+                SteamLobbyManager.Init();
+            }
+            catch (Exception ex)
+            {
+                FatalInitError = ex.Message;
+                Log.LogError($"FATAL: mod init failed - multiplayer disabled for this session.\n{ex}");
+                return;
+            }
 
             Log.LogInfo($"SeapowerMultiplayer v{PluginInfo.PLUGIN_VERSION} loaded.");
             Log.LogInfo($"Transport: {CfgTransport.Value}  Mode: {(CfgIsHost.Value ? "HOST" : "CLIENT")}  Port: {CfgPort.Value}");
