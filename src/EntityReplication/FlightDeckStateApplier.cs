@@ -214,6 +214,12 @@ namespace SeapowerMultiplayer
         /// cooldown). Empty state machine and _isRTB set so the client's still-running
         /// FlightDeck.OnFixedUpdate tick and _performingAirOps predicate ignore it -
         /// it exists only for the Flight Ops window.</summary>
+        // FlightDeckTask.CrewSkill does not exist in every game build; assigning it
+        // directly MissingMethodExceptions on builds without it, so the cosmetic
+        // property is set via reflection and skipped when absent.
+        private static readonly System.Reflection.PropertyInfo _crewSkillProp =
+            HarmonyLib.AccessTools.Property(typeof(FlightDeckTask), "CrewSkill");
+
         private static FlightDeckTask BuildActiveDisplayTask(FlightDeck fd, FlightDeckStateMessage.TaskRow t)
         {
             var task = new FlightDeckTask
@@ -222,8 +228,12 @@ namespace SeapowerMultiplayer
                 Info         = t.Info,
                 AircraftType = t.AircraftType,
                 Squadron     = t.SquadronName,
-                CrewSkill    = (ObjectBase.CrewSkill)t.CrewSkill,
             };
+            if (_crewSkillProp != null)
+            {
+                try { _crewSkillProp.SetValue(task, Enum.ToObject(_crewSkillProp.PropertyType, t.CrewSkill), null); }
+                catch { }
+            }
             task._uid = t.Uid;
             task._flightDeck = fd;
             task._isRTB = true;

@@ -561,19 +561,64 @@ namespace SeapowerMultiplayer
 
     // ── Flight deck: host-only pipeline, client launch intents upstream ─────
 
+    /// <summary>In multiplayer, human-controlled taskforces launch aircraft only on
+    /// explicit player orders - all autonomous air ops are suppressed for them.
+    /// Co-op: both players share _playerTaskforce (the enemy stays AI). PvP: the
+    /// "enemy" taskforce is the remote player, not an AI. Weapon self-defence
+    /// (auto SAM/CIWS engagement) is a separate path and stays active.</summary>
+    internal static class AutoAirOps
+    {
+        internal static bool IsHumanTaskforce(Taskforce tf)
+        {
+            if (tf == null) return false;
+            if (tf == Globals._playerTaskforce) return true;
+            return Plugin.Instance.CfgPvP.Value && tf == Globals._enemyTaskforce;
+        }
+    }
+
+    // The game autonomously launches aircraft - formation/taskforce ASW station
+    // keeping, AI CAP/AEW/MPA upkeep, scripted airstrikes, load-time auto-ready -
+    // and ALL of it funnels through ObjectBase.FlightDeckLaunchUnit/-CAP. Player
+    // clicks call FlightDeck.createLaunchTask directly and are unaffected.
+    [HarmonyPatch]
+    public static class Patch_FlightDeck_AutoLaunch_Suppress
+    {
+        // All overloads by name - exact signatures vary between game builds, and a
+        // null target method would abort patching for the whole mod.
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (var m in AccessTools.GetDeclaredMethods(typeof(ObjectBase)))
+                if ((m.Name == nameof(ObjectBase.FlightDeckLaunchUnit)
+                     || m.Name == nameof(ObjectBase.FlightDeckLaunchCAP))
+                    && m.ReturnType == typeof(bool))
+                    yield return m;
+        }
+
+        static bool Prefix(ObjectBase __instance, ref bool __result)
+        {
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (!AutoAirOps.IsHumanTaskforce(__instance._taskforce)) return true;
+            __result = false; // "nothing launched" - callers stop or retry harmlessly
+            return false;
+        }
+    }
+
     [HarmonyPatch]
     public static class Patch_AI_HandleCarrierFunctions
     {
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(AI), "HandleCarrierFunctions");
 
-        static bool Prefix(AI __instance)
+        static bool Prefix(ObjectBase ___baseObject)
         {
             if (!NetworkManager.Instance.IsConnected) return true;
             if (SessionManager.SceneLoading) return true;
             // v2 unified host authority: carrier flight ops run host-only,
             // for ALL carriers in both modes.
-            return Plugin.Instance.CfgIsHost.Value;
+            if (!Plugin.Instance.CfgIsHost.Value) return false;
+            // PvP: vanilla only skips _playerTaskforce, so the host AI would run
+            // the remote player's carriers (formations, threat maneuvers, CAP).
+            return !AutoAirOps.IsHumanTaskforce(___baseObject?._taskforce);
         }
     }
 
@@ -583,15 +628,38 @@ namespace SeapowerMultiplayer
         static MethodBase TargetMethod() =>
             AccessTools.Method(typeof(AI), "LaunchAirstrike");
 
-        static bool Prefix(AI __instance)
+        static bool Prefix(ObjectBase ___baseObject)
         {
             if (!NetworkManager.Instance.IsConnected) return true;
             // v2 unified host authority: airstrike decisions are host-only.
-            return Plugin.Instance.CfgIsHost.Value;
+            if (!Plugin.Instance.CfgIsHost.Value) return false;
+            // Human-controlled taskforces plan their own strikes.
+            return !AutoAirOps.IsHumanTaskforce(___baseObject?._taskforce);
         }
     }
 
     // ── FlightDeck.createLaunchTask: block + sync ───────────────────────────
+
+    // FlightDeckViewModel.Launch/Ready are the only createLaunchTask callers that
+    // represent a player action. Everything else - the AirStrike Launch state,
+    // UnitFormation ASW station keeping, Taskforce/AI CAP helpers, save-load
+    // restore - is automation the host already runs itself, and it RETRIES every
+    // tick when the blocked call returns null, so forwarding those upstream turned
+    // each retry into another real launch on the host (mass aircraft spawns).
+    [HarmonyPatch]
+    public static class Patch_FlightDeckViewModel_PlayerLaunch
+    {
+        public static bool InPlayerLaunch;
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(SeapowerUI.ViewModels.FlightDeckViewModel), "Launch");
+            yield return AccessTools.Method(typeof(SeapowerUI.ViewModels.FlightDeckViewModel), "Ready");
+        }
+
+        static void Prefix() => InPlayerLaunch = true;
+        static void Finalizer() => InPlayerLaunch = false;
+    }
 
     [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.createLaunchTask))]
     public static class Patch_FlightDeck_CreateLaunchTask
@@ -605,6 +673,10 @@ namespace SeapowerMultiplayer
             {
                 if (OrderHandler.ApplyingFromNetwork) return true;
                 if (Plugin.Instance.CfgIsHost.Value) return true;
+
+                // Client: the local deck stays inert either way; only a player click
+                // in the Flight Ops window is forwarded upstream (see above).
+                if (!Patch_FlightDeckViewModel_PlayerLaunch.InPlayerLaunch) return false;
 
                 var v2vessel = __instance._baseObject;
                 if (v2vessel == null || vehicle == null) return false;

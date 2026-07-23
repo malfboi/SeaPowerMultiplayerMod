@@ -118,6 +118,19 @@ namespace SeapowerMultiplayer
         private static FlightDeckStateMessage NewChunk(FlightDeckStateMessage full) =>
             new FlightDeckStateMessage { CarrierId = full.CarrierId, CurrentAmmo = full.CurrentAmmo };
 
+        // FlightDeckTask.CrewSkill does not exist in every game build; a direct call
+        // MissingMethodExceptions the whole streamer tick there (no snapshot ever
+        // sent), so the cosmetic property is read via reflection and degrades to 0.
+        private static readonly System.Reflection.PropertyInfo _crewSkillProp =
+            HarmonyLib.AccessTools.Property(typeof(FlightDeckTask), "CrewSkill");
+
+        private static byte ReadCrewSkill(FlightDeckTask fdt)
+        {
+            if (_crewSkillProp == null) return 0;
+            try { return System.Convert.ToByte(_crewSkillProp.GetValue(fdt, null)); }
+            catch { return 0; }
+        }
+
         private static FlightDeckStateMessage BuildSnapshot(ObjectBase carrier, FlightDeck fd)
         {
             var msg = new FlightDeckStateMessage
@@ -177,7 +190,7 @@ namespace SeapowerMultiplayer
                         Info         = fdt.Info,
                         AircraftType = fdt.AircraftType,
                         SquadronName = fdt.Squadron,
-                        CrewSkill    = (byte)fdt.CrewSkill,
+                        CrewSkill    = ReadCrewSkill(fdt),
                     });
                 }
             }

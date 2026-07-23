@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 211; // FlightDeckState chunked below the MTU floor (big-deck snapshots corrupted when fragmented)
+        public const ushort ProtocolVersion = 212; // client forwards only player-clicked launches upstream (automation retries were mass-spawning aircraft)
 
         /// <summary>LiteNetLib connection key - versioned so old/new builds cannot pair.</summary>
         public static string ConnectKey => $"{PluginInfo.PLUGIN_GUID}/p{ProtocolVersion}";
