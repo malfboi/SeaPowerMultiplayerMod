@@ -7,21 +7,49 @@ namespace SeapowerMultiplayer
 {
     /// <summary>
     /// CLIENT-side flight-ops mirror. The client runs no flight-deck logic of its own
-    /// (its task pump is suppressed - see Patch_V2_FlightDeckTasks_Suppress), so its
+    /// (its task pump and task state machines are suppressed - see
+    /// Patch_V2_FlightDeckTasks_Suppress / Patch_V2_FlightDeckTaskFsm_Suppress), so its
     /// carriers would otherwise show an empty/stale Flight Ops window. This applies the
     /// host's FlightDeckState snapshot: it sets the availability counts + ammo and
-    /// reconciles the carrier's pending-launch queue (the aircraft being readied) to
-    /// match the host, identifying tasks by their stable Guid. The launched aircraft
-    /// themselves still arrive via the normal EntitySpawn path.
+    /// reconciles the carrier's full task queue - interactive pending-launch rows plus
+    /// display-only launch/recovery/cooldown rows - to match the host, identifying
+    /// tasks by their stable Guid and mirroring the host's queue order. The launched
+    /// aircraft themselves still arrive via the normal EntitySpawn path.
     /// </summary>
     public static class FlightDeckStateApplier
     {
         private static readonly HashSet<Guid> _incoming = new();
 
+        // One logical snapshot may arrive as several sub-MTU chunk messages (see
+        // FlightDeckStateMessage doc). ReliableOrdered delivery makes each train
+        // contiguous and in-order per carrier, so accumulation is just: head chunk
+        // starts, later chunks append, last chunk applies the union.
+        private static readonly Dictionary<int, FlightDeckStateMessage> _partial = new();
+
+        public static void Reset() => _partial.Clear();
+
         public static void Apply(FlightDeckStateMessage msg)
         {
             if (Plugin.Instance.CfgIsHost.Value) return;
             if (SimSyncManager.CurrentState != SimState.Synchronized) return;
+
+            if (msg.ChunkCount > 1)
+            {
+                if (msg.ChunkIdx == 0)
+                    _partial[msg.CarrierId] = msg;
+                else if (_partial.TryGetValue(msg.CarrierId, out var acc) && acc.ChunkCount == msg.ChunkCount)
+                {
+                    acc.VehicleNumbers.AddRange(msg.VehicleNumbers);
+                    acc.SquadronNumbers.AddRange(msg.SquadronNumbers);
+                    acc.Tasks.AddRange(msg.Tasks);
+                }
+                else
+                    return; // head chunk was dropped pre-sync - wait for the next full train
+
+                if (msg.ChunkIdx < msg.ChunkCount - 1) return;
+                msg = _partial[msg.CarrierId];
+                _partial.Remove(msg.CarrierId);
+            }
 
             var carrier = ReplicaRegistry.Find(msg.CarrierId) ?? StateSerializer.FindById(msg.CarrierId);
             var fd = carrier?._obp?._flightDeck;
@@ -46,14 +74,15 @@ namespace SeapowerMultiplayer
                     squads[sc.SquadronIdx].Numbers = sc.Numbers;
             }
 
-            // Reconcile the pending-launch queue by Guid.
+            // Reconcile the task queue by Guid - the host is authoritative for every
+            // row, so anything not in the snapshot goes.
             _incoming.Clear();
             for (int i = 0; i < msg.Tasks.Count; i++) _incoming.Add(msg.Tasks[i].Uid);
 
             var tasks = fd.FlightDeckTasks;
             for (int i = tasks.Count - 1; i >= 0; i--)
             {
-                if (tasks[i] is PendingLaunchTask plt && !_incoming.Contains(plt._uid))
+                if (!_incoming.Contains(tasks[i]._uid))
                     tasks.RemoveAt(i);
             }
 
@@ -61,23 +90,48 @@ namespace SeapowerMultiplayer
             {
                 var t = msg.Tasks[i];
                 var existing = FindByUid(tasks, t.Uid);
-                if (existing != null)
+                if (t.IsPending)
                 {
-                    existing.LaunchCount       = t.LaunchCount;
-                    existing.launchAllowed     = t.LaunchAllowed;
-                    existing.FlightDeckTaskLabel = t.Label;
-                    existing.Info              = t.Info;
-                    SyncLaunchCommand(carrier, existing, t.AwaitingLaunch);
+                    if (existing is PendingLaunchTask plt)
+                    {
+                        plt.LaunchCount        = t.LaunchCount;
+                        plt.launchAllowed      = t.LaunchAllowed;
+                        plt.FlightDeckTaskLabel = t.Label;
+                        plt.Info               = t.Info;
+                        SyncLaunchCommand(carrier, plt, t.AwaitingLaunch);
+                    }
+                    else if (existing == null)
+                    {
+                        var task = BuildDisplayTask(fd, vob, t);
+                        if (task != null)
+                        {
+                            tasks.Add(task);
+                            SyncLaunchCommand(carrier, task, t.AwaitingLaunch);
+                        }
+                    }
                 }
                 else
                 {
-                    var task = BuildDisplayTask(fd, vob, t);
-                    if (task != null)
+                    if (existing != null)
                     {
-                        tasks.Add(task);
-                        SyncLaunchCommand(carrier, task, t.AwaitingLaunch);
+                        existing.FlightDeckTaskLabel = t.Label;
+                        existing.Info                = t.Info;
+                    }
+                    else
+                    {
+                        tasks.Add(BuildActiveDisplayTask(fd, t));
                     }
                 }
+            }
+
+            // Mirror the host's queue order (it prioritises / reorders its list).
+            int insert = 0;
+            for (int i = 0; i < msg.Tasks.Count; i++)
+            {
+                int j = IndexOfUid(tasks, msg.Tasks[i].Uid);
+                if (j < 0) continue; // BuildDisplayTask rejected the row
+                if (j != insert) tasks.Move(j, insert);
+                insert++;
             }
         }
 
@@ -113,19 +167,27 @@ namespace SeapowerMultiplayer
                 })));
         }
 
-        private static PendingLaunchTask FindByUid(
+        private static FlightDeckTask FindByUid(
             System.Collections.Generic.IList<FlightDeckTask> tasks, Guid uid)
         {
             for (int i = 0; i < tasks.Count; i++)
-                if (tasks[i] is PendingLaunchTask plt && plt._uid == uid) return plt;
+                if (tasks[i]._uid == uid) return tasks[i];
             return null;
+        }
+
+        private static int IndexOfUid(
+            System.Collections.Generic.IList<FlightDeckTask> tasks, Guid uid)
+        {
+            for (int i = 0; i < tasks.Count; i++)
+                if (tasks[i]._uid == uid) return i;
+            return -1;
         }
 
         /// <summary>Build a display-only PendingLaunchTask the suppressed client deck
         /// never advances. readyUpTime is passed non-NaN so the constructor skips the
         /// AI ready-up estimation path; Label/Info come from the host.</summary>
         private static PendingLaunchTask BuildDisplayTask(FlightDeck fd,
-            System.Collections.Generic.IList<VehicleTypeOnBoard> vob, FlightDeckStateMessage.PendingTask t)
+            System.Collections.Generic.IList<VehicleTypeOnBoard> vob, FlightDeckStateMessage.TaskRow t)
         {
             if (t.VehicleIdx >= vob.Count) return null;
             var vehicle = vob[t.VehicleIdx];
@@ -145,6 +207,27 @@ namespace SeapowerMultiplayer
             task.launchAllowed      = t.LaunchAllowed;
             task.FlightDeckTaskLabel = t.Label;
             task.Info               = t.Info;
+            return task;
+        }
+
+        /// <summary>Inert display row for a non-pending host task (launching / recovery /
+        /// cooldown). Empty state machine and _isRTB set so the client's still-running
+        /// FlightDeck.OnFixedUpdate tick and _performingAirOps predicate ignore it -
+        /// it exists only for the Flight Ops window.</summary>
+        private static FlightDeckTask BuildActiveDisplayTask(FlightDeck fd, FlightDeckStateMessage.TaskRow t)
+        {
+            var task = new FlightDeckTask
+            {
+                FlightDeckTaskLabel = t.Label,
+                Info         = t.Info,
+                AircraftType = t.AircraftType,
+                Squadron     = t.SquadronName,
+                CrewSkill    = (ObjectBase.CrewSkill)t.CrewSkill,
+            };
+            task._uid = t.Uid;
+            task._flightDeck = fd;
+            task._isRTB = true;
+            task._stateMachine = new StateMachine();
             return task;
         }
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using BepInEx.Logging;
 using LiteNetLib;
 using LiteNetLib.Utils;
@@ -45,6 +46,45 @@ namespace SeapowerMultiplayer
 
         /// <summary>Session parameters received in Welcome (client side only).</summary>
         public WelcomeMessage? SessionParams { get; private set; }
+
+        // ── Packet-loss sampling (rolling window for the F9 overlay) ─────────────
+
+        private readonly List<(float time, long sent, long lost)> _lossSamples = new();
+        private float _nextLossSampleAt;
+        private const float LossWindowSec = 10f;
+        private const float LossSampleIntervalSec = 0.5f;
+
+        /// <summary>Send-side packet loss over the last 10 s, in percent.
+        /// -1 when the transport exposes no packet counters (Steam) or no peer
+        /// is connected.</summary>
+        public float PacketLossPct { get; private set; } = -1f;
+
+        private void SamplePacketLoss()
+        {
+            float now = Time.unscaledTime;
+            if (now < _nextLossSampleAt) return;
+            _nextLossSampleAt = now + LossSampleIntervalSec;
+
+            if (_transport == null || !_transport.TryGetPacketStats(out long sent, out long lost))
+            {
+                _lossSamples.Clear();
+                PacketLossPct = -1f;
+                return;
+            }
+
+            // Counters restart with the peer - reset the window instead of going negative.
+            int n = _lossSamples.Count;
+            if (n > 0 && (sent < _lossSamples[n - 1].sent || lost < _lossSamples[n - 1].lost))
+                _lossSamples.Clear();
+
+            _lossSamples.Add((now, sent, lost));
+            while (_lossSamples.Count > 0 && _lossSamples[0].time < now - LossWindowSec)
+                _lossSamples.RemoveAt(0);
+
+            long dSent = sent - _lossSamples[0].sent;
+            long dLost = lost - _lossSamples[0].lost;
+            PacketLossPct = dSent > 0 ? 100f * dLost / dSent : 0f;
+        }
 
         // ── Public API ────────────────────────────────────────────────────────────
 
@@ -115,6 +155,7 @@ namespace SeapowerMultiplayer
             if (!_running) return;
 
             _transport?.Poll();
+            SamplePacketLoss();
 
             // Drain queued main-thread actions
             while (_mainThreadQueue.TryDequeue(out var action))
@@ -263,6 +304,7 @@ namespace SeapowerMultiplayer
                 CarrierOpsHandler.Reset();
                 WeaponHatchHandler.Reset();
                 FlightDeckStreamer.Reset();
+                FlightDeckStateApplier.Reset();
                 ViewportHintSender.Reset();
                 HostEntityStreamer.ClearViewportHint();
                 SpawnReplicator.Reset();
@@ -305,6 +347,21 @@ namespace SeapowerMultiplayer
             if (type != MessageType.PlayerOrder && type != MessageType.DamageState)
                 Log.LogDebug($"[Net] Received {type}");
 
+            // One malformed message must not abort the transport poll loop (an
+            // exception here propagates out of PollEvents and discards the rest of
+            // the frame's event batch, reliable deliveries included). Log and move on.
+            try
+            {
+                Dispatch(type, reader);
+            }
+            catch (System.Exception ex)
+            {
+                Log.LogError($"[Net] Failed to handle {type} (len={length}): {ex}");
+            }
+        }
+
+        private void Dispatch(MessageType type, NetDataReader reader)
+        {
             switch (type)
             {
                 case MessageType.EntityStateBatch:

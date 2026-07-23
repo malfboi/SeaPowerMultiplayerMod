@@ -81,6 +81,15 @@ namespace SeapowerMultiplayer.Transport
         public bool LastSendFailed { get; private set; }
         public string? LastSendError { get; private set; }
 
+        public bool TryGetPacketStats(out long packetsSent, out long packetsLost)
+        {
+            // Steam Networking Sockets exposes a smoothed quality metric, not raw
+            // packet counters - the overlay shows n/a on this transport.
+            packetsSent = 0;
+            packetsLost = 0;
+            return false;
+        }
+
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;
         public event Action? OnPeerDisconnected;

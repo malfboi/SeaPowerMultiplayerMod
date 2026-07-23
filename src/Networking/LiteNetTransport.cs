@@ -58,6 +58,17 @@ namespace SeapowerMultiplayer.Transport
         public bool LastSendFailed => false;
         public string? LastSendError => null;   // LiteNetLib fragments internally
 
+        public bool TryGetPacketStats(out long packetsSent, out long packetsLost)
+        {
+            packetsSent = 0;
+            packetsLost = 0;
+            var peer = _isHost ? _net?.FirstPeer : _serverPeer;
+            if (peer == null) return false;
+            packetsSent = peer.Statistics.PacketsSent;
+            packetsLost = peer.Statistics.PacketLoss;
+            return true;
+        }
+
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;
         public event Action? OnPeerDisconnected;
@@ -76,6 +87,7 @@ namespace SeapowerMultiplayer.Transport
                 ReuseAddress = true,
                 DisconnectTimeout = Plugin.Instance.CfgDisconnectTimeoutSec.Value * 1000,
                 PingInterval = 1000,
+                EnableStatistics = true, // feeds the overlay's packet-loss indicator
             };
 
             _simLossPct   = Plugin.Instance.CfgNetSimLossPct.Value;

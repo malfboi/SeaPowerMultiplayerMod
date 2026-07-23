@@ -61,6 +61,11 @@
                            TextWrapping="Wrap"
                            Margin="8,0,0,12"
                            Text="Added disconnect detection"/>
+                <TextBlock Foreground="{StaticResource TextSecondary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="Added connect via steam lobby code"/>
                                
                 <!-- Disclaimer -->
                 <Rectangle Height="1"

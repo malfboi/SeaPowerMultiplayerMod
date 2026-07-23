@@ -96,6 +96,18 @@ namespace SeapowerMultiplayer
         static bool Prefix() => !Suppression.ClientActive;
     }
 
+    /// <summary>Companion kill-switch: handleFlightDeckTasks only drives onUpdate;
+    /// state-machine TRANSITIONS are evaluated in FlightDeckTask.fixedTickStateMachine,
+    /// called from FlightDeck.OnFixedUpdate which still runs client-side. Without this
+    /// the mirrored queue rows advance locally (in default deck-timings mode a pending
+    /// task walks into HandleReadyUpTask, whose onEnter adds its own commands - breaking
+    /// FlightDeckStateApplier's LAUNCH-command index assumption - and relabels the row).</summary>
+    [HarmonyPatch(typeof(FlightDeckTask), nameof(FlightDeckTask.fixedTickStateMachine))]
+    public static class Patch_V2_FlightDeckTaskFsm_Suppress
+    {
+        static bool Prefix() => !Suppression.ClientActive;
+    }
+
     /// <summary>Master per-unit AI kill on the client (auto-engage, carrier ops,
     /// evasion decisions, contact responses). Propulsion and sensors live in the
     /// separate _obp systems loop and keep running. NOTE: on the HOST the remote
