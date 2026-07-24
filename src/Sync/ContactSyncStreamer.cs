@@ -33,12 +33,29 @@ namespace SeapowerMultiplayer
         private IEnumerator ContactLoop()
         {
             var wait = new WaitForSeconds(ContactInterval);
+            bool wasEnabled = false;
+
             while (true)
             {
                 yield return wait;
-                if (!Plugin.Instance.CfgContactSync.Value) continue;
                 if (!Plugin.Instance.CfgIsHost.Value) continue;
-                if (!SessionLive()) continue;
+                if (!SessionLive()) { wasEnabled = false; continue; }
+
+                bool enabled = Plugin.Instance.CfgContactSync.Value;
+                if (!enabled)
+                {
+                    // Switched off mid-session: one clearing sweep hands the client
+                    // back to its own sensors instead of leaving it pinned to the
+                    // last picture we sent.
+                    if (wasEnabled)
+                    {
+                        wasEnabled = false;
+                        try { ContactSyncManager.HostBroadcastClear(); }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[Contacts] Clear failed: {ex.Message}"); }
+                    }
+                    continue;
+                }
+                wasEnabled = true;
 
                 try { ContactSyncManager.HostBroadcast(); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[Contacts] Broadcast failed: {ex.Message}"); }

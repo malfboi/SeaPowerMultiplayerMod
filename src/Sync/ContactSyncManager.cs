@@ -168,6 +168,22 @@ namespace SeapowerMultiplayer
         internal static bool CoopSessionActive
             => !Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsEstablished;
 
+        /// <summary>Host: release the client's picture back to its own sensors.
+        /// An empty full sweep clears the override table; without this, switching
+        /// the setting off mid-session would leave the client pinned to whatever
+        /// the host last sent, forever.</summary>
+        public static void HostBroadcastClear()
+        {
+            if (!NetworkManager.Instance.IsEstablished) return;
+            _lastSent.Clear();
+            _nextFullSweep = 0f;
+            _msg.Reset();
+            _msg.IsFull = true;
+            NetworkManager.Instance.BroadcastToClients(_msg, DeliveryMethod.ReliableOrdered);
+            _msg.Reset();
+            Plugin.Log.LogInfo("[Contacts] Sync disabled - released the client's contact picture");
+        }
+
         /// <summary>Host: sweep the plotting table and send what changed.</summary>
         public static void HostBroadcast()
         {

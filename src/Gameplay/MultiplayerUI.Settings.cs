@@ -208,6 +208,32 @@ namespace SeapowerMultiplayer
             IntRow("Missile Hz", "spmp.mslhz", p.CfgMissileStateHz, 1, 60);
             FloatRow("Damage s", "spmp.dmgint", p.CfgDamageSyncInterval, 0.25f, 30f);
 
+            // ── Shared tactical picture ──────────────────────────────────────
+            // Sensors run locally on both machines, so without these the same
+            // contact carries a different track number on each screen and can be
+            // identified on one and unknown on the other.
+            //
+            // Co-op only - in PvP the players are opponents whose pictures are
+            // meant to differ. Shown disabled rather than hidden so the toggles
+            // stay discoverable and the reason they are off is on screen.
+            //
+            // Both take effect on the next tick, no restart. Switching contacts off
+            // stops anything further being imposed and releases the client, but a
+            // track number already written onto a Vehicle stays until that contact
+            // drops and is re-detected - Vehicle.Id is assigned once at creation and
+            // UpdateFromECS never rewrites it, so there is nothing to revert to.
+            // Hence "applies live" is not claimed here.
+            GUILayout.Space(2);
+            GUILayout.Label("  Shared picture (co-op)", _dimLabelStyle);
+
+            GUI.enabled = !p.CfgPvP.Value;
+            Set(p.CfgContactSync, ToggleRow("Contacts & track numbers", p.CfgContactSync.Value));
+            Set(p.CfgDrawingSync, ToggleRow("Map markers", p.CfgDrawingSync.Value));
+            GUI.enabled = prevEnabled;
+
+            if (p.CfgPvP.Value)
+                GUILayout.Label("  Co-op only — sharing these would give away intel", _dimLabelStyle);
+
             GUILayout.Space(2);
             string advArrow = _foldAdvanced ? "▼" : "▶";
             if (GUILayout.Button($" {advArrow}  Advanced", _sectionHeaderStyle!, GUILayout.ExpandWidth(true)))
@@ -245,6 +271,7 @@ namespace SeapowerMultiplayer
             {
                 p.CfgPvP, p.CfgTimeVote, p.CfgVerboseDebug,
                 p.CfgDamageSyncInterval, p.CfgMissileStateHz, p.CfgUnitStateHz,
+                p.CfgContactSync, p.CfgDrawingSync,
             };
             foreach (var e in all)
                 e.BoxedValue = e.DefaultValue;

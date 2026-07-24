@@ -22,6 +22,9 @@ namespace SeapowerMultiplayer
         {
             if (!Suppression.ClientActive) return;
             if (Plugin.Instance.CfgPvP.Value) return; // co-op only - opponents keep separate pictures
+            // Read live so switching the setting off on THIS machine reverts to our
+            // own sensors immediately, without waiting on the host's clearing sweep.
+            if (!Plugin.Instance.CfgContactSync.Value) return;
             if (!ContactSyncManager.HasOverrides) return;
 
             // Only the picture the local player actually looks at.
