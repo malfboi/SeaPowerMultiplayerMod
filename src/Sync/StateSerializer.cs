@@ -718,6 +718,13 @@ namespace SeapowerMultiplayer
 
                             Plugin.Log.LogInfo($"[Order] Applied ClassifyContact for {unit.name} (id={msg.SourceEntityId}): " +
                                               $"classification={classification}");
+
+                            // Client-originated designation: OverrideRelationship
+                            // above fanned the state out to the whole air formation
+                            // in the host's sim, but only the host knows the
+                            // membership - relay one message per member so both the
+                            // originating client's map and this one agree.
+                            Patch_Vehicle_OverrideRelationship.BroadcastFormationMembers(unit, classification);
                         }
                         else
                         {

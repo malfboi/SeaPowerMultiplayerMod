@@ -66,18 +66,50 @@ namespace SeapowerMultiplayer
 
         public static int ActiveTargets => _targets.Count;
 
-        internal static void Steer(MotionController mc)
+        private static ObjectBase? ResolveOwner(MotionController mc)
         {
-            // Client-only, post-handshake; host aircraft fly natively
-            if (Plugin.Instance.CfgIsHost.Value) return;
-            if (!NetworkManager.Instance.IsEstablished) return;
-
             if (!_ownerCache.TryGetValue(mc, out var owner))
             {
                 owner = mc.GetComponentInParent<ObjectBase>();
                 _ownerCache[mc] = owner;
                 if (_ownerCache.Count > 256) _ownerCache.Clear(); // controllers are recreated; avoid leak
             }
+            return owner;
+        }
+
+        /// <summary>True when the stream is currently driving this controller's
+        /// aircraft: client side, session established, and a fresh host sample in
+        /// hand. Falls false when the target goes stale, so native behaviour is
+        /// the fallback rather than a frozen aircraft.</summary>
+        internal static bool IsStreamDriven(MotionController mc)
+        {
+            if (Plugin.Instance.CfgIsHost.Value) return false;
+            if (!NetworkManager.Instance.IsEstablished) return false;
+            var owner = ResolveOwner(mc);
+            if (owner == null) return false;
+            return _targets.TryGetValue(owner.UniqueID, out var t)
+                && Time.realtimeSinceStartup - t.RecvRealtime <= StaleAfterSec;
+        }
+
+        private static readonly System.Type? FormationPhysicsType =
+            AccessTools.TypeByName("SeaPower.FormationFlightPhysics");
+
+        /// <summary>Wingman whose formation station-keeper is suppressed by
+        /// <see cref="Patch_FormationFlightPhysics_OnFixedUpdate"/> - nothing else
+        /// moves it, so UnitReplicaDriver must drive it every frame.</summary>
+        internal static bool IsFormationPuppet(ObjectBase unit) =>
+            FormationPhysicsType != null
+            && unit is Aircraft a
+            && a.Motioncontroller != null
+            && a.Motioncontroller.GetType() == FormationPhysicsType;
+
+        internal static void Steer(MotionController mc)
+        {
+            // Client-only, post-handshake; host aircraft fly natively
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsEstablished) return;
+
+            var owner = ResolveOwner(mc);
             if (owner == null) return;
 
             if (!_targets.TryGetValue(owner.UniqueID, out var t))
@@ -112,5 +144,32 @@ namespace SeapowerMultiplayer
     public static class Patch_VTOLFlightPhysics_OnFixedUpdate
     {
         static void Prefix(VTOLFlightPhysics __instance) => AircraftReplicaDriver.Steer(__instance);
+    }
+
+    /// <summary>
+    /// CLIENT: formation wingmen. FormationFlightPhysics is not a steering model
+    /// like FixedWing/VTOL - it is a station-keeper that writes transform.position
+    /// and copies the leader's rotation DIRECTLY every physics tick, computed from
+    /// the LOCAL leader replica, and it ignores commandPosition entirely, so the
+    /// chase-point injection cannot reach it. Left running, it and
+    /// UnitReplicaDriver's corrections fight over the transform frame by frame -
+    /// the tug of war behind the violent wingman jitter, at its worst when the
+    /// host wingman breaks station (missile evasion) and the local formation slot
+    /// stops matching the stream at all. While a fresh stream target exists the
+    /// original is skipped wholesale and UnitReplicaDriver drives the wingman as a
+    /// pure kinematic puppet (no dead band - see DriveAircraft).
+    ///
+    /// The type is internal, hence TargetMethod. MovingInFormation swapping
+    /// controllers back and forth stays harmless: both controller types are
+    /// stream-driven on the client.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_FormationFlightPhysics_OnFixedUpdate
+    {
+        static System.Reflection.MethodBase TargetMethod() =>
+            AccessTools.Method(AccessTools.TypeByName("SeaPower.FormationFlightPhysics"), "OnFixedUpdate");
+
+        static bool Prefix(object __instance) =>
+            !AircraftReplicaDriver.IsStreamDriven((MotionController)__instance);
     }
 }

@@ -16,6 +16,39 @@ namespace SeapowerMultiplayer
         {
             StartCoroutine(DamageCorrectionLoop());
             StartCoroutine(WaypointFlushLoop());
+            StartCoroutine(SensorStateLoop());
+        }
+
+        // ── Sensor emitter state (host → client, both modes) ────────────────
+        //
+        // Lives here rather than with the contact/drawing loops because those are
+        // co-op only. Emission is world state: the client needs it in PvP too, or
+        // its ESM cannot hear a radar that is genuinely radiating.
+        //
+        // Not configurable, unlike ContactSync/DrawingSync. Those are preferences
+        // about what to share with the other player; this is the simulation being
+        // right, and switching it off only restores the bug. It would also be a
+        // per-machine setting capable of desyncing the two players silently.
+        private IEnumerator SensorStateLoop()
+        {
+            var wait = new WaitForSeconds(0.5f);
+            while (true)
+            {
+                yield return wait;
+                if (!NetworkManager.Instance.IsEstablished) continue;
+                if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
+                if (SessionManager.SceneLoading) continue;
+
+                try
+                {
+                    if (Plugin.Instance.CfgIsHost.Value) SensorStateManager.HostBroadcast();
+                    else                                 SensorStateManager.ClientReassert();
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Sensors] Sync failed: {ex.Message}");
+                }
+            }
         }
 
         // ── Waypoint drag flush (catches throttled final positions) ────────

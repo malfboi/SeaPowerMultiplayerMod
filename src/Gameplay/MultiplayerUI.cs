@@ -378,6 +378,10 @@ namespace SeapowerMultiplayer
             // a do-nothing lobby button.
             DrawFatalErrorPopup();
 
+            // And the ally-lock notice - the whole point is that the click looked
+            // like it did nothing, so it has to show without the panel open.
+            DrawAllyLockNotice();
+
             if (!_visible) return;
 
             float x = Screen.width - PanelWidth - Margin;
@@ -508,6 +512,40 @@ namespace SeapowerMultiplayer
                 "and change settings.",
                 _noticeStyle);
             GUILayout.EndVertical();
+        // ── Ally lock notice ─────────────────────────────────────────────────
+
+        private GUIStyle? _allyNoticeStyle;
+
+        /// <summary>
+        /// Brief banner when the ally lock refuses an order. Not a popup: this
+        /// fires from ordinary clicking, so it must not need dismissing and must
+        /// not sit over the map. Auto-expires; a waypoint drag just keeps
+        /// refreshing it.
+        /// </summary>
+        private void DrawAllyLockNotice()
+        {
+            if (Time.unscaledTime >= UnitLockManager.RefusalNoticeUntil) return;
+
+            _allyNoticeStyle ??= new GUIStyle(_warningStyle!)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap  = true,
+            };
+
+            string name = UnitLockManager.LastRefusedUnitName;
+            string text = name.Length > 0
+                ? $"⛔  {name} is being commanded by your ally"
+                : "⛔  That unit is being commanded by your ally";
+
+            const float w = 460f;
+            const float h = 46f;
+            // Low on screen, clear of the unit panels and the F9 overlay.
+            var rect = new Rect((Screen.width - w) / 2f, Screen.height * 0.78f, w, h);
+
+            GUILayout.BeginArea(rect, _alertBoxStyle);
+            GUILayout.Label(text, _allyNoticeStyle, GUILayout.ExpandWidth(true));
+            GUILayout.Label("Ask them to deselect it, or take a different unit.", _dimLabelStyle);
+            GUILayout.EndArea();
         }
 
         // ── Fatal init error ─────────────────────────────────────────────────

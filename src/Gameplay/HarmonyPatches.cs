@@ -893,6 +893,25 @@ namespace SeapowerMultiplayer
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (!NetworkManager.Instance.IsEstablished) return true;
             if (SessionManager.SceneLoading) return true;
+
+            // Ally lock, BOTH sides. This used to sit below the host early-return,
+            // so it only ever gated the client: the host could pick a target with a
+            // unit its partner held and simply fire, because under v2 the host fires
+            // natively and the weapon reaches the client as a replicated spawn - no
+            // order has to travel for it to happen, so the send-side guards cannot
+            // see it. The refusal has to be here, at task creation.
+            //
+            // autoAttack is deliberately exempt: that is CIWS, SAM and auto-engage,
+            // and a ship that stops defending itself because a partner clicked on it
+            // would be far worse than the problem being fixed.
+            if (!autoAttack && UnitLockManager.BlocksOrdersFor(__instance))
+            {
+                UnitLockManager.NoteOrderRefused(__instance);
+                Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} locked by remote");
+                __result = null;
+                return false;
+            }
+
             if (Plugin.Instance.CfgIsHost.Value) return true;
 
             // AI/auto insertions die here (client AI is suppressed - belt and braces).
@@ -902,13 +921,6 @@ namespace SeapowerMultiplayer
                 return false;
             }
 
-            if (!Plugin.Instance.CfgPvP.Value
-                && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
-            {
-                Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} locked by remote");
-                __result = null;
-                return false;
-            }
             if (!TaskforceAssignmentManager.ClientMayControl(__instance))
             {
                 Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} not controllable (TF assignment)");
@@ -1173,6 +1185,15 @@ namespace SeapowerMultiplayer
                     return false; // Internal call trying to revert during grace - suppress entirely
             }
 
+            // Ally lock: this patch does its own send rather than going through
+            // OrderSyncHelper, so it has to ask as well - otherwise a depth change
+            // on a unit the partner holds executes here and travels to them.
+            if (UnitLockManager.BlocksOrdersFor(__instance))
+            {
+                UnitLockManager.NoteOrderRefused(__instance);
+                return false;
+            }
+
             // Genuine depth change (player command or AI after grace period)
             _lockedDepth[id] = depth;
             _lockTime[id] = now;
@@ -1269,19 +1290,41 @@ namespace SeapowerMultiplayer
         /// <summary>Set during mast toggles to prevent SensorSystem patches from double-sending.</summary>
         internal static bool SuppressSensorPatch;
 
+        /// <summary>
+        /// True when the Prefix that just ran refused the order. Harmony runs a
+        /// postfix even when its prefix returned false, so without this the host
+        /// broadcast an order it had just declined to execute locally: the client
+        /// applied it and the host did not. That is exactly how ally-locked
+        /// waypoints ended up visible on one screen only.
+        ///
+        /// The refusal is tagged with the order it belongs to, not just a bare
+        /// flag. Some patches call Prefix with no paired Postfix, so a refusal can
+        /// outlive its own call and be sitting there when an unrelated Postfix
+        /// runs - which would silently drop that order's broadcast instead. Only a
+        /// Postfix for the same unit and order type honours it.
+        /// </summary>
+        private static bool      _refusalPending;
+        private static int       _refusedEntityId;
+        private static OrderType _refusedOrder;
+
         internal static bool Prefix(ObjectBase unit, PlayerOrderMessage msg)
         {
+            _refusalPending = false;
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true; // don't send during scene load
             // Client: units we don't own are host-driven replicas. An order reaching
             // here for one came from our own local sim (unit state machines tick
             // outside the suppressed AI class) - block it locally AND upstream.
-            if (Suppression.ClientForeignUnit(unit)) return false;
+            if (Suppression.ClientForeignUnit(unit)) return Refuse(msg);
             // Co-op: block UI orders for units the remote player has selected (ally lock).
-            // ApplyingFromNetwork above ensures network-applied orders still execute.
-            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
-                && UnitLockManager.IsLockedByRemote(unit.UniqueID))
-                return false;
+            if (UnitLockManager.BlocksOrdersFor(unit))
+            {
+                // The only refusal a player can actually cause, so the only one
+                // worth telling them about. The others below are internal
+                // suppression of orders the player never issued.
+                UnitLockManager.NoteOrderRefused(unit);
+                return Refuse(msg);
+            }
             // PvP: don't sync orders for weapons (missiles/torpedoes) - their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
             if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
@@ -1300,14 +1343,34 @@ namespace SeapowerMultiplayer
                     return true;
             }
             if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
+            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return Refuse(msg);
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate - skip send, still execute locally
             NetworkManager.Instance.SendToServer(msg);
             return true;
         }
 
+        /// <summary>Refuse the order locally and tag it, so the paired Postfix
+        /// does not broadcast what this machine just declined to do.</summary>
+        private static bool Refuse(PlayerOrderMessage msg)
+        {
+            _refusalPending  = true;
+            _refusedEntityId = msg.SourceEntityId;
+            _refusedOrder    = msg.Order;
+            return false;
+        }
+
         internal static void Postfix(ObjectBase unit, PlayerOrderMessage msg)
         {
+            // Check before any other exit: this postfix runs on every path, and a
+            // refusal left standing would suppress a later order's broadcast.
+            if (_refusalPending
+                && _refusedEntityId == msg.SourceEntityId
+                && _refusedOrder == msg.Order)
+            {
+                _refusalPending = false;
+                return;
+            }
+
             if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (OrderHandler.ApplyingFromNetwork) return;
@@ -1631,6 +1694,8 @@ namespace SeapowerMultiplayer
                 if (OrderHandler.ApplyingFromNetwork) return;
                 if (unit.UniqueID == 0) return;
                 if (SessionManager.SceneLoading) return;
+                // Own send path, so the ally lock has to be asked here too.
+                if (UnitLockManager.BlocksOrdersFor(unit)) return;
 
                 var msg = OrderSyncHelper.SensorMsg(unit, 2, active);
 
@@ -1761,7 +1826,7 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.LaunchChaff))]
     public static class Patch_ObjectBase_LaunchChaff
     {
-        static bool Prefix(ObjectBase __instance)
+        static bool Prefix(ObjectBase __instance, bool message)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
 
@@ -1770,6 +1835,16 @@ namespace SeapowerMultiplayer
             if (NetworkManager.Instance.IsEstablished)
             {
                 if (Plugin.Instance.CfgIsHost.Value) return true;
+
+                // message=false is the missile-evasion states, not the player
+                // (InputHandler and the weapons panel both pass true). Incoming
+                // missile REPLICAS register as threats, so the client's aircraft
+                // enter evasion locally and were originating chaff decisions of
+                // their own. In co-op the host runs the same evasion AI for this
+                // aircraft and chaffs natively - drop the duplicate. PvP keeps
+                // auto-chaff by design, so it still forwards.
+                if (!message && !Plugin.Instance.CfgPvP.Value) return false;
+
                 NetworkManager.Instance.SendToServer(new PlayerOrderMessage
                 {
                     SourceEntityId = __instance.UniqueID,
@@ -2355,6 +2430,49 @@ namespace SeapowerMultiplayer
 
             if (Plugin.Instance.CfgIsHost.Value) NetworkManager.Instance.BroadcastToClients(msg);
             else                                 NetworkManager.Instance.SendToServer(msg);
+
+            BroadcastFormationMembers(baseObj, forcedState);
+        }
+
+        /// <summary>
+        /// HOST: mirror the game's formation fan-out at the message level. For an
+        /// air unit in a formation, OverrideRelationship writes ForcedRelationState
+        /// onto every member's entity DIRECTLY - it never calls itself on them, so
+        /// the postfix fires once, for the selected unit only. The client cannot
+        /// expand the formation on its own end (its replicas do not carry the
+        /// host's formation state), so the host - whose sim just did the expansion -
+        /// sends one ClassifyContact per member. Called both when the host
+        /// designates locally (postfix above) and when it applies a client's
+        /// designation (OrderHandler), which echoes the members back to the client
+        /// that originated it.
+        /// </summary>
+        internal static void BroadcastFormationMembers(ObjectBase baseObj, RelationsState forcedState)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            // Same gate the game's own fan-out uses: air unit, in a formation,
+            // and every occupied station holds an air unit.
+            if (!baseObj.IsAirUnit || !baseObj.InFormation.Value) return;
+            var stations = baseObj.Formation?.Stations;
+            if (stations == null) return;
+
+            foreach (var station in stations)
+                if (station?.UnitObject != null && !station.UnitObject.IsAirUnit) return;
+
+            foreach (var station in stations)
+            {
+                var member = station?.UnitObject;
+                if (member == null || member == baseObj || member.UniqueID == 0) continue;
+
+                NetworkManager.Instance.BroadcastToClients(new PlayerOrderMessage
+                {
+                    SourceEntityId = member.UniqueID,
+                    Order          = OrderType.ClassifyContact,
+                    Speed          = (float)forcedState,
+                });
+            }
         }
     }
 

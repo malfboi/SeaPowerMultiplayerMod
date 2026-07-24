@@ -225,6 +225,7 @@ namespace SeapowerMultiplayer
 
                 AssignHostId(wb, msg.EntityId);
                 ReplicaRegistry.Register(msg.EntityId, wb, ReplicaPolicy.LiveLocal);
+                ConsumeShooterStores(shooter, ap._ammunitionFileName);
                 Telemetry.Count("v2.spawnDecoy");
             }
             else
@@ -236,7 +237,8 @@ namespace SeapowerMultiplayer
                 // instead - the exact path the host ran (the client's chaff system
                 // OnUpdate is suppressed, so its pre-pooled clouds are only ever
                 // consumed here, staying 1:1 with the host's launches).
-                var attacher = FindChaffAttacher(shooter, msg.AmmoName);
+                var sys = FindChaffSystem(shooter, msg.AmmoName);
+                var attacher = sys != null && _chaffRef != null ? _chaffRef(sys) : null;
                 var clouds = attacher != null && _chaffCloudsRef != null ? _chaffCloudsRef(attacher) : null;
                 if (clouds == null || clouds.Count == 0) { Telemetry.Count("v2.decoyNoAttacher"); return; }
 
@@ -245,6 +247,13 @@ namespace SeapowerMultiplayer
 
                 using (Authority.Allowed())
                     attacher!.launchChaffCloud(); // launchChaffEffect + taskforce registration + SetActive
+
+                // The host's launchChaff() decremented its loaded count before
+                // launching the cloud; mirror that here or the client's chaff
+                // readout never moves (WeaponSystemChaff.OnUpdate and its reload
+                // bookkeeping are suppressed client-side, so this count is the
+                // only state that matters).
+                sys!.decreaseLoadedAmmoCount(sys._ammoInUse?._ap?._ammunitionFileName ?? msg.AmmoName);
 
                 AssignHostId(cloud, msg.EntityId);
                 ReplicaRegistry.Register(msg.EntityId, cloud, ReplicaPolicy.LiveLocal);
@@ -257,19 +266,19 @@ namespace SeapowerMultiplayer
         private static readonly AccessTools.FieldRef<ChaffAttacher, List<ChaffCloud>>? _chaffCloudsRef =
             AccessTools.FieldRefAccess<ChaffAttacher, List<ChaffCloud>>("_chaffClouds");
 
-        private static ChaffAttacher? FindChaffAttacher(ObjectBase shooter, string ammoName)
+        private static WeaponSystemChaff? FindChaffSystem(ObjectBase shooter, string ammoName)
         {
-            if (_chaffRef == null || shooter._obp?._weaponSystems == null) return null;
+            if (shooter._obp?._weaponSystems == null) return null;
             WeaponSystemChaff? fallback = null;
             foreach (var ws in shooter._obp._weaponSystems)
             {
                 if (ws is WeaponSystemChaff c)
                 {
-                    if (c._ammoInUse?._ap?._ammunitionFileName == ammoName) return _chaffRef(c);
+                    if (c._ammoInUse?._ap?._ammunitionFileName == ammoName) return c;
                     fallback ??= c;
                 }
             }
-            return fallback != null ? _chaffRef(fallback) : null;
+            return fallback;
         }
 
         private static Taskforce? FindTaskforceBySide(Taskforce.TfType side)
@@ -371,9 +380,63 @@ namespace SeapowerMultiplayer
                 Telemetry.Count("v2.spawnWeapon");
             }
 
+            // The replica above is a fresh pool instance by design - nothing has
+            // touched the shooter's own stores, so its pylon round and ammo count
+            // are still those from the join save. Consume one round to match what
+            // the host's launch() just did. Submunitions excluded: their "shooter"
+            // is the platform, but no store was expended for them.
+            if (!isSub)
+                ConsumeShooterStores(shooter, ap._ammunitionFileName);
+
             if (Plugin.Instance.CfgVerboseDebug.Value)
                 Plugin.Log.LogDebug($"[SpawnReplicator] Spawned replica id={msg.EntityId} " +
                     $"ammo={msg.AmmoName} shooter={msg.ShooterId} target={msg.TargetId} live={liveLocal}");
+        }
+
+        /// <summary>
+        /// Mirror WeaponSystemHardpoint.launch()'s bookkeeping on the client: the
+        /// host launch removed the mounted WeaponBase from its pylon and decremented
+        /// the loaded-ammo count, but the client shooter is a replica whose weapon
+        /// systems never fire locally - without this its loadout display and pylon
+        /// models never change. For systems with no mounted instance (ship
+        /// launchers, internal bays) only the count is adjusted; their visuals are
+        /// hatch/reload animations the game drives separately.
+        /// </summary>
+        private static void ConsumeShooterStores(ObjectBase? shooter, string ammoName)
+        {
+            if (shooter == null || string.IsNullOrEmpty(ammoName)) return;
+
+            var systems = shooter.GetWeaponSystemsForAmmunition(ammoName, copyList: false);
+            if (systems == null) return;
+
+            // Prefer the system that visibly carries the round on a pylon.
+            foreach (var ws in systems)
+            {
+                if (ws is not WeaponSystemHardpoint hp) continue;
+                for (int i = 0; i < hp._weapons.Count; i++)
+                {
+                    var mounted = hp._weapons[i];
+                    if (mounted == null || mounted.isLaunched()) continue;
+                    if (mounted._ap?._ammunitionFileName != ammoName) continue;
+
+                    hp._weapons.RemoveAt(i);
+                    mounted.gameObject.SetActive(false);
+                    if (hp._weapons.Count == 0) hp._isEmpty = true;
+                    hp.decreaseLoadedAmmoCount(ammoName);
+                    return;
+                }
+            }
+
+            foreach (var ws in systems)
+            {
+                if (ws.getLoadedAmmoCount(ammoName) > 0)
+                {
+                    ws.decreaseLoadedAmmoCount(ammoName);
+                    return;
+                }
+            }
+
+            Telemetry.Count("v2.storesConsumeMissed");
         }
 
         private static AmmunitionParameters? GetAmmoParams(string ammoName)

@@ -34,6 +34,7 @@ namespace SeapowerMultiplayer.Messages
         ViewportHint             = 30,  // client → host: where the client is looking (drives near-unit stream rate)
         ContactSync              = 31,  // host → client: track numbers + classification/identification of the shared picture
         DrawingSync              = 32,  // bidirectional: map drawing layer (markers, rulers, rings, polygons, text)
+        SensorState              = 33,  // host → client: per-sensor emitter state (AI radars the client cannot decide)
     }
 
     public interface INetMessage

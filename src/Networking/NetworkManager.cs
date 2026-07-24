@@ -197,6 +197,7 @@ namespace SeapowerMultiplayer
         {
             if (_transport == null) return;
             if (BlockedPreHandshake(msg.Type)) return;
+            if (BlockedByAllyLock(msg)) return;
             _writer.Reset();
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
@@ -208,11 +209,42 @@ namespace SeapowerMultiplayer
         {
             if (_transport == null) return;
             if (BlockedPreHandshake(msg.Type)) return;
+            if (BlockedByAllyLock(msg)) return;
             _writer.Reset();
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
             _transport.BroadcastToClients(_writer.Data, _writer.Length, MapDelivery(delivery));
             Telemetry.OnSend((byte)msg.Type, _writer.Length);
+        }
+
+        /// <summary>
+        /// Ally-lock backstop. Order patches are supposed to refuse locally AND not
+        /// send, but each one re-implements its own gating and the ones with bespoke
+        /// send logic kept forgetting the lock - so an order the local player was
+        /// refused still reached the other player, who applied it. That asymmetry is
+        /// the worst possible outcome: the two sims diverge silently.
+        ///
+        /// Catching it here means no order path, present or future, can leak. It is
+        /// deliberately narrow: only PlayerOrderMessage, only for the one unit the
+        /// remote player holds. Host-authoritative capture events (spawns, impacts,
+        /// damage) are not orders and are untouched.
+        /// </summary>
+        private bool BlockedByAllyLock(INetMessage msg)
+        {
+            if (msg.Type != MessageType.PlayerOrder) return false;
+            if (msg is not PlayerOrderMessage order) return false;
+            // Not a command to the unit: ClassifyContact marks a CONTACT hostile or
+            // neutral, and its SourceEntityId is that contact. A partner who has an
+            // enemy contact selected would otherwise block our classification of it -
+            // and since that path applies locally without asking the lock, blocking
+            // only the send would desync the very thing this guard exists to prevent.
+            if (order.Order == OrderType.ClassifyContact) return false;
+            if (!UnitLockManager.IsLockedByRemote(order.SourceEntityId)) return false;
+            if (Plugin.Instance.CfgPvP.Value) return false;
+            if (OrderHandler.ApplyingFromNetwork) return false;
+
+            Telemetry.Count("net.sendBlockedByAllyLock");
+            return true;
         }
 
         /// <summary>Everything except Hello/Welcome waits for the handshake.</summary>
@@ -326,6 +358,7 @@ namespace SeapowerMultiplayer
                 TaskforceAssignmentManager.Reset();
                 ContactSyncManager.Reset();
                 DrawingSyncManager.Reset();
+                SensorStateManager.Reset();
                 UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
@@ -504,6 +537,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = DrawingSyncMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => DrawingSyncManager.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.SensorState:
+                {
+                    var msg = SensorStateMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SensorStateManager.ApplyReceived(msg));
                     break;
                 }
 
