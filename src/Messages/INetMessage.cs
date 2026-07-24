@@ -32,6 +32,8 @@ namespace SeapowerMultiplayer.Messages
         WeaponHatchEvent         = 28,  // host → client: VLS/torpedo-tube hatch open/close cosmetics
         FlightDeckState          = 29,  // host → client: per-carrier flight-ops queue + availability (UI mirror)
         ViewportHint             = 30,  // client → host: where the client is looking (drives near-unit stream rate)
+        ContactSync              = 31,  // host → client: track numbers + classification/identification of the shared picture
+        DrawingSync              = 32,  // bidirectional: map drawing layer (markers, rulers, rings, polygons, text)
     }
 
     public interface INetMessage

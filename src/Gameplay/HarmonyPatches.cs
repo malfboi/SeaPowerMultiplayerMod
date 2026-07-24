@@ -2336,7 +2336,25 @@ namespace SeapowerMultiplayer
                 Speed          = (float)forcedState,
             };
 
-            OrderSyncHelper.Postfix(baseObj, msg);
+            // NOT OrderSyncHelper: its client path gates on ClientForeignUnit and
+            // ClientMayControl, both of which reject the object here - the target
+            // of a classification is a CONTACT, i.e. by definition a unit the
+            // player does not own. Routed through it, the client's own
+            // Hostile/Neutral calls were dropped and only the host's ever
+            // travelled, so classification appeared one-way.
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            // Co-op only. In PvP a classification is about the OTHER player's unit,
+            // and StateSerializer resolves the incoming id against the receiver's own
+            // plotting table - so the host marking an enemy destroyer Hostile made
+            // that player's own ship render as hostile on their own map, on top of
+            // telling them they had been spotted and classified.
+            if (Plugin.Instance.CfgPvP.Value) return;
+
+            if (!OrderDeduplicator.ShouldSend(msg)) return;
+
+            if (Plugin.Instance.CfgIsHost.Value) NetworkManager.Instance.BroadcastToClients(msg);
+            else                                 NetworkManager.Instance.SendToServer(msg);
         }
     }
 

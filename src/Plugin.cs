@@ -130,6 +130,10 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgReplicaInterpolation = null!;
         internal ConfigEntry<int> CfgUnitStateHzNear = null!;
 
+        // Shared tactical picture
+        internal ConfigEntry<bool> CfgContactSync = null!;
+        internal ConfigEntry<bool> CfgDrawingSync = null!;
+
         private Harmony _harmony = null!;
         private int _sceneReadyFrames;
         private const int SceneSettleFrames = 30; // ~0.5s buffer after IsLoadingDone
@@ -188,6 +192,19 @@ namespace SeapowerMultiplayer
             CfgUnitStateHz    = Config.Bind("Sync", "UnitStateHz",    10,
                 "Host unit/torpedo state stream rate in Hz (1-60, default 10)");
 
+            // Shared tactical picture (CO-OP ONLY - both are ignored in PvP, where the
+            // two players are opponents whose pictures are meant to differ)
+            CfgContactSync = Config.Bind("Sync", "ContactSync", true,
+                "CO-OP ONLY. Share the host's contact picture - track numbers, classified side and " +
+                "identified class - with the client. Sensors are simulated on both machines, so " +
+                "without this the same contact carries different track numbers on each screen and " +
+                "can be identified on one and unknown on the other. Additive: the client never " +
+                "loses a contact it identified first. Ignored in PvP.");
+            CfgDrawingSync = Config.Bind("Sync", "DrawingSync", true,
+                "CO-OP ONLY. Share map drawings (markers, rulers, circles, polygons, text) between " +
+                "both players. Either side may draw; the whole layer is replaced on the other side " +
+                "when it changes. Ignored in PvP.");
+
             // Two-instance test harness: SPMP_* environment variables override the
             // shared config file so one install can run host + client instances.
             ApplyEnvOverrides();
@@ -201,6 +218,7 @@ namespace SeapowerMultiplayer
             // Attach helper MonoBehaviours to this same GameObject
             gameObject.AddComponent<StateBroadcaster>();
             gameObject.AddComponent<HostEntityStreamer>();
+            gameObject.AddComponent<ContactSyncStreamer>();
             gameObject.AddComponent<MultiplayerUI>();
 
             // Apply Harmony patches. One bad patch used to abort Awake silently:

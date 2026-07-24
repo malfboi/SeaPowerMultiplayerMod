@@ -324,6 +324,8 @@ namespace SeapowerMultiplayer
                 ReplicaRegistry.Clear();
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
                 TaskforceAssignmentManager.Reset();
+                ContactSyncManager.Reset();
+                DrawingSyncManager.Reset();
                 UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
@@ -488,6 +490,20 @@ namespace SeapowerMultiplayer
                 {
                     var msg = ViewportHintMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => HostEntityStreamer.OnViewportHint(msg));
+                    break;
+                }
+
+                case MessageType.ContactSync:
+                {
+                    var msg = ContactSyncMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => ContactSyncManager.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.DrawingSync:
+                {
+                    var msg = DrawingSyncMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => DrawingSyncManager.ApplyReceived(msg));
                     break;
                 }
 
