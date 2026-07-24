@@ -510,6 +510,62 @@ namespace SeapowerMultiplayer
             GUILayout.EndVertical();
         }
 
+        // ── Fatal init error ─────────────────────────────────────────────────
+
+        private bool _fatalPopupDismissed;
+        private GUIStyle? _fatalMsgStyle;
+
+        /// <summary>Replaces the panel body when Awake failed.</summary>
+        private void DrawFatalErrorNotice()
+        {
+            _noticeStyle   ??= new GUIStyle(_dimLabelStyle!) { wordWrap = true };
+            _fatalMsgStyle ??= new GUIStyle(_criticalStyle!) { wordWrap = true };
+
+            GUILayout.BeginVertical(_alertBoxStyle!);
+            GUILayout.Label("✖  MOD FAILED TO LOAD", _criticalStyle);
+            GUILayout.Label(Plugin.FatalInitError, _fatalMsgStyle);
+            GUILayout.Label(
+                "Multiplayer is disabled for this session. Check BepInEx/LogOutput.log "
+                + "for the full error and report it on the Workshop page.",
+                _noticeStyle);
+            GUILayout.EndVertical();
+        }
+
+        /// <summary>
+        /// Centre-screen version of the same alert, shown even when the panel is
+        /// hidden. Dismissible; the panel notice above stays for the session.
+        /// </summary>
+        private void DrawFatalErrorPopup()
+        {
+            if (Plugin.FatalInitError == null || _fatalPopupDismissed) return;
+
+            const float popupWidth  = 420f;
+            const float popupHeight = 190f;
+            float px = (Screen.width  - popupWidth)  / 2f;
+            float py = (Screen.height - popupHeight) / 2f;
+
+            GUILayout.BeginArea(new Rect(px, py, popupWidth, popupHeight), _popupBoxStyle);
+
+            _noticeStyle ??= new GUIStyle(_dimLabelStyle!) { wordWrap = true };
+
+            GUILayout.Label("✖  Multiplayer Mod Failed to Load", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Space(6);
+            _fatalMsgStyle ??= new GUIStyle(_criticalStyle!) { wordWrap = true };
+            GUILayout.Label(Plugin.FatalInitError, _fatalMsgStyle);
+            GUILayout.Space(4);
+            GUILayout.Label(
+                "Multiplayer is disabled for this session. The game itself is unaffected. "
+                + "Check BepInEx/LogOutput.log for the full error and report it on the "
+                + "Workshop page.",
+                _noticeStyle);
+            GUILayout.Space(8);
+
+            if (GUILayout.Button("Dismiss", _buttonStyle))
+                _fatalPopupDismissed = true;
+
+            GUILayout.EndArea();
+        }
+
         // ── Time Vote Popup ──────────────────────────────────────────────────
 
         private void DrawTimeVotePopup()
