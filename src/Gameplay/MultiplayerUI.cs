@@ -512,6 +512,7 @@ namespace SeapowerMultiplayer
                 "and change settings.",
                 _noticeStyle);
             GUILayout.EndVertical();
+        }
         // ── Ally lock notice ─────────────────────────────────────────────────
 
         private GUIStyle? _allyNoticeStyle;
