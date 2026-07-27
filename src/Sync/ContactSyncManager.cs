@@ -58,6 +58,45 @@ namespace SeapowerMultiplayer
 
         internal static bool TryGet(int uniqueId, out Override ov) => _overrides.TryGetValue(uniqueId, out ov);
 
+        // ── Client track-number collision guard ───────────────────────────────
+
+        /// <summary>Where the client parks track numbers for foreign contacts the
+        /// host has not numbered yet. Comfortably above the game's own foreign
+        /// range (PlottingTable._maxForeignTrackId starts at 7001), so a number the
+        /// client invents can never equal one the host issues.</summary>
+        private const int PrivateTrackBase = 20001;
+
+        private static readonly Dictionary<int, int> _privateTrackIds = new(32);
+        private static int _nextPrivateTrackId = PrivateTrackBase;
+
+        /// <summary>
+        /// CLIENT: keep a contact the host has not reported out of the host's
+        /// numbering range.
+        ///
+        /// Both plotting tables allocate in detection order from the same bases, so
+        /// the client's own counter hands out numbers the host is also handing out -
+        /// to different contacts. The overlay then stamps the host's number onto the
+        /// contacts it covers and the two collide, which is how one number ends up
+        /// on two tracks. Only foreign contacts are moved: own units enter both
+        /// tables from the same save in the same order, so their numbers already
+        /// agree, and renumbering them would churn the player's own unit list.
+        ///
+        /// The private number is stable per contact and transient in practice - it
+        /// lasts until the host reports the contact, at which point the override
+        /// takes over.
+        /// </summary>
+        internal static void EnsurePrivateTrackId(Vehicle vehicle, int uniqueId)
+        {
+            if (vehicle.Id >= PrivateTrackBase) return; // already parked
+
+            if (!_privateTrackIds.TryGetValue(uniqueId, out int id))
+            {
+                id = _nextPrivateTrackId++;
+                _privateTrackIds[uniqueId] = id;
+            }
+            vehicle.Id = id;
+        }
+
         // Reflection for Vehicle.Class: its type is SourcedProperty<string>, whose
         // Source field is a Track containing a Unity.Entities.Entity. Naming the
         // type in source would drag a Unity.Entities reference into the assembly,
@@ -110,6 +149,59 @@ namespace SeapowerMultiplayer
             return true;
         }
 
+        // Vehicle.Side is SourcedProperty<Taskforce>? - same Unity.Entities problem
+        // as Class, same solution.
+        private static FieldInfo? _sideField;
+        private static FieldInfo? _sourcedSideValueField;
+        private static Type?      _sourcedSideType;
+        private static bool       _sideReflectionResolved;
+
+        /// <summary>One boxed SourcedProperty per taskforce. There are two, and
+        /// SetValue copies the struct in, so the boxes are safe to share.</summary>
+        private static readonly Dictionary<Taskforce, object> _boxedSides = new(2);
+
+        private static bool ResolveSideReflection()
+        {
+            if (_sideReflectionResolved) return _sideField != null;
+            _sideReflectionResolved = true;
+
+            try
+            {
+                _sideField = typeof(Vehicle).GetField("Side", BindingFlags.Instance | BindingFlags.Public);
+                if (_sideField == null) return false;
+
+                _sourcedSideType       = Nullable.GetUnderlyingType(_sideField.FieldType) ?? _sideField.FieldType;
+                _sourcedSideValueField = _sourcedSideType.GetField("Value", BindingFlags.Instance | BindingFlags.Public);
+                if (_sourcedSideValueField == null) { _sideField = null; return false; }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[Contacts] Vehicle.Side not reflectable ({ex.GetType().Name}) - " +
+                    "the camera will not attach to host-identified contacts on the client");
+                _sideField = null;
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Client: give a contact a Side when the host has classified it
+        /// and the client's own sensors have not. Additive like the rest of the
+        /// overlay - a Side the client resolved itself is never overwritten.</summary>
+        internal static bool ApplySideIfMissing(Vehicle vehicle, Taskforce side)
+        {
+            if (side == null || !ResolveSideReflection()) return false;
+            if (_sideField!.GetValue(vehicle) != null) return false; // client already knows
+
+            if (!_boxedSides.TryGetValue(side, out var boxed))
+            {
+                boxed = Activator.CreateInstance(_sourcedSideType!);
+                _sourcedSideValueField!.SetValue(boxed, side);
+                _boxedSides[side] = boxed;
+            }
+            _sideField.SetValue(vehicle, boxed);
+            return true;
+        }
+
         /// <summary>Host side of the same problem: reading Vehicle.Class in source
         /// would name SourcedProperty&lt;string&gt; and pull the reference in just
         /// the same way. Returns "" when the contact is not identified.</summary>
@@ -134,12 +226,19 @@ namespace SeapowerMultiplayer
                 var e = msg.Entries[i];
                 _overrides[e.UniqueId] = new Override(e.TrackId, e.Classified, BoxClass(e.ClassName));
             }
+
+            // The override keys ARE the host's contact list, so the reveal sweep
+            // needs no message of its own in this direction.
+            ContactRevealManager.SetRemoteHeldFromOverrides(_overrides.Keys);
         }
 
         public static void Reset()
         {
             _overrides.Clear();
             _lastSent.Clear();
+            _boxedSides.Clear(); // taskforce objects do not survive a scene change
+            _privateTrackIds.Clear();
+            _nextPrivateTrackId = PrivateTrackBase;
             _nextFullSweep = 0f;
         }
 

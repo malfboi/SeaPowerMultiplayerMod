@@ -357,8 +357,10 @@ namespace SeapowerMultiplayer
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
                 TaskforceAssignmentManager.Reset();
                 ContactSyncManager.Reset();
+                ContactRevealManager.Reset();
                 DrawingSyncManager.Reset();
                 SensorStateManager.Reset();
+                UnitStatusManager.Reset();
                 UnitLockManager.Reset();
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
@@ -533,6 +535,13 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.ContactReport:
+                {
+                    var msg = ContactReportMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => ContactRevealManager.ApplyReceived(msg));
+                    break;
+                }
+
                 case MessageType.DrawingSync:
                 {
                     var msg = DrawingSyncMessage.Deserialize(reader);
@@ -544,6 +553,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = SensorStateMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => SensorStateManager.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.UnitStatus:
+                {
+                    var msg = UnitStatusMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => UnitStatusManager.ApplyReceived(msg));
                     break;
                 }
 

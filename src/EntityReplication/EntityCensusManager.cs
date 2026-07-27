@@ -74,6 +74,8 @@ namespace SeapowerMultiplayer
                 {
                     NetworkManager.Instance.BroadcastToClients(spawn);
                     Telemetry.Count("v2.spawnReplayed");
+                    Plugin.Log.LogInfo($"[Census] Replayed {spawn.Kind} spawn id={id} " +
+                        $"ammo={spawn.AmmoName} shooter={spawn.ShooterId}");
                 }
             }
         }

@@ -21,6 +21,7 @@ namespace SeapowerMultiplayer
         private void Start()
         {
             StartCoroutine(ContactLoop());
+            StartCoroutine(RevealLoop());
             StartCoroutine(DrawingLoop());
         }
 
@@ -59,6 +60,30 @@ namespace SeapowerMultiplayer
 
                 try { ContactSyncManager.HostBroadcast(); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[Contacts] Broadcast failed: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>
+        /// Bidirectional: contact EXISTENCE. The client reports what it holds so the
+        /// host can materialise and number it; both sides then fill the gaps in
+        /// their own picture. Slower than the contact loop and paced by the age-out
+        /// clock rather than by how fast contacts change.
+        /// </summary>
+        private IEnumerator RevealLoop()
+        {
+            var wait = new WaitForSeconds(ContactRevealManager.RefreshInterval);
+            while (true)
+            {
+                yield return wait;
+                if (!Plugin.Instance.CfgContactSync.Value) continue;
+                if (!SessionLive()) continue;
+
+                try
+                {
+                    if (!Plugin.Instance.CfgIsHost.Value) ContactRevealManager.ClientSendReport();
+                    ContactRevealManager.Tick();
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[Contacts] Reveal sweep failed: {ex.Message}"); }
             }
         }
 

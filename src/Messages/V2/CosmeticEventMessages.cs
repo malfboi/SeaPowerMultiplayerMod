@@ -61,15 +61,29 @@ namespace SeapowerMultiplayer.Messages
     }
 
     /// <summary>
-    /// Host → client, reliable, throttled: authoritative magazine count for one
-    /// ammo type on one unit. Keeps the client's weapon-panel numbers honest
-    /// (the client's containers never fire, so they'd otherwise read full).
+    /// Host → client, reliable, throttled: authoritative ammo state for one ammo
+    /// type on one unit.
+    ///
+    /// <see cref="DisplayTotal"/> is the number the player actually reads -
+    /// ObjectBase.AmmunitionAmountDictionary, which the weapon panel binds to via
+    /// ObserveReplace. It is sent as the host's absolute value rather than being
+    /// derived client-side, because the client cannot derive it: the total is the
+    /// sum of loaded rounds, seated containers and magazine contents, and the
+    /// client's weapon systems never run launch() or its reload, so their loaded
+    /// counts and container state stop tracking the host's the moment anything
+    /// fires. Mirroring the one number the host shows is the only version of this
+    /// that stays correct across launches, reloads and refills.
+    ///
+    /// <see cref="MagazineCount"/> still carries the magazine separately - the
+    /// client's own engage/reload checks read it - and is -1 when the change did
+    /// not come from a magazine.
     /// </summary>
     public class AmmoStateEventMessage : INetMessage
     {
         public int    UnitId;
         public string AmmoName = "";
-        public int    MagazineCount;
+        public int    MagazineCount;   // -1 = not a magazine change, leave it alone
+        public int    DisplayTotal;
 
         public MessageType Type => MessageType.AmmoStateEvent;
 
@@ -78,6 +92,7 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(UnitId);
             writer.Put(AmmoName);
             writer.Put(MagazineCount);
+            writer.Put(DisplayTotal);
         }
 
         public static AmmoStateEventMessage Deserialize(NetDataReader reader) => new()
@@ -85,6 +100,7 @@ namespace SeapowerMultiplayer.Messages
             UnitId        = reader.GetInt(),
             AmmoName      = reader.GetString(),
             MagazineCount = reader.GetInt(),
+            DisplayTotal  = reader.GetInt(),
         };
     }
 }

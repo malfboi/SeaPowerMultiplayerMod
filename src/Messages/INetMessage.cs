@@ -35,6 +35,8 @@ namespace SeapowerMultiplayer.Messages
         ContactSync              = 31,  // host → client: track numbers + classification/identification of the shared picture
         DrawingSync              = 32,  // bidirectional: map drawing layer (markers, rulers, rings, polygons, text)
         SensorState              = 33,  // host → client: per-sensor emitter state (AI radars the client cannot decide)
+        ContactReport            = 34,  // client → host: object ids the client's plotting table holds (the other half of ContactSync)
+        UnitStatus               = 35,  // host → client: bottom-row status line + per-mount engagement state
     }
 
     public interface INetMessage

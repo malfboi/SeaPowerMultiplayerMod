@@ -121,6 +121,7 @@ namespace SeapowerMultiplayer
                 {
                     CaptureAndSend(missileTick, unitTick, nearTick);
                     EntityCensusManager.HostTick();
+                    AmmoStateCapture.FlushPending();
                     if (unitTick) FlightDeckStreamer.HostTick();
                 }
                 catch (System.Exception ex)
@@ -274,10 +275,15 @@ namespace SeapowerMultiplayer
                 // Un-launched (mounted/racked) weapons are transform children of their
                 // platform - streaming them world-space rips them off the wing.
                 if (weaponKind && (unit.IsDestroyed || !((WeaponBase)(ObjectBase)unit).isLaunched())) continue;
-                // Sonobuoys are LiveLocal on the client (own drift/sensing sim) -
-                // streaming them would fight it
-                if (kind == UnitType.Bomb
-                    && ((WeaponBase)(ObjectBase)unit)._ap?._subType == Ammunition.Type.Sonobuoy) continue;
+                // Sonobuoys are LiveLocal on the client (own drift/sensing sim), and
+                // ejecting pilots are spawned locally by each side's own destroyed
+                // airframe - streaming either would fight that local sim
+                if (kind == UnitType.Bomb)
+                {
+                    var subType = ((WeaponBase)(ObjectBase)unit)._ap?._subType;
+                    if (subType == Ammunition.Type.Sonobuoy
+                        || subType == Ammunition.Type.Paratrooper) continue;
+                }
                 // Deck-phase aircraft (parented under a carrier) ride the
                 // DeckState channel, not the world-space stream
                 if (airKind && unit.transform.parent != null) continue;

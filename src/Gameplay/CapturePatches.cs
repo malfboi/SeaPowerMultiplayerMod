@@ -68,11 +68,17 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>Replicated weapon classes: missiles, torpedoes, sonobuoy bombs
-        /// (LiveLocal), and ordinary bombs (kinematic replicas).</summary>
+        /// (LiveLocal), and ordinary bombs (kinematic replicas). Ejecting pilots are
+        /// Bombs too (Type=Paratrooper → subType Paratrooper), but they are not a
+        /// launch: ObjectBase.OnFixedUpdate spawns them off any destroyed airframe,
+        /// which the client runs for its own replicas. Classifying them meant the
+        /// client's pilot was killed by the launch canary while the host's was
+        /// replicated as a weapon - so they stay local on both sides, like chaff.</summary>
         internal static byte? WeaponClassOf(WeaponBase wb)
         {
             if (wb is Missile) return 0;
             if (wb is Torpedo) return 1;
+            if (wb is Bomb && wb._ap != null && wb._ap._subType == Ammunition.Type.Paratrooper) return null;
             if (wb is Bomb && wb._ap != null && wb._ap._subType == Ammunition.Type.Sonobuoy) return 2;
             if (wb is Bomb) return 3;
             return null;
@@ -197,20 +203,26 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>Universal weapon removal → EntityDespawn (covers fuel-out, pool
-    /// free, scripted removal - anything that didn't go through Destruction).</summary>
-    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.destroyObject))]
-    public static class Patch_V2_WeaponDestroy_Capture
+    /// free, scripted removal - anything that didn't go through Destruction).
+    /// destroyObject is virtual: Missile and Torpedo override it but chain to base,
+    /// so the WeaponBase hook below covers them. ChaffCloud and Noisemaker override
+    /// it and never call base, so they get their own hooks - without them a decoy's
+    /// death was never captured: no despawn went out and its SpawnLedger entry was
+    /// never forgotten, so the 5 s census kept advertising a cloud that had long
+    /// since decayed and the client re-launched a fresh one off its own dispenser
+    /// every couple of censuses, forever.</summary>
+    public static class Patch_V2_WeaponDespawn_Capture
     {
-        static void Postfix(WeaponBase __instance)
+        internal static void OnDestroyObject(WeaponBase wb)
         {
             if (!CaptureState.HostCaptureActive) return;
-            if (CaptureState.WeaponClassOf(__instance) == null
-                && !(__instance is ChaffCloud) && !(__instance is Noisemaker)) return;
-            int id = __instance.UniqueID;
+            if (CaptureState.WeaponClassOf(wb) == null
+                && !(wb is ChaffCloud) && !(wb is Noisemaker)) return;
+            int id = wb.UniqueID;
             if (!CaptureState.DespawnSent.Add(id)) return;
 
             var geo = Utils.worldPositionFromUnityToLongLat(
-                __instance.transform.position, Globals._currentCenterTile);
+                wb.transform.position, Globals._currentCenterTile);
             NetworkManager.Instance.BroadcastToClients(new EntityDespawnMessage
             {
                 EntityId = id,
@@ -222,6 +234,29 @@ namespace SeapowerMultiplayer
             CaptureState.ForgetSpawn(id);
             Telemetry.Count("v2.capturedDespawn");
         }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.destroyObject))]
+    public static class Patch_V2_WeaponDestroy_Capture
+    {
+        static void Postfix(WeaponBase __instance)
+            => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
+    }
+
+    // Decoys capture on the PREFIX: both bodies free the pooled GameObject, so the
+    // transform has to be read before they run.
+    [HarmonyPatch(typeof(ChaffCloud), nameof(ChaffCloud.destroyObject))]
+    public static class Patch_V2_ChaffCloudDestroy_Capture
+    {
+        static void Prefix(ChaffCloud __instance)
+            => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
+    }
+
+    [HarmonyPatch(typeof(Noisemaker), nameof(Noisemaker.destroyObject))]
+    public static class Patch_V2_NoisemakerDestroy_Capture
+    {
+        static void Prefix(Noisemaker __instance)
+            => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
     }
 
     /// <summary>Unit kills → reliable DestroyEvent (the state-stream flags are
@@ -398,30 +433,114 @@ namespace SeapowerMultiplayer
             => HatchStateCapture.OnHatch(__instance, containerId, false);
     }
 
-    /// <summary>Magazine expenditure → throttled authoritative count sync.</summary>
+    /// <summary>
+    /// Ammo expenditure → throttled authoritative count sync.
+    ///
+    /// Hooked on the DISPLAY total (ObjectBase.changeAmmunitionAmount /
+    /// setAmmunitionAmount) rather than only on magazines, because that is where
+    /// every path lands: a launcher firing decrements its loaded count, a reload
+    /// moves a round from magazine to tube, a refill resets everything - and all
+    /// of them pass through the unit's ammo dictionary, which is what the weapon
+    /// panel binds to. Watching only magazines missed the launch itself, so a
+    /// torpedo fired from a tube never moved the client's number at all.
+    ///
+    /// Change-detected and throttled, with the last change of a burst always
+    /// delivered: entries stay dirty until a tick actually sends them. That
+    /// matters because the value is ABSOLUTE - a dropped packet does not heal
+    /// itself, and time compression makes collisions the normal case rather than
+    /// an edge one (the window is real time, so at TC 8 two launches several
+    /// sim-seconds apart land inside the same window).
+    /// </summary>
     public static class AmmoStateCapture
     {
+        private static readonly Dictionary<(int unit, string ammo), (ObjectBase unit, WeaponMagazineSystem? mag)> _dirty = new();
         private static readonly Dictionary<(int unit, string ammo), float> _lastSent = new();
+        private static readonly List<(int unit, string ammo)> _due = new();
+        // First change of a burst goes out immediately (Throttled stamps and returns
+        // false); the rest coalesce. Kept at a full second because guns walk this
+        // dictionary per shell - a firing CIWS must not become a packet per round.
         private const float ThrottleSec = 1f;
 
-        internal static void Clear() => _lastSent.Clear();
+        internal static void Clear()
+        {
+            _lastSent.Clear();
+            _dirty.Clear();
+        }
+
+        /// <summary>Any movement of a unit's ammo total, whatever caused it.</summary>
+        internal static void OnAmmoTotalChanged(ObjectBase unit, string ammoName)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            if (unit == null || unit.UniqueID == 0 || string.IsNullOrEmpty(ammoName)) return;
+
+            var key = (unit.UniqueID, ammoName);
+            // Keep any magazine already recorded for this key - a launch and its
+            // reload both land here, and the reload is the one that knows the mag.
+            _dirty[key] = _dirty.TryGetValue(key, out var existing)
+                ? (unit, existing.mag)
+                : (unit, null);
+        }
 
         internal static void OnMagazineChanged(WeaponMagazineSystem mag, string ammoName)
         {
             if (!CaptureState.HostCaptureActive) return;
             var unit = mag._baseObject;
-            if (unit == null || string.IsNullOrEmpty(ammoName)) return;
+            if (unit == null || unit.UniqueID == 0 || string.IsNullOrEmpty(ammoName)) return;
 
-            if (CaptureState.Throttled(_lastSent, (unit.UniqueID, ammoName), ThrottleSec)) return;
-
-            NetworkManager.Instance.BroadcastToClients(new AmmoStateEventMessage
-            {
-                UnitId        = unit.UniqueID,
-                AmmoName      = ammoName,
-                MagazineCount = mag.getAmmunitionCount(ammoName),
-            });
-            Telemetry.Count("v2.capturedAmmoState");
+            _dirty[(unit.UniqueID, ammoName)] = (unit, mag);
         }
+
+        /// <summary>Host, per streamer tick: send the dirty counts whose throttle
+        /// window has passed. Values are read now, not when they were marked, so a
+        /// burst collapses into one packet carrying the final number; anything still
+        /// inside its window stays dirty and goes out on a later tick.</summary>
+        internal static void FlushPending()
+        {
+            if (_dirty.Count == 0) return;
+            if (!CaptureState.HostCaptureActive) { _dirty.Clear(); return; }
+
+            _due.Clear();
+            foreach (var kv in _dirty)
+            {
+                // Throttled() stamps _lastSent when it returns false, so this both
+                // tests the window and claims it for the send below.
+                if (!CaptureState.Throttled(_lastSent, kv.Key, ThrottleSec)) _due.Add(kv.Key);
+            }
+
+            for (int i = 0; i < _due.Count; i++)
+            {
+                var key = _due[i];
+                var entry = _dirty[key];
+                _dirty.Remove(key);
+                if (entry.unit == null) continue;
+
+                NetworkManager.Instance.BroadcastToClients(new AmmoStateEventMessage
+                {
+                    UnitId        = key.unit,
+                    AmmoName      = key.ammo,
+                    MagazineCount = entry.mag != null ? entry.mag.getAmmunitionCount(key.ammo) : -1,
+                    DisplayTotal  = entry.unit.getAmmunitionAmountByName(key.ammo),
+                });
+                Telemetry.Count("v2.capturedAmmoState");
+            }
+        }
+    }
+
+    /// <summary>Every ammo movement the host's own weapon panel sees. Both writers
+    /// are patched: changeAmmunitionAmount is the incremental one (launch, reload,
+    /// magazine) and setAmmunitionAmount the wholesale one (UpdateAmmoCount, refill).</summary>
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.changeAmmunitionAmount))]
+    public static class Patch_V2_AmmoTotalChanged_Capture
+    {
+        static void Postfix(ObjectBase __instance, string ammunitionName)
+            => AmmoStateCapture.OnAmmoTotalChanged(__instance, ammunitionName);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setAmmunitionAmount))]
+    public static class Patch_V2_AmmoTotalSet_Capture
+    {
+        static void Postfix(ObjectBase __instance, string ammunitionName)
+            => AmmoStateCapture.OnAmmoTotalChanged(__instance, ammunitionName);
     }
 
     [HarmonyPatch(typeof(WeaponMagazineSystem), nameof(WeaponMagazineSystem.decreaseAmmunitionCount),

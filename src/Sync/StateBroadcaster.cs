@@ -17,6 +17,37 @@ namespace SeapowerMultiplayer
             StartCoroutine(DamageCorrectionLoop());
             StartCoroutine(WaypointFlushLoop());
             StartCoroutine(SensorStateLoop());
+            StartCoroutine(UnitStatusLoop());
+        }
+
+        // ── Bottom-row unit status (host → client, both modes) ──────────────
+        //
+        // Same shape and reasoning as the sensor loop: the status line and the
+        // per-mount engagement state are host-decided, so without this a client
+        // looking at a ship it had ordered to engage saw a blank line and "Ready"
+        // on every mount. Not configurable for the same reason - it is the UI
+        // being right, not a choice about what to share. PvP scoping is handled
+        // inside the manager (remote player's own taskforce only).
+        private IEnumerator UnitStatusLoop()
+        {
+            var wait = new WaitForSeconds(0.5f);
+            while (true)
+            {
+                yield return wait;
+                if (!NetworkManager.Instance.IsEstablished) continue;
+                if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
+                if (SessionManager.SceneLoading) continue;
+
+                try
+                {
+                    if (Plugin.Instance.CfgIsHost.Value) UnitStatusManager.HostBroadcast();
+                    else                                 UnitStatusManager.ClientReassert();
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[UnitStatus] Sync failed: {ex.Message}");
+                }
+            }
         }
 
         // ── Sensor emitter state (host → client, both modes) ────────────────

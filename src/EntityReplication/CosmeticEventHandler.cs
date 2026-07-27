@@ -90,24 +90,36 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgIsHost.Value) return;
 
             var unit = ReplicaRegistry.Find(msg.UnitId) ?? StateSerializer.FindById(msg.UnitId);
-            if (unit?._obp?._weaponSystems == null) return;
+            if (unit == null) return;
 
-            foreach (var ws in unit._obp._weaponSystems)
+            // Magazine first, when this change came from one: its own bookkeeping
+            // moves the display total as a side effect, so the authoritative total
+            // below has to be written after it, not before.
+            if (msg.MagazineCount >= 0 && unit._obp?._weaponSystems != null)
             {
-                var mag = ws._vwp?._associatedMagazine;
-                if (mag == null || mag.getAmmunitionByName(msg.AmmoName) == null) continue;
+                foreach (var ws in unit._obp._weaponSystems)
+                {
+                    var mag = ws._vwp?._associatedMagazine;
+                    if (mag == null || mag.getAmmunitionByName(msg.AmmoName) == null) continue;
 
-                int current = mag.getAmmunitionCount(msg.AmmoName);
-                int delta = msg.MagazineCount - current;
-                if (delta > 0)
-                    mag.increaseAmmunitionCount(msg.AmmoName, delta);
-                else if (delta < 0)
-                    mag.decreaseAmmunitionCount(msg.AmmoName, -delta);
-
-                unit.UpdateAmmoCount();
-                Telemetry.Count("v2.appliedAmmoState");
-                break;
+                    int delta = msg.MagazineCount - mag.getAmmunitionCount(msg.AmmoName);
+                    if (delta > 0)
+                        mag.increaseAmmunitionCount(msg.AmmoName, delta);
+                    else if (delta < 0)
+                        mag.decreaseAmmunitionCount(msg.AmmoName, -delta);
+                    break;
+                }
             }
+
+            // The number the player reads, taken verbatim from the host. Not derived
+            // locally and not recomputed with UpdateAmmoCount(): the client's weapon
+            // systems never run launch() or its reload, so their loaded counts and
+            // container state stop matching the host as soon as anything fires, and
+            // UpdateAmmoCount's per-system term is _vwp._internalAmmoCount - a static
+            // ini capacity no launch ever decrements. setAmmunitionAmount writes the
+            // ReactiveDictionary the weapon panel observes, so the panel refreshes.
+            unit.setAmmunitionAmount(msg.AmmoName, msg.DisplayTotal);
+            Telemetry.Count("v2.appliedAmmoState");
         }
     }
 }

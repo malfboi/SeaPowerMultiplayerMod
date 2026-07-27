@@ -51,6 +51,7 @@ namespace SeapowerMultiplayer
         {
             _tombstones.Clear();
             _tombstoneAge.Clear();
+            _spawnFailures.Clear();
         }
 
         /// <summary>Assign the host's id without polluting the client's UID counter
@@ -94,14 +95,34 @@ namespace SeapowerMultiplayer
                     case SpawnKind.Unit:   SpawnUnitReplica(msg);   break;
                     case SpawnKind.Decoy:  SpawnDecoyReplica(msg);  break;
                 }
+                _spawnFailures.Remove(msg.EntityId);
             }
             catch (Exception ex)
             {
                 Telemetry.Count("v2.spawnFailed");
                 Plugin.Log.LogError($"[SpawnReplicator] Spawn failed id={msg.EntityId} kind={msg.Kind} " +
-                    $"ammo={msg.AmmoName} ini={msg.UnitIniName}: {ex}");
+                    $"ammo={msg.AmmoName} ini={msg.UnitIniName} shooter={msg.ShooterId}: {ex}");
+
+                // A spawn that throws (missing shooter, bad ammo ini, PlottingTable
+                // NRE) fails identically on every census re-request: a PvP session
+                // log showed five enemy sonobuoys retried every cycle for minutes -
+                // 77 exceptions - until they expired host-side. A couple of retries
+                // give a late-arriving dependency (the shooter's own spawn) a
+                // chance; after that, tombstone so the census stops asking.
+                _spawnFailures.TryGetValue(msg.EntityId, out int failures);
+                _spawnFailures[msg.EntityId] = ++failures;
+                if (failures >= MaxSpawnAttempts)
+                {
+                    _spawnFailures.Remove(msg.EntityId);
+                    Tombstone(msg.EntityId);
+                    Plugin.Log.LogWarning($"[SpawnReplicator] id={msg.EntityId} failed to spawn " +
+                        $"{MaxSpawnAttempts} times - giving up (tombstoned)");
+                }
             }
         }
+
+        private static readonly Dictionary<int, int> _spawnFailures = new();
+        private const int MaxSpawnAttempts = 3;
 
         /// <summary>Mirror a host aircraft/helicopter spawn (carrier launch, mission
         /// reinforcement) through the game's own creator, under the host's id.</summary>
@@ -404,10 +425,21 @@ namespace SeapowerMultiplayer
         /// </summary>
         private static void ConsumeShooterStores(ObjectBase? shooter, string ammoName)
         {
-            if (shooter == null || string.IsNullOrEmpty(ammoName)) return;
+            if (shooter == null || string.IsNullOrEmpty(ammoName))
+            {
+                Telemetry.Count("v2.storesNoShooter");
+                return;
+            }
 
+            // NOTE: with copyList:false this returns NULL on a miss - TryGetValue
+            // leaves the out-param null and the copy branch is skipped - so this
+            // used to be a silent give-up that left the client's count untouched.
             var systems = shooter.GetWeaponSystemsForAmmunition(ammoName, copyList: false);
-            if (systems == null) return;
+            if (systems == null || systems.Count == 0)
+            {
+                Telemetry.Count("v2.storesNoSystem");
+                return;
+            }
 
             // Prefer the system that visibly carries the round on a pylon.
             foreach (var ws in systems)
@@ -436,7 +468,21 @@ namespace SeapowerMultiplayer
                 }
             }
 
+            // Nothing here reports a loaded round of this ammo. The displayed count
+            // is unaffected - that arrives from the host as an absolute total - so
+            // this only means the local pylon/loaded bookkeeping could not be
+            // attributed. Named candidates, because which system SHOULD have held it
+            // is what distinguishes a client-side divergence from an ammo this
+            // platform never tracks as "loaded".
             Telemetry.Count("v2.storesConsumeMissed");
+            if (!Plugin.Instance.CfgVerboseDebug.Value) return;
+            var seen = new System.Text.StringBuilder();
+            foreach (var ws in systems)
+            {
+                if (seen.Length > 0) seen.Append(", ");
+                seen.Append($"{ws._systemName}/{ws.GetType().Name} loaded={ws.getLoadedAmmoCount(ammoName)}");
+            }
+            Plugin.Log.LogDebug($"[Stores] {shooter.name}: no system holds a loaded '{ammoName}' ({seen})");
         }
 
         private static AmmunitionParameters? GetAmmoParams(string ammoName)
