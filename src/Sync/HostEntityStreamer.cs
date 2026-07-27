@@ -173,9 +173,7 @@ namespace SeapowerMultiplayer
             if (_captured.Count == 0) return;
 
             float now = Time.unscaledTime;
-            float gameSeconds = Singleton<SeaPower.Environment>.Instance.Hour * 3600f
-                              + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
-                              + Singleton<SeaPower.Environment>.Instance.Seconds;
+            double gameSeconds = TimeSyncManager.MissionSeconds();
 
             _msg.Reset();
             _msg.ServerTick  = _serverTick;
@@ -192,22 +190,32 @@ namespace SeapowerMultiplayer
                              || current.Kind == UnitType.Bomb;
 
                 bool include;
+                string reason;
+                float heartbeatDue = 0f;
                 if (isWeapon)
                 {
                     include = true;
+                    reason = "weapon";
                 }
                 else if (!_lastSent.TryGetValue(id, out var previous))
                 {
                     include = true; // new entity - send now
+                    reason = "new";
                 }
                 else if (HasChanged(in current, in previous))
                 {
                     include = true;
+                    reason = "changed";
                 }
                 else
                 {
-                    include = now >= (_nextHeartbeat.TryGetValue(id, out var hb) ? hb : 0f);
+                    heartbeatDue = _nextHeartbeat.TryGetValue(id, out var hb) ? hb : 0f;
+                    include = now >= heartbeatDue;
+                    reason = include ? "heartbeat" : "unchanged";
                 }
+
+                if (MotionTrace.IsTracing(id))
+                    MotionTrace.HostStream(in current, _serverTick, gameSeconds, include, reason, heartbeatDue);
 
                 if (!include) continue;
 
@@ -288,8 +296,10 @@ namespace SeapowerMultiplayer
                 // DeckState channel, not the world-space stream
                 if (airKind && unit.transform.parent != null) continue;
 
-                var geo = Utils.worldPositionFromUnityToLongLat(
-                    unit.transform.position, Globals._currentCenterTile);
+                // Precise inverse, not the game's: its float32 path snaps east-west
+                // position to a ~1.1 m staircase before the value ever reaches the wire,
+                // and no client-side smoothing can recover what is quantized here.
+                var geo = GeoCodec.ToGeo(unit.transform.position);
 
                 float desiredAlt = 0f;
                 if (unit is Aircraft || unit is Helicopter || unit is Submarine)

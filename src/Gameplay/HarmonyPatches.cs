@@ -1315,7 +1315,7 @@ namespace SeapowerMultiplayer
             // Client: units we don't own are host-driven replicas. An order reaching
             // here for one came from our own local sim (unit state machines tick
             // outside the suppressed AI class) - block it locally AND upstream.
-            if (Suppression.ClientForeignUnit(unit)) return Refuse(msg);
+            if (Suppression.ClientForeignUnit(unit)) return Refuse(msg, "clientForeignUnit");
             // Co-op: block UI orders for units the remote player has selected (ally lock).
             if (UnitLockManager.BlocksOrdersFor(unit))
             {
@@ -1323,7 +1323,7 @@ namespace SeapowerMultiplayer
                 // worth telling them about. The others below are internal
                 // suppression of orders the player never issued.
                 UnitLockManager.NoteOrderRefused(unit);
-                return Refuse(msg);
+                return Refuse(msg, "allyLock");
             }
             // PvP: don't sync orders for weapons (missiles/torpedoes) - their internal
             // waypoint/guidance operations use local IDs meaningless to the remote side
@@ -1343,19 +1343,37 @@ namespace SeapowerMultiplayer
                     return true;
             }
             if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return Refuse(msg);
+            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return Refuse(msg, "notMyTaskforce");
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate - skip send, still execute locally
             NetworkManager.Instance.SendToServer(msg);
             return true;
         }
 
         /// <summary>Refuse the order locally and tag it, so the paired Postfix
-        /// does not broadcast what this machine just declined to do.</summary>
-        private static bool Refuse(PlayerOrderMessage msg)
+        /// does not broadcast what this machine just declined to do.
+        ///
+        /// The reason is logged, throttled per (unit, order, gate). Every gate here
+        /// used to refuse silently, which is indistinguishable from a broken order
+        /// path - the client executed nothing, sent nothing, and said nothing.
+        /// Internal sim calls are refused constantly, hence the throttle.</summary>
+        private static readonly Dictionary<(int, OrderType, string), float> _refusalLogThrottle = new();
+        private const float RefusalLogInterval = 5f;
+
+        internal static void ClearRefusalLogThrottle() => _refusalLogThrottle.Clear();
+
+        private static bool Refuse(PlayerOrderMessage msg, string gate)
         {
             _refusalPending  = true;
             _refusedEntityId = msg.SourceEntityId;
             _refusedOrder    = msg.Order;
+
+            var key = (msg.SourceEntityId, msg.Order, gate);
+            if (!_refusalLogThrottle.TryGetValue(key, out var next) || Time.unscaledTime >= next)
+            {
+                _refusalLogThrottle[key] = Time.unscaledTime + RefusalLogInterval;
+                Plugin.Log.LogInfo($"[Order] refused by {gate}: entity={msg.SourceEntityId} " +
+                    $"order={msg.Order} value={msg.Speed}");
+            }
             return false;
         }
 
@@ -1496,23 +1514,42 @@ namespace SeapowerMultiplayer
             float minInterval = GetMinInterval(msg.Order);
             if (minInterval > 0f && _lastSendTime.TryGetValue(key, out var lastTime) &&
                 Time.unscaledTime - lastTime < minInterval)
+            {
+                // The value CHANGED and we are still dropping it. For a player-issued
+                // order that is a lost command, not flood control - say so, because a
+                // silent drop here is indistinguishable from a broken order path.
+                Plugin.Log.LogWarning($"[Order] rate-limited: entity={msg.SourceEntityId} " +
+                    $"order={msg.Order} value={msg.Speed} suppressed " +
+                    $"({Time.unscaledTime - lastTime:F2}s < {minInterval:F2}s since last send)");
                 return false;
+            }
 
             _cache[key] = fp;
             _lastSendTime[key] = Time.unscaledTime;
             return true;
         }
 
-        /// <summary>Update cache without checking (for network-received orders).</summary>
+        /// <summary>
+        /// Record a network-RECEIVED order's value so local engine calls that merely
+        /// re-apply it are recognised as duplicates and not echoed back.
+        ///
+        /// Deliberately does NOT touch <see cref="_lastSendTime"/>. That is the
+        /// send-rate limiter, and a received order is not a send. Stamping it here
+        /// permanently locked out the orders that have a min interval: the host
+        /// rebroadcasts every setTelegraph it applies (including its own autopilot's,
+        /// which run at tick rate), so the echo kept the client's timestamp fresh and
+        /// every speed order the player then issued was executed locally, never sent,
+        /// and reverted by the next state packet. SetSpeed (0.5 s) was the visible
+        /// one; SensorToggle and SetEMCON (10 s) were affected the same way.
+        /// </summary>
         internal static void UpdateCache(PlayerOrderMessage msg)
         {
-            var key = MakeKey(msg);
-            _cache[key] = MakeFingerprint(msg);
-            _lastSendTime[key] = Time.unscaledTime;
+            _cache[MakeKey(msg)] = MakeFingerprint(msg);
         }
 
         internal static void Clear()
         {
+            OrderSyncHelper.ClearRefusalLogThrottle();
             _cache.Clear();
             _lastSendTime.Clear();
         }

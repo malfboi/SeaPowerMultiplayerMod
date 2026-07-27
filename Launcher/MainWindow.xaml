@@ -2,8 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Seapower Multiplayer Launcher"
-        Width="520" Height="580"
-        MinWidth="480" MinHeight="540"
+        Width="520" Height="800"
+        MinWidth="480" MinHeight="760"
         ResizeMode="CanMinimize"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource PrimaryBg}">
@@ -22,7 +22,7 @@
                 <RowDefinition Height="Auto"/>
                 <!-- Network Settings -->
                 <RowDefinition Height="*"/>
-                <!-- Spacer -->
+                <!-- What's New -->
                 <RowDefinition Height="Auto"/>
                 <!-- Buttons -->
                 <RowDefinition Height="Auto"/>
@@ -208,6 +208,50 @@
                          Width="50"
                          TextChanged="TxtHz_TextChanged"/>
                 </StackPanel>
+            </StackPanel>
+
+            <!-- What's New -->
+            <StackPanel Grid.Row="5" VerticalAlignment="Top" Margin="0,16,0,0">
+                <Rectangle Height="1"
+                       Fill="{StaticResource BorderColor}"
+                       Margin="0,0,0,12"/>
+
+                <Label x:Name="LblWhatsNew"
+                   Content="WHAT'S NEW"
+                   FontSize="11"
+                   FontWeight="SemiBold"
+                   Foreground="{StaticResource TextSecondary}"
+                   Margin="0,0,0,8"/>
+
+                <!-- Bounded so a long list can never push the Launch button off
+                     the bottom of this fixed-height window. -->
+                <Border Background="{StaticResource SecondaryBg}"
+                    CornerRadius="4"
+                    Padding="10,8">
+                    <ScrollViewer MaxHeight="220" VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="LstWhatsNew">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,0,0,4">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="•"
+                                           Foreground="{StaticResource AccentBlue}"
+                                           FontSize="12"
+                                           Margin="0,0,6,0"/>
+                                    <TextBlock Grid.Column="1"
+                                           Text="{Binding}"
+                                           Foreground="{StaticResource TextPrimary}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    </ScrollViewer>
+                </Border>
             </StackPanel>
 
             <!-- Buttons -->

@@ -43,19 +43,24 @@ namespace SeapowerMultiplayer.Messages
     public class EntityStateBatchMessage : INetMessage
     {
         public uint  ServerTick;
-        public float GameSeconds;
+
+        /// <summary>Host mission clock at capture. DOUBLE, not float: this is
+        /// seconds-since-midnight, so a float32 holds only ~4 ms of resolution by
+        /// mid-morning - coarser than a frame, and the client interpolates against it.
+        /// The extra 4 bytes ride once per batch, not per entity.</summary>
+        public double GameSeconds;
         public readonly List<EntityState> Entries = new(64);
 
         public MessageType Type => MessageType.EntityStateBatch;
 
         /// <summary>Serialized size of one entry (wire bytes).</summary>
         public const int EntryWireSize = 35;
-        public const int HeaderWireSize = 1 + 4 + 4 + 2; // msgType + tick + gameSeconds + count
+        public const int HeaderWireSize = 1 + 4 + 8 + 2; // msgType + tick + gameSeconds(double) + count
 
         public void Reset()
         {
             ServerTick = 0;
-            GameSeconds = 0f;
+            GameSeconds = 0d;
             Entries.Clear();
         }
 
@@ -90,7 +95,7 @@ namespace SeapowerMultiplayer.Messages
             var msg = new EntityStateBatchMessage
             {
                 ServerTick  = reader.GetUInt(),
-                GameSeconds = reader.GetFloat(),
+                GameSeconds = reader.GetDouble(),
             };
             int count = reader.GetUShort();
             for (int i = 0; i < count; i++)

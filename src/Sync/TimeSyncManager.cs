@@ -17,6 +17,19 @@ namespace SeapowerMultiplayer
     /// </summary>
     public static class TimeSyncManager
     {
+        /// <summary>
+        /// Seconds since midnight on the mission clock - the domain both sides stamp
+        /// state with. DOUBLE deliberately: summed as float this holds only ~4 ms of
+        /// resolution at mission-clock magnitudes, which is coarser than a frame and
+        /// is what the client interpolates against.
+        /// </summary>
+        public static double MissionSeconds()
+        {
+            if (!Singleton<SeaPower.Environment>.InstanceExists(false)) return double.NaN;
+            var env = Singleton<SeaPower.Environment>.Instance;
+            return env.Hour * 3600d + env.Minutes * 60d + env.Seconds;
+        }
+
         /// <summary>True when client has sent a time-change request and is waiting for host (default mode).</summary>
         public static bool PendingRequest { get; private set; }
 
@@ -269,7 +282,12 @@ namespace SeapowerMultiplayer
                     float tc = newTimeScale;
                     if (tc <= 0f) tc = 0f; // pausing = no time advancement during RTT
                     float estimated = hostGameSeconds + rttSec * tc;
+                    MotionTrace.ClockSnap(MissionSeconds(), estimated, tc);
                     StateApplier.SetGameTime(Singleton<SeaPower.Environment>.Instance, estimated);
+                    // Buffered snapshot stamps and the measured clock offset are both
+                    // relative to the clock we just discarded, and the offset now feeds
+                    // the render time - a stale one throws units off their track.
+                    UnitReplicaDriver.OnMissionClockSnapped();
                     Plugin.Log.LogInfo($"[TimeSync] Snapped game time to {estimated:F1}s (host={hostGameSeconds:F1}, rtt_adj={rttSec * tc:F2})");
                 }
 

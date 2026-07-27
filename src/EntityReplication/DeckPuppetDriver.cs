@@ -171,10 +171,15 @@ namespace SeapowerMultiplayer
                 if (!p.HasSample) continue;
 
                 var tr = p.Unit.transform;
+                Vector3 preLocal = tr.localPosition;
                 tr.localPosition = Vector3.Lerp(tr.localPosition, p.TargetLocal, LerpFactor);
                 var e = tr.localEulerAngles;
                 tr.localEulerAngles = new Vector3(
                     e.x, Mathf.LerpAngle(e.y, p.TargetYawDeg, LerpFactor), e.z);
+
+                if (MotionTrace.IsTracing(kv.Key))
+                    MotionTrace.DeckPuppet(p.Unit, p.Carrier, preLocal, p.TargetLocal,
+                        p.TargetYawDeg, LerpFactor);
 
                 // Map/sensor maths read the geo position
                 p.Unit._geoPosition = Utils.worldPositionFromUnityToLongLat(

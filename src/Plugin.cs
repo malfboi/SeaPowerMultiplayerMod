@@ -117,6 +117,7 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<float> CfgNetSimLossPct = null!;
         internal ConfigEntry<int> CfgNetSimLatencyMs = null!;
         internal ConfigEntry<int> CfgNetSimJitterMs = null!;
+        internal ConfigEntry<bool> CfgMotionTrace = null!;
 
         // PvP sync tuning
         internal ConfigEntry<float> CfgDamageSyncInterval = null!;
@@ -173,6 +174,13 @@ namespace SeapowerMultiplayer
                 "TESTING ONLY: vary NetSimLatencyMs by ±this many milliseconds per packet. " +
                 "A constant delay cannot reproduce arrival-time variance, which is what " +
                 "high-ping links actually inflict on the replica stream. Needs NetSimLatencyMs > 0.");
+            CfgMotionTrace = Config.Bind("Debug", "MotionTrace", false,
+                "DIAGNOSTIC: write a per-frame motion trace CSV to <persistentDataPath>/MPTrace/ for " +
+                "one unit, pinned by id when tracing starts. Select the same unit on host and client, " +
+                "start the trace on both, then DESELECT on both - the files line up on the mission " +
+                "clock so host truth can be diffed against client rendering, and deselecting releases " +
+                "the co-op ally lock so the unit can still be ordered. Ctrl+F11 toggles it in-game " +
+                "(each enable starts a new file and re-pins).");
 
             // PvP sync tuning
             CfgDamageSyncInterval   = Config.Bind("Sync", "DamageSyncInterval",     2f,   "Seconds between damage state corrections (default 2)");
@@ -367,14 +375,18 @@ namespace SeapowerMultiplayer
             // Advance per-frame telemetry ring (send-bytes flatness)
             Telemetry.FrameTick();
 
-            // v2: drive kinematic weapon replicas (client) + keep defence switch asserted
-            WeaponReplicaDriver.Tick();
-            UnitReplicaDriver.Tick();
-            DeckPuppetDriver.Tick();
+            // v2: drive kinematic weapon replicas (client) + keep defence switch asserted.
+            // Normally already done this frame by the RenderPosition.OnUpdate prefix, so
+            // the camera sees our writes; this is the fallback when that never runs.
+            ReplicaTick.RunOnce();
             CarrierOpsHandler.Tick();
             WeaponHatchHandler.Tick();
             Suppression.EnforceDefenseFlag();
             UnitLockManager.SampleInput();
+
+            // Ctrl+F11 motion trace. Last of the per-frame hooks so the FRAME row
+            // records the transform the replica drivers actually left behind.
+            MotionTrace.Tick();
 
             // Check for pending session sync retries (failed sends)
             SessionManager.TickRetry();
@@ -458,6 +470,7 @@ namespace SeapowerMultiplayer
 
         private void OnDestroy()
         {
+            MotionTrace.Close();
             NetworkManager.Instance.Stop();
             _harmony.UnpatchSelf();
         }

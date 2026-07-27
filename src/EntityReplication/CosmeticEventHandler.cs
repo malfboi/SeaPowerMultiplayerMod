@@ -31,6 +31,14 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgIsHost.Value) return;
 
             var unit = ReplicaRegistry.Find(msg.ShooterId) ?? StateSerializer.FindById(msg.ShooterId);
+            // Traced either as the shooter or as the thing being shot at: an undelayed
+            // tracer against a render-delayed target is a visible misalignment.
+            if (MotionTrace.IsTracing(msg.ShooterId) || MotionTrace.IsTracing(msg.TargetId))
+                MotionTrace.TerminalEvent("GUNBURST", msg.ShooterId, unit,
+                    Utils.longLatToLocalV3(
+                        new GeoPosition(msg.AimLatDeg, msg.AimLonDeg, msg.AimHeightM),
+                        Globals._currentCenterTile),
+                    $"kind={msg.Kind} target={msg.TargetId} toTargetTime={msg.ToTargetTime:F3}");
             if (unit == null || unit._obp?._weaponSystems == null) return;
             if (msg.MountIndex < 0 || msg.MountIndex >= unit._obp._weaponSystems.Count) return;
             var ws = unit._obp._weaponSystems[msg.MountIndex];

@@ -149,6 +149,32 @@ namespace SeapowerMultiplayer
             if (string.IsNullOrEmpty(missionFileName))
                 missionFileName = "MPMission.ini";
 
+            // Campaign missions save TWO files: the .sav plus a companion
+            // "<save>_campaign.ini" holding mission unlock/complete flags and
+            // campaign persistent data. The save references it via
+            // File/LinearCampaignSavePath, and SceneCreator refuses to load the
+            // mission without it. SaveCampaign() runs synchronously inside
+            // WriteMissionToFile (before the .sav's own async write), so it is
+            // already on disk here - read it raw to keep its "#!alias" first line,
+            // which is what points back at the authored campaign.
+            string campaignFileName    = "";
+            string campaignFileContent = "";
+
+            if (saveContent.IndexOf("LinearCampaignSavePath", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                string campaignPath = SaveLoadManager.GetCampaignSaveFilePathFromMissionSaveFilePath(savePath);
+                if (File.Exists(campaignPath))
+                {
+                    campaignFileName    = Path.GetFileName(campaignPath);
+                    campaignFileContent = File.ReadAllText(campaignPath);
+                    Log.LogInfo($"[Session] Campaign save: {campaignFileName} ({campaignFileContent.Length} chars)");
+                }
+                else
+                {
+                    Log.LogWarning($"[Session] Save references a campaign but {campaignPath} is missing — the client will not be able to load it.");
+                }
+            }
+
             float gameSeconds = Singleton<SeaPower.Environment>.Instance.Seconds;
 
             var msg = new SessionSyncMessage
@@ -159,6 +185,8 @@ namespace SeapowerMultiplayer
                 RngSeed             = rngSeed,
                 GameSeconds         = gameSeconds,
                 HostTimeVoteEnabled = Plugin.Instance.CfgTimeVote.Value,
+                CampaignFileName    = campaignFileName,
+                CampaignFileContent = campaignFileContent,
             };
 
             Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
@@ -300,6 +328,24 @@ namespace SeapowerMultiplayer
                     patchedSave,
                     @"(?im)^(\s*BaseFile\s*=\s*).*$",
                     m => m.Groups[1].Value + missionPath.Replace("\\", "/"));
+            }
+
+            // Campaign missions need the companion "<save>_campaign.ini" next to the
+            // save. GetCampaignSaveFilePath resolves a bare LinearCampaignSavePath
+            // against the save's own directory, so write it under OUR save's name and
+            // repoint the key - the host's value is either its own filename or an
+            // absolute host path, neither of which resolves here.
+            if (!string.IsNullOrEmpty(msg.CampaignFileContent))
+            {
+                string campaignPath = SaveLoadManager.GetCampaignSaveFilePathFromMissionSaveFilePath(savePath);
+                Directory.CreateDirectory(savesDir);
+                File.WriteAllText(campaignPath, msg.CampaignFileContent);
+                Log.LogInfo($"[Session] Wrote campaign save: host's {msg.CampaignFileName} -> {campaignPath} ({msg.CampaignFileContent.Length} chars)");
+
+                patchedSave = Regex.Replace(
+                    patchedSave,
+                    @"(?im)^(\s*LinearCampaignSavePath\s*=\s*).*$",
+                    m => m.Groups[1].Value + Path.GetFileName(campaignPath));
             }
 
             // PvP: swap PlayerTaskforce ↔ EnemyTaskforce so client controls the opposing side

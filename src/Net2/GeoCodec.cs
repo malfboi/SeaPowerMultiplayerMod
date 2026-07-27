@@ -44,10 +44,62 @@ namespace SeapowerMultiplayer.Net2
         }
 
         public static void PutGeoFromUnity(NetDataWriter w, Vector3 worldPos)
-            => PutGeo(w, Utils.worldPositionFromUnityToLongLat(worldPos, Globals._currentCenterTile));
+            => PutGeo(w, ToGeo(worldPos));
 
         public static Vector3 GetGeoAsUnity(NetDataReader r)
-            => Utils.longLatToLocalV3(GetGeo(r), Globals._currentCenterTile);
+        {
+            var g = GetGeo(r);
+            return ToUnity(g._latitude, g._longitude, (float)g._height);
+        }
+
+        // ── Precise geo <-> Unity ────────────────────────────────────────────
+        //
+        // The game's own Utils.longLatToLocal / worldPositionFromUnityToLongLat do
+        // this arithmetic in float32, and both push the longitude through a value of
+        // ~180 before scaling. A float32 near 180 resolves 1.5e-5 deg, so BOTH
+        // directions snap east-west position to a ~1.1 m staircase (north-south fares
+        // better at ~0.21 m, because 90-lat is a smaller magnitude).
+        //
+        // The host never notices: it renders its own transform and never round-trips.
+        // The client does nothing but round-trip - it converts the host's geo into a
+        // Unity target every frame - so the staircase lands directly on the replica,
+        // and on a roughly north-south heading it lands almost entirely on the LATERAL
+        // axis. That was the side-to-side jitter: a ~1 m tread, not smoothing error.
+        //
+        // These are the identical linear mapping in double, so results agree with the
+        // game's world to well under a millimetre while dropping the staircase. Keep
+        // them exact inverses of each other.
+        private const double UnitsPerTile = 330.71396d;
+        private const double DegPerTile   = 0.2d;
+        private const double TileEdgeDeg  = 1d / 120d;
+
+        public static Vector3 ToUnity(double latDeg, double lonDeg, float heightM)
+        {
+            var centre = Globals._currentCenterTile;
+
+            double lonTiles = (lonDeg + 180d - TileEdgeDeg) / DegPerTile - Mathf.FloorToInt(centre.x);
+            // Antimeridian handling, mirroring Utils.calculateCorrectionFor180EW
+            if (System.Math.Abs(lonTiles) > 1795d) lonTiles += lonTiles > 1795d ? -1800d : 1800d;
+
+            double latTiles = (90d - latDeg - TileEdgeDeg) / DegPerTile - Mathf.FloorToInt(centre.y);
+
+            return new Vector3(
+                (float)(UnitsPerTile * (lonTiles - 0.5d)),
+                heightM,
+                (float)(-UnitsPerTile * (latTiles - 0.5d)));
+        }
+
+        public static GeoPosition ToGeo(Vector3 worldPos)
+        {
+            var centre = Globals._currentCenterTile;
+
+            double lon = DegPerTile * (worldPos.x / UnitsPerTile + Mathf.FloorToInt(centre.x) + 0.5d)
+                         + TileEdgeDeg - 180d;
+            double lat = 90d - (DegPerTile * (-worldPos.z / UnitsPerTile + Mathf.FloorToInt(centre.y) + 0.5d)
+                         + TileEdgeDeg);
+
+            return new GeoPosition(Utils.WrapAngle90(lat), Utils.WrapAngle(lon), worldPos.y);
+        }
 
         // ── Angle / speed quantizers ─────────────────────────────────────────
 

@@ -122,17 +122,92 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>
-        /// Find any ObjectBase by UniqueID. Uses SceneCreator's fast dictionary first,
-        /// falls back to global search for dynamically spawned objects (missiles, torpedoes)
-        /// that aren't in the mission-file dictionary.
+        /// Find any ObjectBase by UniqueID.
+        ///
+        /// NEITHER of the game's own lookups may be used on a polled path. Both are
+        /// scans, and both get slower as a mission runs:
+        ///   SceneCreator.FindObjectById  - linear over ObjectsByPvKey, and that
+        ///     dictionary is only ever written during scene/save load, so every
+        ///     runtime spawn (launched aircraft, weapons, decoys) misses it and pays
+        ///     the full scan before falling through.
+        ///   SceneCreator.FindGlobalObjectById - Resources.FindObjectsOfTypeAll
+        ///     &lt;ObjectBase&gt;, which walks every loaded ObjectBase including inactive
+        ///     ones and prefabs and allocates an array per call. WakeBubble is an
+        ///     ObjectBase and ships emit them continuously, so the population climbs
+        ///     all session (measured: 1075 -> 1414 across ~65 min).
+        /// Called for every entry of the 2 Hz sensor/status reasserts and the 3 Hz
+        /// contact reveal sweep, that product is what turns into stutter after an
+        /// hour, on host and client alike.
+        ///
+        /// So: the mod's own O(1) indices first, and the scan only as a genuine last
+        /// resort - rate-limited per id, because an id that is absent stays absent
+        /// and rescanning it twice a second is the exact cost being removed.
         /// </summary>
-        public static ObjectBase FindById(int id)
+        public static ObjectBase? FindById(int id)
         {
-            var obj = Singleton<SceneCreator>.Instance.FindObjectById(id);
+            if (id == 0) return null;
+
+            // Every ObjectBase passes through the Awake hook that feeds this, so a
+            // live object is in here whatever spawned it.
+            var obj = UnitRegistry.ById(id);
             if (obj != null) return obj;
-            return SceneCreator.FindGlobalObjectById(id);
+
+            // Client-side replicas whose ids the host assigned.
+            obj = ReplicaRegistry.Find(id);
+            if (obj != null) return obj;
+
+            return ScanForId(id);
         }
 
+        // ── Fallback scan (last resort) ──────────────────────────────────────
+
+        /// <summary>Ids the scan already failed on, and when. An id absent from both
+        /// registries is almost always genuinely gone (a destroyed unit still sitting
+        /// in a host-sent table until the next full sweep), and re-scanning it on
+        /// every poll is precisely the cost this exists to avoid.</summary>
+        private static readonly Dictionary<int, float> _scanMissAt = new();
+        private const float RescanIntervalSec = 10f;
+        private const int   MissCacheSweepAt  = 256;
+
+        internal static void ResetLookupCache() => _scanMissAt.Clear();
+
+        private static ObjectBase? ScanForId(int id)
+        {
+            float now = Time.unscaledTime;
+            if (_scanMissAt.TryGetValue(id, out float missedAt) && now - missedAt < RescanIntervalSec)
+            {
+                // The scans this suppressed. Its rate is what used to be paid.
+                Telemetry.Count("lookup.scanSuppressed");
+                return null;
+            }
+
+            // Both scans are expensive and both get worse as the mission runs, so
+            // this counter is the one to watch in the F9 overlay: it should stay
+            // near-flat over a long session, not climb with the clock.
+            Telemetry.Count("lookup.scan");
+            var obj = Singleton<SceneCreator>.Instance.FindObjectById(id);
+            if (obj == null) obj = SceneCreator.FindGlobalObjectById(id);
+
+            if (obj != null)
+            {
+                _scanMissAt.Remove(id);
+                return obj;
+            }
+
+            if (_scanMissAt.Count >= MissCacheSweepAt) SweepMissCache(now);
+            _scanMissAt[id] = now;
+            return null;
+        }
+
+        /// <summary>Drop verdicts that have expired anyway, so the cache cannot grow
+        /// without bound over a long mission.</summary>
+        private static void SweepMissCache(float now)
+        {
+            var stale = new List<int>();
+            foreach (var kv in _scanMissAt)
+                if (now - kv.Value >= RescanIntervalSec) stale.Add(kv.Key);
+            for (int i = 0; i < stale.Count; i++) _scanMissAt.Remove(stale[i]);
+        }
     }
 
     public static class StateApplier
@@ -243,6 +318,10 @@ namespace SeapowerMultiplayer
                 obj.SetUniqueId(hostId);
 
             Singleton<SceneCreator>.Instance._UID = savedUid;
+            // SetUniqueId bypasses the Awake/OnDestroy hooks, so the id index is now
+            // holding the pre-remap ids.
+            UnitRegistry.Reindex();
+            StateSerializer.ResetLookupCache();
             Plugin.Log.LogInfo($"[StateApplier] Alignment: {reassignments.Count} units remapped from first state update");
         }
 
@@ -679,7 +758,7 @@ namespace SeapowerMultiplayer
 
                     case Messages.OrderType.ReturnToBase:
                     {
-                        ObjectBase homeBase = null;
+                        ObjectBase? homeBase = null;
                         if (msg.TargetEntityId != 0)
                             homeBase = StateSerializer.FindById(msg.TargetEntityId);
 

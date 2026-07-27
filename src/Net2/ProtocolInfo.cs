@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 218; // UnitStatus (bottom-row status line + mount engagement); AmmoState carries the host's displayed total
+        public const ushort ProtocolVersion = 220; // SessionSync carries the campaign save companion file (campaign missions failed to load client-side)
 
         /// <summary>LiteNetLib connection key - versioned so old/new builds cannot pair.</summary>
         public static string ConnectKey => $"{PluginInfo.PLUGIN_GUID}/p{ProtocolVersion}";

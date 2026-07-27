@@ -20,6 +20,18 @@ namespace SeapowerMultiplayer
         private static readonly List<Torpedo>    _torpedoes   = new();
         private static readonly List<Bomb>       _bombs       = new();
 
+        // O(1) id lookup, replacing SceneCreator.FindObjectById (linear scan of
+        // ObjectsByPvKey) and FindGlobalObjectById (Resources.FindObjectsOfTypeAll)
+        // on the polled lookup paths - see StateSerializer.FindById.
+        //
+        // _idOf is the membership test Register/Unregister use. It has to exist
+        // separately from _byId: SetUniqueId re-keys units at runtime (the
+        // alignment pass), which leaves _byId holding the OLD id, and a membership
+        // test keyed on the current id would then read as "not registered" and
+        // double-add to the lists.
+        private static readonly Dictionary<int, ObjectBase>  _byId = new();
+        private static readonly Dictionary<ObjectBase, int>  _idOf = new();
+
         public static IReadOnlyList<ObjectBase> All         => _allUnits;
         public static IReadOnlyList<Vessel>     Vessels     => _vessels;
         public static IReadOnlyList<Submarine>  Submarines  => _submarines;
@@ -30,14 +42,30 @@ namespace SeapowerMultiplayer
         public static IReadOnlyList<Torpedo>    Torpedoes   => _torpedoes;
         public static IReadOnlyList<Bomb>       Bombs       => _bombs;
 
+        /// <summary>O(1) id lookup. Returns null for an unknown id or one whose
+        /// object Unity has since destroyed (purged lazily - OnDestroy normally
+        /// gets there first via Unregister).</summary>
+        public static ObjectBase? ById(int id)
+        {
+            if (id == 0 || !_byId.TryGetValue(id, out var obj)) return null;
+            if (obj == null) // Unity lifetime check - destroyed without OnDestroy reaching us
+            {
+                _byId.Remove(id);
+                _idOf.Remove(obj!); // still a live C# reference; only Unity's == calls it null
+                return null;
+            }
+            return obj;
+        }
+
         public static void Register(ObjectBase obj)
         {
             if (obj == null) return;
             // Idempotent: pooled weapons re-launch without a fresh Awake, so the
             // launch hook re-registers objects that may already be tracked.
-            if (_allUnits.Contains(obj)) return;
+            if (_idOf.ContainsKey(obj)) return;
 
             _allUnits.Add(obj);
+            Index(obj);
 
             switch (obj)
             {
@@ -56,6 +84,15 @@ namespace SeapowerMultiplayer
         {
             if (obj == null) return;
 
+            if (_idOf.TryGetValue(obj, out int id))
+            {
+                _idOf.Remove(obj);
+                // Only drop the id slot if it still points at THIS object - a
+                // re-keyed unit can leave another object owning the old id.
+                if (_byId.TryGetValue(id, out var current) && ReferenceEquals(current, obj))
+                    _byId.Remove(id);
+            }
+
             _allUnits.Remove(obj);
 
             switch (obj)
@@ -71,11 +108,36 @@ namespace SeapowerMultiplayer
             }
         }
 
+        private static void Index(ObjectBase obj)
+        {
+            int id = obj.UniqueID;
+            _idOf[obj] = id;
+            if (id != 0) _byId[id] = obj;
+        }
+
+        /// <summary>
+        /// Rebuild the id index from the tracked objects. Needed after anything
+        /// calls ObjectBase.SetUniqueId - the alignment pass re-keys units in
+        /// place, which the Awake/OnDestroy hooks never see.
+        /// </summary>
+        public static void Reindex()
+        {
+            _byId.Clear();
+            _idOf.Clear();
+            for (int i = 0; i < _allUnits.Count; i++)
+            {
+                var obj = _allUnits[i];
+                if (obj != null) Index(obj);
+            }
+        }
+
         /// <summary>
         /// Clear all lists. Call on scene load/reset.
         /// </summary>
         public static void Clear()
         {
+            _byId.Clear();
+            _idOf.Clear();
             _allUnits.Clear();
             _vessels.Clear();
             _submarines.Clear();
@@ -98,6 +160,10 @@ namespace SeapowerMultiplayer
 
             foreach (var obj in Object.FindObjectsByType<ObjectBase>(FindObjectsSortMode.None))
                 Register(obj);
+
+            // The negative cache below remembers ids the fallback scan failed on;
+            // a fresh scene makes every one of those verdicts stale.
+            StateSerializer.ResetLookupCache();
 
             Plugin.Log.LogInfo(
                 $"[UnitRegistry] PopulateFromScene: {_allUnits.Count} total " +

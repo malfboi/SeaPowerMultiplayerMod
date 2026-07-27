@@ -509,6 +509,10 @@ namespace SeapowerMultiplayer
             var rot = Quaternion.Euler(GeoCodec.UnpackAngleCdeg(msg.PitchQ), GeoCodec.UnpackHeading(msg.HeadingQ), 0f);
 
             var obj = ReplicaRegistry.Find(msg.WeaponId);
+            if (MotionTrace.IsTracing(msg.WeaponId))
+                MotionTrace.TerminalEvent("IMPACT", msg.WeaponId, obj, pos,
+                    $"hitUnit={msg.HitUnitId}");
+
             if (obj is WeaponBase wb && !wb.IsDestroyed)
             {
                 wb.transform.position = pos;
@@ -536,6 +540,12 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgIsHost.Value) return;
 
             var obj = ReplicaRegistry.Find(msg.EntityId) ?? StateSerializer.FindById(msg.EntityId);
+            if (MotionTrace.IsTracing(msg.EntityId))
+                MotionTrace.TerminalEvent("DESPAWN", msg.EntityId, obj,
+                    Utils.longLatToLocalV3(new GeoPosition(msg.LatDeg, msg.LonDeg, msg.HeightM),
+                        Globals._currentCenterTile),
+                    $"cause={msg.Cause}");
+
             if (obj is WeaponBase wb)
             {
                 using (Authority.Allowed())
@@ -568,6 +578,10 @@ namespace SeapowerMultiplayer
         {
             if (Plugin.Instance.CfgIsHost.Value) return;
             var unit = ReplicaRegistry.Find(msg.UnitId) ?? StateSerializer.FindById(msg.UnitId);
+            if (MotionTrace.IsTracing(msg.UnitId))
+                MotionTrace.TerminalEvent("DESTROY", msg.UnitId, unit,
+                    unit != null ? unit.transform.position : Vector3.zero,
+                    $"mode={msg.Mode} killerWeapon={msg.KillerWeaponId} killerUnit={msg.KillerUnitId}");
             if (unit == null || unit is WeaponBase) return;
 
             if (msg.Mode == DestroyEventMessage.ModeStartSinking)

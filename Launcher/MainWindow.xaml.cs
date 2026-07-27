@@ -18,6 +18,8 @@ namespace SeapowerMultiplayer.Launcher
         {
             InitializeComponent();
             TxtVersion.Text = $"v{CurrentVersion}";
+            LblWhatsNew.Content = $"WHAT'S NEW IN v{CurrentVersion}";
+            LstWhatsNew.ItemsSource = WhatsNew;
             Loaded += OnLoaded;
         }
 
@@ -396,6 +398,19 @@ namespace SeapowerMultiplayer.Launcher
         }
 
         private const string CurrentVersion = "0.3.3";
+
+        /// <summary>Shown in the WHAT'S NEW panel. Replace wholesale each release.</summary>
+        private static readonly string[] WhatsNew =
+        {
+            "Client aircraft no longer spam chaff",
+            "Weapon ammo counts are accurate on all client systems",
+            "AI sensor state is synced to client in CoOp",
+            "Contacts synced between client and host correctly in CoOp sharing contact numbers, status, and identification",
+            "Client replicates aircraft evasive maneuvers",
+            "Fixed an O(n*m) lookup causing missions to stutter after ~1 hour for both sides",
+            "Client jittering solved for ships, subs, and missiles",
+            "Improved networking robustness",
+        };
 
         private async void BtnLaunch_Click(object sender, RoutedEventArgs e)
         {
