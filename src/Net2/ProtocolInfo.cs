@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 221; // Hello carries the game build version (mismatched builds crashed the client's save load)
+        public const ushort ProtocolVersion = 222; // EntitySpawn carries the launch callsign + formation leader
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

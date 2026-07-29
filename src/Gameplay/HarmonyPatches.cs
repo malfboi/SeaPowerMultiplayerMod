@@ -215,6 +215,24 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(Vessel), nameof(Vessel.setTelegraph))]
     public static class Patch_Vessel_SetTelegraph
     {
+        // Host: last telegraph the remote player commanded, per vessel. The
+        // submarine override has had this since its own logic (snorkel/cavitation/
+        // evasion) was found re-speeding remote-owned boats; surface ships never
+        // did, so anything host-side that calls setTelegraph - morale, formation
+        // speed matching, state machines - could re-speed the remote player's
+        // ships at will, and it stuck, because the host is authoritative.
+        private static readonly Dictionary<int, int> _remoteCommanded = new();
+        internal static void Reset() => _remoteCommanded.Clear();
+
+        /// <summary>A custom (slider) speed matches no telegraph, so record a value
+        /// no telegraph can equal - local callers are then locked out of the speed
+        /// entirely, exactly as they are once the remote player picks a preset.</summary>
+        internal static void NoteRemoteCustomSpeed(Vessel v)
+        {
+            if (Suppression.HostSuppressesRemoteTfAi(v))
+                _remoteCommanded[v.UniqueID] = int.MinValue;
+        }
+
         static PlayerOrderMessage Msg(Vessel v, int telegraph) => new PlayerOrderMessage
         {
             SourceEntityId = v.UniqueID,
@@ -222,11 +240,35 @@ namespace SeapowerMultiplayer
             Speed          = telegraph,
         };
 
-        static bool Prefix(Vessel __instance, int telegraph) =>
-            OrderSyncHelper.Prefix(__instance, Msg(__instance, telegraph));
+        static bool Prefix(Vessel __instance, int telegraph, out bool __state)
+        {
+            __state = true; // executed (Postfix may broadcast)
 
-        static void Postfix(Vessel __instance, int telegraph) =>
+            if (OrderHandler.ApplyingFromNetwork)
+            {
+                if (Suppression.HostSuppressesRemoteTfAi(__instance))
+                    _remoteCommanded[__instance.UniqueID] = telegraph;
+                return true;
+            }
+
+            if (Suppression.HostSuppressesRemoteTfAi(__instance)
+                && _remoteCommanded.TryGetValue(__instance.UniqueID, out int cmd)
+                && telegraph != cmd)
+            {
+                __state = false;
+                return false;
+            }
+
+            bool run = OrderSyncHelper.Prefix(__instance, Msg(__instance, telegraph));
+            __state = run;
+            return run;
+        }
+
+        static void Postfix(Vessel __instance, int telegraph, bool __state)
+        {
+            if (!__state) return;
             OrderSyncHelper.Postfix(__instance, Msg(__instance, telegraph));
+        }
     }
 
     /// <summary>Submarine has its OWN setTelegraph override (it is NOT a Vessel) -

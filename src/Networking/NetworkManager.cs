@@ -351,6 +351,7 @@ namespace SeapowerMultiplayer
                 HostEntityStreamer.ClearViewportHint();
                 SpawnReplicator.Reset();
                 WeaponReplicaDriver.Reset();
+                UnitIdentityApplier.Reset();
                 EntityCensusManager.Reset();
                 Patch_V2_MissionEnd_Capture.Reset();
                 CaptureState.Clear();
@@ -367,6 +368,10 @@ namespace SeapowerMultiplayer
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
+                // Remote-owner speed locks: same mission reloaded reuses UniqueIDs,
+                // so a stale entry would lock a ship's telegraph next session.
+                Patch_Vessel_SetTelegraph.Reset();
+                Patch_Submarine_SetTelegraph.Reset();
                 Patch_Compartments_UpdateWantedVelocityInKnots.ClearLogCache();
                 Patch_Vessel_ApplyRudderThrust.ClearLogCache();
                 Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();

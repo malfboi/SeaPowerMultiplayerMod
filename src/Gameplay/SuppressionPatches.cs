@@ -110,13 +110,21 @@ namespace SeapowerMultiplayer
 
     /// <summary>Master per-unit AI kill on the client (auto-engage, carrier ops,
     /// evasion decisions, contact responses). Propulsion and sensors live in the
-    /// separate _obp systems loop and keep running. NOTE: on the HOST the remote
-    /// player's units keep their per-unit AI - that's what runs their SAM/PD
-    /// auto-defence and contact processing, exactly like the host player's own
-    /// ships; the remote player governs it with weapon status (Hold/Tight/Free).
-    /// However the AI must never issue ORDERS of its own to those units (Identify/
-    /// Investigate course changes, attack focus, preset attacks) - the queues that
-    /// drive them are cleared before the body reads them.</summary>
+    /// separate _obp systems loop and keep running.
+    ///
+    /// On the HOST the remote player's units keep the AI a PLAYER's own units have
+    /// in single player: weapon-status-driven engagement (Hold/Tight/Free) and
+    /// auto-defence. What they must not keep is opponent behaviour - piloting
+    /// themselves around the map. See <see cref="RemoteTfSelfPiloting"/> for the
+    /// routines that are cut.
+    ///
+    /// Only the queues that drive NAVIGATION are cleared here. Clearing
+    /// _objectsToDestroyList used to be part of this and never worked: AI
+    /// .OnFixedUpdate calls AIDetection() and ProcessContacts() further down the
+    /// SAME call, both of which refill it, and then acts on it - so a prefix clear
+    /// was a no-op for everything except _objectsToIdentifyList, which happens to
+    /// be read before AIDetection. It is also no longer wanted: destroying targets
+    /// per weapon status is exactly the AI the remote player is entitled to.</summary>
     [HarmonyPatch(typeof(AI), nameof(AI.OnFixedUpdate))]
     public static class Patch_V2_AI_OnFixedUpdate_Suppress
     {
@@ -126,16 +134,80 @@ namespace SeapowerMultiplayer
 
             if (Suppression.HostSuppressesRemoteTfAi(____baseObject))
             {
+                // Identify/Investigate/classify are course changes wearing a
+                // contact-handling hat - the Identify branch at the top of the body
+                // calls setOrder() outright. Preset attacks are mission-scripted,
+                // not weapon-status engagement.
                 __instance._objectsToIdentifyList.Clear();
-                __instance._objectsToDestroyList.Clear();
                 __instance._contactsToInvestigate.Clear();
                 __instance._presetAttacks.Clear();
                 __instance._objectToIdentify = null;
                 __instance._objectToClassify = null;
-                __instance._objectToDestroy = null;
             }
             return true;
         }
+    }
+
+    /// <summary>HOST-side PvP: the routines inside the remote player's per-unit AI
+    /// that make it fly/steer itself. Each writes a waypoint, a retreat, or an
+    /// evasion state the unit's own state machine then manoeuvres on - the "units
+    /// setting their own speed and direction" the remote player never asked for.
+    /// Engagement is deliberately untouched: target selection, launcher warm-up,
+    /// gun and missile auto-fire all still run, governed by weapon status exactly
+    /// as they do for the host's own ships.</summary>
+    public static class RemoteTfSelfPiloting
+    {
+        internal static bool Allow(ObjectBase? baseObject) =>
+            !Suppression.HostSuppressesRemoteTfAi(baseObject);
+
+        /// <summary>These are private AI methods resolved by name. If a game update
+        /// renames one, say so - otherwise the remote player's units quietly start
+        /// piloting themselves again with nothing in the log to point at.</summary>
+        internal static MethodBase? Target(string name)
+        {
+            var m = AccessTools.Method(typeof(AI), name);
+            if (m == null)
+                Plugin.Log.LogWarning($"[Suppression] AI.{name} not found - the remote " +
+                    "player's units will keep this piece of self-piloting AI");
+            return m;
+        }
+    }
+
+    /// <summary>Submarine evade: sets _clearDatumFrom/_clearDatumUntil, which the
+    /// sub's state machine runs away on. (UpdateClearDatum is left alone - it only
+    /// EXPIRES the state, and blocking it would strand a sub in it.)</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_RemoteTf_ASWEvasion_Suppress
+    {
+        static MethodBase? TargetMethod() => RemoteTfSelfPiloting.Target("UpdateASWEvasion");
+        static bool Prefix(ObjectBase ____baseObject) => RemoteTfSelfPiloting.Allow(____baseObject);
+    }
+
+    /// <summary>Submarine hunt: picks a faded contact and manoeuvres to regain it.</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_RemoteTf_ReacquireContacts_Suppress
+    {
+        static MethodBase? TargetMethod() => RemoteTfSelfPiloting.Target("UpdateReacquireFadedContacts");
+        static bool Prefix(ObjectBase ____baseObject) => RemoteTfSelfPiloting.Allow(____baseObject);
+    }
+
+    /// <summary>Jammer station-keeping: writes "JammerIngress"/"JammerHold"
+    /// waypoints straight onto the aircraft. (UpdateAutoJamming is left alone -
+    /// it only switches emitters, which is auto-defence.)</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_RemoteTf_JammerPositioning_Suppress
+    {
+        static MethodBase? TargetMethod() => RemoteTfSelfPiloting.Target("UpdateJammerPositioning");
+        static bool Prefix(ObjectBase ____baseObject) => RemoteTfSelfPiloting.Allow(____baseObject);
+    }
+
+    /// <summary>Morale.AssignRetreatWaypoint - a missile boat that has shot its
+    /// bolt turns and runs. The remote player decides when to withdraw.</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_RemoteTf_RetreatWhenExpended_Suppress
+    {
+        static MethodBase? TargetMethod() => RemoteTfSelfPiloting.Target("CheckRetreatAfterWeaponsExpended");
+        static bool Prefix(ObjectBase ____baseObject) => RemoteTfSelfPiloting.Allow(____baseObject);
     }
 
     /// <summary>HOST-side PvP: carrier AUTONOMY (auto-CAP/AEW/MPA/interceptor and
@@ -151,53 +223,12 @@ namespace SeapowerMultiplayer
             !Suppression.HostSuppressesRemoteTfAi(____baseObject);
     }
 
-    /// <summary>HOST-side PvP: the remote player's units keep their per-unit AI for
-    /// DEFENCE (incoming missiles/torpedoes, hostile aircraft) but must not pick
-    /// surface/sub fights on their own - the remote player decides those. Strip
-    /// every non-weapon, non-air contact from the auto-engage candidate list
-    /// before the AI's attack routines read it.</summary>
-    public static class RemoteTfAutoEngageFilter
-    {
-        private static readonly System.Collections.Generic.List<ObjectBase> _strip = new();
-
-        internal static void Apply(ObjectBase? unit,
-            System.Collections.Generic.Dictionary<ObjectBase, int>? targets)
-        {
-            if (targets == null || targets.Count == 0) return;
-            if (!Suppression.HostSuppressesRemoteTfAi(unit)) return;
-
-            _strip.Clear();
-            foreach (var kv in targets)
-            {
-                var t = kv.Key;
-                if (t is WeaponBase) continue;          // incoming missiles/torpedoes
-                if (t != null && t.IsAirUnit) continue; // aircraft/helicopters
-                _strip.Add(t);
-            }
-            for (int i = 0; i < _strip.Count; i++)
-                targets.Remove(_strip[i]);
-        }
-    }
-
-    [HarmonyPatch]
-    public static class Patch_V2_RemoteTf_AutoAttack_Filter
-    {
-        static System.Reflection.MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(AI), "AutoAttackOpponentInRange");
-        static void Prefix(ObjectBase ____baseObject,
-            System.Collections.Generic.Dictionary<ObjectBase, int> ____possibleTargetsWithPriorities)
-            => RemoteTfAutoEngageFilter.Apply(____baseObject, ____possibleTargetsWithPriorities);
-    }
-
-    [HarmonyPatch]
-    public static class Patch_V2_RemoteTf_AutoGuns_Filter
-    {
-        static System.Reflection.MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(AI), "AutoFireGunsInRange");
-        static void Prefix(ObjectBase ____baseObject,
-            System.Collections.Generic.Dictionary<ObjectBase, int> ____possibleTargetsWithPriorities)
-            => RemoteTfAutoEngageFilter.Apply(____baseObject, ____possibleTargetsWithPriorities);
-    }
+    // NOTE: RemoteTfAutoEngageFilter (and its AutoAttackOpponentInRange /
+    // AutoFireGunsInRange prefixes) removed. It stripped every non-weapon,
+    // non-air contact from the remote player's auto-engage list, so their ships
+    // would not shoot at surface or subsurface targets even at Weapons Free -
+    // narrower than the AI a player's own units have in single player. Weapon
+    // status is the intended control for this, not taskforce ownership.
 
     /// <summary>Mission-level AI (behaviour-tree pump: scripted spawns, third-party
     /// taskforce orders, airstrike scheduling) - host-only.</summary>

@@ -42,6 +42,7 @@ namespace SeapowerMultiplayer
             WeaponReplicaDriver.Tick();
             UnitReplicaDriver.Tick();
             DeckPuppetDriver.Tick();
+            UnitIdentityApplier.DrainPending();
         }
     }
 

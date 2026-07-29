@@ -843,7 +843,18 @@ namespace SeapowerMultiplayer
             if (drift > driftMax) driftMax = drift;
             count++;
 
-            bool syncAttitude = s.Kind == UnitType.Submarine; // host-authoritative dive angle
+            // Host-authoritative attitude for everything that floats: a submarine's
+            // dive angle, and a surface ship's heel and pitch. Leaving roll to the
+            // local sim does not work on a replica - roll is a rigidbody result
+            // (Compartments buoyancy torque + the turn-induced tilt applyTiltAndPitchForces
+            // derives from CurrentTurnRate), and on a replica both inputs are dead:
+            // the transform is written from the stream every frame, so the rudder
+            // loop never turns the ship and CurrentTurnRate sits at ~0, and the
+            // rigidbody's integrated rotation is overwritten before it can show.
+            // The ship ends up holding whatever attitude it loaded with. The host
+            // already streams PitchQ/RollQ, so take them - same mechanism heading
+            // has always used.
+            bool syncAttitude = s.Kind == UnitType.Submarine || s.Kind == UnitType.Vessel;
             var eul = tr.eulerAngles;
 
             if (drift > ShipSnapThreshold)

@@ -600,6 +600,7 @@ namespace SeapowerMultiplayer
                 TaskforceSide  = taskForce != null ? (byte)taskForce.Side : (byte)0,
                 Nation         = nationOverride ?? "",
                 UnitFlags      = deckLaunch ? EntitySpawnMessage.UnitFlagDeckPhase : (byte)0,
+                UnitName       = result._obp?._objectName ?? "",
             };
             NetworkManager.Instance.BroadcastToClients(msg);
             CaptureState.RecordSpawn(msg);
@@ -629,6 +630,15 @@ namespace SeapowerMultiplayer
             spawn.PitchQ    = GeoCodec.PackAngleCdeg(unit.transform.eulerAngles.x);
             spawn.SpeedQ    = GeoCodec.PackSpeedKts(unit._velocityInKnots);
             spawn.UnitFlags = 0;
+
+            // Only now are the launch's identity bits real. getObjectToLaunch writes
+            // the squadron callsign into _objectName after createAircraft returns
+            // (so the deck-phase spawn missed it), and launchVehicle builds the Vic
+            // formation after getObjectToLaunch returns - both are settled by the
+            // time the aircraft is handed control.
+            spawn.UnitName = unit._obp?._objectName ?? "";
+            var leader = unit.Formation?.LeaderStation?.UnitObject;
+            spawn.FormationLeaderId = leader != null ? leader.UniqueID : 0;
 
             // Ledger holds the same instance - census replays now yield a flyer
             NetworkManager.Instance.BroadcastToClients(spawn);

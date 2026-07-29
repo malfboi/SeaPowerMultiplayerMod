@@ -77,10 +77,17 @@ namespace SeapowerMultiplayer
                 // A Unit spawn re-sent without the deck flag is the wheels-up flip
                 // for an existing deck puppet (host's giveControl capture).
                 if (msg.Kind == SpawnKind.Unit
-                    && (msg.UnitFlags & EntitySpawnMessage.UnitFlagDeckPhase) == 0
-                    && DeckPuppetDriver.IsDeckPuppet(msg.EntityId))
+                    && (msg.UnitFlags & EntitySpawnMessage.UnitFlagDeckPhase) == 0)
                 {
-                    DeckPuppetDriver.FlipToAirborne(existing, msg);
+                    if (DeckPuppetDriver.IsDeckPuppet(msg.EntityId))
+                        DeckPuppetDriver.FlipToAirborne(existing, msg);
+
+                    // The wheels-up re-send is the only message carrying the launch's
+                    // callsign and formation. Apply it after the flip (a formation
+                    // swaps the motion controller, which a parented deck puppet must
+                    // not have) and also when the puppet was already flipped from a
+                    // stream sample, where the branch above no-ops.
+                    UnitIdentityApplier.Apply(existing, msg);
                     return;
                 }
                 Telemetry.Count("v2.spawnDuplicate");
@@ -197,6 +204,11 @@ namespace SeapowerMultiplayer
                     h.GiveControl(speedKts);
                     h.setImmediateFlightConditions();
                 }
+
+                // Airborne already: carries the host's callsign and formation (census
+                // replays the ledger entry the wheels-up capture updated). Deck-phase
+                // spawns get theirs on the wheels-up re-send instead.
+                UnitIdentityApplier.Apply(result, msg);
             }
 
             Telemetry.Count("v2.spawnUnit");

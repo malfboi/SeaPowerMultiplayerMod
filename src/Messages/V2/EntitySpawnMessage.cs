@@ -47,6 +47,18 @@ namespace SeapowerMultiplayer.Messages
         public string Nation = "";
         public byte   UnitFlags;         // bit0 = deck phase (on the carrier, DeckState-driven)
 
+        /// <summary>Host's <c>_obp._objectName</c> - the resolved squadron callsign
+        /// ("Diamond 3"). FlightDeck assigns it in getObjectToLaunch AFTER
+        /// createAircraft returns, so it is empty on the deck-phase spawn and carries
+        /// the real value on the wheels-up re-send. Empty = leave the ini default.</summary>
+        public string UnitName = "";
+
+        /// <summary>UniqueID of this unit's UnitFormation leader, or 0 for none;
+        /// equal to <see cref="EntityId"/> when the unit IS the leader. FlightDeck
+        /// .launchVehicle builds the formation after getObjectToLaunch returns, so
+        /// like UnitName this only carries a value on the wheels-up re-send.</summary>
+        public int FormationLeaderId;
+
         /// <summary>Unit is in the flight-deck pipeline (parented to the carrier,
         /// _isInFlight=false, colliders off). Re-sent without this flag at
         /// wheels-up - the client flips the existing puppet to airborne.</summary>
@@ -76,6 +88,8 @@ namespace SeapowerMultiplayer.Messages
                 writer.Put(TaskforceSide);
                 writer.Put(Nation);
                 writer.Put(UnitFlags);
+                writer.Put(UnitName);
+                writer.Put(FormationLeaderId);
             }
             else
             {
@@ -115,6 +129,8 @@ namespace SeapowerMultiplayer.Messages
                 msg.TaskforceSide  = reader.GetByte();
                 msg.Nation         = reader.GetString();
                 msg.UnitFlags      = reader.GetByte();
+                msg.UnitName       = reader.GetString();
+                msg.FormationLeaderId = reader.GetInt();
             }
             else
             {

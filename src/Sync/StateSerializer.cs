@@ -616,6 +616,8 @@ namespace SeapowerMultiplayer
                         StateSerializer.ApplyCustomSpeed(unit, msg.Speed);
                         if (unit is Submarine spdSub)
                             Patch_Submarine_SetTelegraph.NoteRemoteCustomSpeed(spdSub);
+                        else if (unit is Vessel spdVessel)
+                            Patch_Vessel_SetTelegraph.NoteRemoteCustomSpeed(spdVessel);
                         break;
 
                     // Depth / altitude slider or typed entry. The game's own commit

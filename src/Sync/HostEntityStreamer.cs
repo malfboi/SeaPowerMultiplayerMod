@@ -39,7 +39,12 @@ namespace SeapowerMultiplayer
         private const int LatLonE7Threshold = 90;   // ~1 m
         private const float HeightThreshold = 0.5f; // m
         private const int HeadingQThreshold = 91;   // ~0.5°
-        private const int AngleQThreshold   = 200;  // 2° (pitch/roll, centideg)
+        // Pitch/roll are now applied verbatim on vessel replicas (UnitReplicaDriver
+        // .DriveSurface), so this band is what the client's heel resolution actually
+        // is - at the old 2° a ship rolling ±3° in a swell only reported three times
+        // per cycle. Matched to the heading band. Costs nothing for anything under
+        // way: those clear the ~1 m position threshold every tick regardless.
+        private const int AngleQThreshold   = 50;   // 0.5° (pitch/roll, centideg)
         private const int SpeedQThreshold   = 2;    // 0.2 kt
         private const int CmdSpeedQThreshold = 5;   // 0.5 kt
         private const int RudderQThreshold  = 2;    // 1°
