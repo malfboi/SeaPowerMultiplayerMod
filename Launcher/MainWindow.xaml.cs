@@ -397,7 +397,7 @@ namespace SeapowerMultiplayer.Launcher
             }
         }
 
-        private const string CurrentVersion = "0.3.3";
+        private const string CurrentVersion = "0.3.4";
 
         /// <summary>Shown in the WHAT'S NEW panel. Replace wholesale each release.</summary>
         private static readonly string[] WhatsNew =

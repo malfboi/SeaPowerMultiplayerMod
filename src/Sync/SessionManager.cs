@@ -33,6 +33,15 @@ namespace SeapowerMultiplayer
         private const int MaxRetries = 3;
         private const float RetryDelaySec = 2f;
 
+        // Save-completion wait. SaveGame() returns as soon as the synchronous part
+        // of the save is done and leaves the rest on a fire-and-forget Task, so the
+        // capture has to wait for that Task before reading anything. See
+        // AwaitingSaveCompletion for why.
+        private static string? _pendingSavePath;
+        private static System.DateTime _saveWriteTimeBefore;
+        private static float _saveWaitDeadline;
+        private const float SaveWaitTimeoutSec = 10f;
+
         private static ManualLogSource Log => Plugin.Log;
 
         // ── Host side ─────────────────────────────────────────────────────────
@@ -40,6 +49,8 @@ namespace SeapowerMultiplayer
         /// <summary>Called from Plugin.Update() to check for pending resync retries.</summary>
         public static void TickRetry()
         {
+            TickPendingSave();
+
             if (_retrySendAt <= 0f) return;
             if (Time.unscaledTime < _retrySendAt) return;
             _retrySendAt = 0f;
@@ -47,8 +58,77 @@ namespace SeapowerMultiplayer
             CaptureAndSend();
         }
 
+        /// <summary>
+        /// Waits for the game to finish writing the save before the capture reads it.
+        ///
+        /// WriteMissionToFile ends with a fire-and-forget
+        /// <c>Task.Run(() =&gt; WriteMissionToSaveAsyncParts(...))</c>, which awaits
+        /// ScriptRuntime.SerializeToIni (adding the [Scripts] and [Scripting]
+        /// sections, with a 1 s internal timeout) and only then calls
+        /// <c>ini.saveFile()</c>. SaveGame() returns before any of that runs, so
+        /// capturing straight after it silently shipped every save without its
+        /// mission scripting state — triggers and objectives simply went missing on
+        /// the client.
+        ///
+        /// The Task is never stored anywhere, so the only observable completion
+        /// signal is saveFile() landing on disk. We wait for the file's write time
+        /// to advance and then read from the IniHandler cache as before — the cache
+        /// is the same instance the async part mutated, so this needs the timestamp
+        /// only as a done-flag and never reads a half-written file.
+        /// </summary>
+        private static void TickPendingSave()
+        {
+            if (_pendingSavePath == null) return;
+
+            bool written = File.Exists(_pendingSavePath)
+                        && File.GetLastWriteTimeUtc(_pendingSavePath) > _saveWriteTimeBefore;
+
+            if (!written)
+            {
+                if (Time.unscaledTime < _saveWaitDeadline) return;
+                // Fall through and send anyway: a save missing its scripting state
+                // still beats refusing to sync at all.
+                Log.LogWarning($"[Session] Save did not finish writing within {SaveWaitTimeoutSec}s — " +
+                               "sending anyway; mission scripting state may be missing.");
+            }
+
+            string savePath = _pendingSavePath;
+            _pendingSavePath = null;
+            SendCapturedSave(savePath);
+        }
+
+        /// <summary>
+        /// The client's mission load never finished. Clears the loading flag so the
+        /// session stops waiting on a scene that is not coming, and puts the reason
+        /// in front of the player — a dead LoadMission coroutine otherwise looks
+        /// exactly like a slow one, forever.
+        /// <paramref name="timeoutSec"/> is negative when the load was declared dead
+        /// outright (an exception unwound out of the coroutine) rather than timing out.
+        /// </summary>
+        public static void OnSceneLoadStalled(string? loadException, float timeoutSec)
+        {
+            SceneLoading = false;
+            Log.LogError((timeoutSec < 0f
+                             ? "[Session] Mission load failed — the game's load coroutine threw and stopped."
+                             : $"[Session] Mission load did not complete within {timeoutSec}s — giving up.") +
+                         (loadException != null ? $" Exception: {loadException}" : ""));
+
+            SimSyncManager.ReportIssue(
+                "LOAD FAILED — the mission never finished loading.",
+                loadException != null
+                    ? $"The game threw: {loadException} Ask the host to press Send again; if it repeats, check both players are on the same Sea Power build."
+                    : "Ask the host to press Send again. If it repeats, check that both players are on the same Sea Power build.");
+            SimSyncManager.Reset();
+        }
+
         public static void CaptureAndSend()
         {
+            if (_pendingSavePath != null)
+            {
+                Log.LogWarning("[Session] CaptureAndSend skipped — a save is still being written");
+                return;
+            }
+
             if (SceneLoading)
             {
                 Log.LogWarning("[Session] CaptureAndSend skipped — SceneLoading=true");
@@ -90,6 +170,14 @@ namespace SeapowerMultiplayer
             SaveLoadManager.IsSavingAllowed = true;
 
             Log.LogInfo("[Session] Saving game to MPSession.sav...");
+
+            // Sampled before the save so TickPendingSave can tell the game's async
+            // write apart from whatever the previous sync left on disk.
+            string plannedPath = SaveLoadManager.GetSaveFilePath("MPSession.sav");
+            _saveWriteTimeBefore = File.Exists(plannedPath)
+                ? File.GetLastWriteTimeUtc(plannedPath)
+                : System.DateTime.MinValue;
+
             string savePath = SaveLoadManager.SaveGame("MPSession.sav");
 
             SaveLoadManager.IsSavingAllowed = wasAllowed;
@@ -106,10 +194,21 @@ namespace SeapowerMultiplayer
 
             Log.LogInfo($"[Session] Save path: {savePath}");
 
-            // Read save data from IniHandler's in-memory cache instead of disk.
-            // SaveLoadManager.WriteMissionToFile populates the IniHandler synchronously
-            // but writes to disk via Task.Run - reading the file would race against
-            // that async write and return stale/old data.
+            // The save is only half-written at this point - hand off to
+            // TickPendingSave, which resumes at SendCapturedSave once it lands.
+            _pendingSavePath  = savePath;
+            _saveWaitDeadline = Time.unscaledTime + SaveWaitTimeoutSec;
+        }
+
+        /// <summary>
+        /// Second half of the capture, resumed by TickPendingSave once the game has
+        /// finished writing the save.
+        /// </summary>
+        private static void SendCapturedSave(string savePath)
+        {
+            // Read save data from the IniHandler cache rather than the file: it is
+            // the same instance the game just finished populating, so it needs no
+            // parse and cannot catch a partially flushed write.
             var ini = IniHandler.get(savePath);
             if (ini?.Data == null || ini.Data.Count == 0)
             {

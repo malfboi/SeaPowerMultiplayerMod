@@ -62,12 +62,17 @@ namespace SeapowerMultiplayer.Transport
             public int ReceivedCount;
             public int TotalLength;
             public long CreatedTicks;
+            /// <summary>Last time any chunk for this id arrived. The staleness clock
+            /// runs from here, not CreatedTicks, so a slow-but-progressing transfer
+            /// is never discarded.</summary>
+            public long LastChunkTicks;
 
             public FragmentBuffer(int totalChunks)
             {
                 Chunks = new byte[totalChunks][];
                 ChunkLengths = new int[totalChunks];
                 CreatedTicks = DateTime.UtcNow.Ticks;
+                LastChunkTicks = CreatedTicks;
             }
         }
 
@@ -93,6 +98,7 @@ namespace SeapowerMultiplayer.Transport
         public event Action<byte[], int>? OnDataReceived;
         public event Action? OnPeerConnected;
         public event Action? OnPeerDisconnected;
+        public event Action<string>? OnReceiveFailed;
 
         public void Start(bool asHost)
         {
@@ -432,6 +438,10 @@ namespace SeapowerMultiplayer.Transport
                 _pendingFragments[fragmentId] = buffer;
             }
 
+            // Stamp before the duplicate guard: a resent chunk still proves the
+            // transfer is alive, and only silence should age a buffer out.
+            buffer.LastChunkTicks = DateTime.UtcNow.Ticks;
+
             int payloadLen = length - FragmentHeaderSize;
 
             // Guard against duplicate chunks
@@ -460,33 +470,59 @@ namespace SeapowerMultiplayer.Transport
             }
         }
 
+        /// <summary>
+        /// Drop fragment buffers that have gone silent. The clock is idle-based
+        /// (time since the last chunk), not age-based: a multi-megabyte session
+        /// sync on a slow link legitimately takes minutes, and the old age-based
+        /// 10s window discarded those mid-transfer — the client then sat forever
+        /// with no mission and nothing on screen to say why.
+        ///
+        /// The window matches the connection timeout because that is exactly how
+        /// long Steam will keep retrying a reliable chunk: while the connection
+        /// lives the rest of the message is still coming, and anything shorter
+        /// throws away a transfer that would have completed.
+        /// </summary>
         private void CleanupStaleFragments()
         {
+            if (_pendingFragments.Count == 0) return;
+
             long now = DateTime.UtcNow.Ticks;
             // Check every ~5 seconds
             if (now - _lastCleanupTicks < 50_000_000L) return;
             _lastCleanupTicks = now;
 
-            long staleThreshold = 100_000_000L; // 10 seconds in ticks
+            long idleThreshold = Plugin.Instance.CfgDisconnectTimeoutSec.Value * TimeSpan.TicksPerSecond;
             List<uint>? staleIds = null;
 
             foreach (var kvp in _pendingFragments)
             {
-                if (now - kvp.Value.CreatedTicks > staleThreshold)
+                if (now - kvp.Value.LastChunkTicks > idleThreshold)
                 {
                     staleIds ??= new List<uint>();
                     staleIds.Add(kvp.Key);
                 }
             }
 
-            if (staleIds != null)
+            if (staleIds == null) return;
+
+            foreach (var id in staleIds)
             {
-                foreach (var id in staleIds)
-                {
-                    var buf = _pendingFragments[id];
-                    Log.LogWarning($"[SteamTransport] Discarding stale fragment id={id}: {buf.ReceivedCount}/{buf.Chunks.Length} chunks received");
-                    _pendingFragments.Remove(id);
-                }
+                var buf = _pendingFragments[id];
+                _pendingFragments.Remove(id);
+
+                int idleSec  = (int)((now - buf.LastChunkTicks) / TimeSpan.TicksPerSecond);
+                int totalSec = (int)((now - buf.CreatedTicks)   / TimeSpan.TicksPerSecond);
+                int gotKb    = buf.TotalLength / 1024;
+
+                Log.LogError($"[SteamTransport] Fragment id={id} stalled: {buf.ReceivedCount}/{buf.Chunks.Length} chunks " +
+                             $"({gotKb} KB) after {totalSec}s, no data for {idleSec}s — discarding");
+
+                // The sender got an OK from Steam and will never resend, so this
+                // message is simply gone. Say so rather than leaving the player
+                // staring at a screen that never loads.
+                OnReceiveFailed?.Invoke(
+                    $"A large transfer stopped {idleSec}s short of completing " +
+                    $"({buf.ReceivedCount} of {buf.Chunks.Length} parts, {gotKb} KB received).");
             }
         }
 
@@ -551,6 +587,11 @@ namespace SeapowerMultiplayer.Transport
                     {
                         _connectionToHost = HSteamNetConnection.Invalid;
                     }
+
+                    // Anything half-received is dead with the connection. Drop it
+                    // now so the idle sweep doesn't report a stalled transfer on
+                    // top of the disconnect the player is already being told about.
+                    _pendingFragments.Clear();
 
                     SteamNetworkingSockets.CloseConnection(conn, 0, null, false);
                     OnPeerDisconnected?.Invoke();

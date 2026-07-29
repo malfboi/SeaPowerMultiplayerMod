@@ -73,6 +73,12 @@ namespace SeapowerMultiplayer.Transport
         public event Action? OnPeerConnected;
         public event Action? OnPeerDisconnected;
 
+        // LiteNetLib reassembles fragments internally and holds them until the
+        // whole message lands, so there is never a half-received message to report.
+#pragma warning disable CS0067
+        public event Action<string>? OnReceiveFailed;
+#pragma warning restore CS0067
+
         public void Start(bool asHost)
         {
             _isHost = asHost;

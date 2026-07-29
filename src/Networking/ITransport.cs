@@ -32,5 +32,11 @@ namespace SeapowerMultiplayer.Transport
         event Action<byte[], int> OnDataReceived;
         event Action OnPeerConnected;
         event Action OnPeerDisconnected;
+
+        /// <summary>Raised when an inbound message was partially received and then
+        /// abandoned, so the peer believes it was delivered and nothing will retry.
+        /// The string is a human-readable reason. Transports that reassemble
+        /// internally never raise it.</summary>
+        event Action<string> OnReceiveFailed;
     }
 }

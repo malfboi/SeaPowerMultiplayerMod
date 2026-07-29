@@ -9,7 +9,16 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 220; // SessionSync carries the campaign save companion file (campaign missions failed to load client-side)
+        public const ushort ProtocolVersion = 221; // Hello carries the game build version (mismatched builds crashed the client's save load)
+
+        /// <summary>
+        /// The Sea Power build both players are running. Save files embed indices
+        /// into per-vessel data (flight deck elevators, recovery points) that differ
+        /// between game builds, so a save synced across mismatched builds throws
+        /// deep inside the game's own loader and leaves the client on a dead loading
+        /// screen. Compared during the handshake so the pairing is refused instead.
+        /// </summary>
+        public static string GameVersion => UnityEngine.Application.version ?? "";
 
         /// <summary>LiteNetLib connection key - versioned so old/new builds cannot pair.</summary>
         public static string ConnectKey => $"{PluginInfo.PLUGIN_GUID}/p{ProtocolVersion}";

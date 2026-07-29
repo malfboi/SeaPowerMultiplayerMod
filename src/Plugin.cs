@@ -357,8 +357,57 @@ namespace SeapowerMultiplayer
                 NetworkManager.Instance.StartClient(CfgHostIP.Value, CfgPort.Value);
         }
 
+        /// <summary>
+        /// Records the first exception raised while the synced mission is loading.
+        /// Only recorded, not acted on: harmless exceptions do occur during a normal
+        /// load, so this is reported solely when the load then fails to finish — at
+        /// which point it is usually the actual cause and worth putting in front of
+        /// the player.
+        /// </summary>
+        private void OnLoadLogMessage(string condition, string stackTrace, LogType type)
+        {
+            if (type != LogType.Exception) return;
+            if (_firstLoadException != null) return;
+            _firstLoadException = condition;
+
+            // An exception that unwound out of the LoadMission coroutine is fatal,
+            // not incidental: Unity stops iterating a coroutine that throws, so the
+            // rest of the load never runs and IsLoadingDone can never become true.
+            // No point waiting out the deadline for a verdict already decided.
+            if (stackTrace != null && stackTrace.Contains("LoadMission"))
+            {
+                Log.LogError($"[SceneReady] Mission load coroutine died: {condition}");
+                ReportStalledLoad(coroutineDied: true);
+                return;
+            }
+
+            Log.LogWarning($"[SceneReady] Exception during mission load (reported only if the load stalls): {condition}");
+        }
+
+        private void ReportStalledLoad(bool coroutineDied = false)
+        {
+            Application.logMessageReceived -= OnLoadLogMessage;
+            _wasSceneLoading = false;
+            _sceneReadyPollCount = 0;
+            _sceneReadyFrames = 0;
+            _loggedWaitingForSceneCreator = false;
+            SessionManager.OnSceneLoadStalled(_firstLoadException, coroutineDied ? -1f : SceneLoadTimeoutSec);
+            _firstLoadException = null;
+        }
+
         private bool _loggedWaitingForSceneCreator;
         private int _sceneReadyPollCount;
+
+        // Stalled-load detection. The game loads the synced save inside the
+        // SceneCreator.LoadMission coroutine; an exception in there (a save
+        // referencing data the local build doesn't have, say) kills the coroutine
+        // silently, IsLoadingDone never turns true, and the poll above spins until
+        // the player gives up. Generous deadline - a large save on a slow disk is
+        // legitimately slow, and a false alarm here would be worse than waiting.
+        private const float SceneLoadTimeoutSec = 120f;
+        private bool _wasSceneLoading;
+        private float _sceneLoadDeadline;
+        private string? _firstLoadException;
 
         // Deferred auto-connect state (see TryAutoConnect)
         private bool  _autoConnectStarted;
@@ -420,10 +469,31 @@ namespace SeapowerMultiplayer
             // Detect client scene load completion.
             // Wait a few frames after IsLoadingDone for game objects
             // (sensors, taskforces) to finish initialising.
+            if (SessionManager.SceneLoading != _wasSceneLoading)
+            {
+                _wasSceneLoading = SessionManager.SceneLoading;
+                if (_wasSceneLoading)
+                {
+                    _sceneLoadDeadline = Time.unscaledTime + SceneLoadTimeoutSec;
+                    _firstLoadException = null;
+                    Application.logMessageReceived += OnLoadLogMessage;
+                }
+                else
+                {
+                    Application.logMessageReceived -= OnLoadLogMessage;
+                }
+            }
+
             if (SessionManager.SceneLoading)
             {
                 bool scExists = Singleton<SceneCreator>.InstanceExists(false);
                 bool loadDone = scExists && Singleton<SceneCreator>.Instance.IsLoadingDone;
+
+                if (!loadDone && Time.unscaledTime > _sceneLoadDeadline)
+                {
+                    ReportStalledLoad();
+                    return;
+                }
 
                 if (!scExists && !_loggedWaitingForSceneCreator)
                 {

@@ -279,6 +279,7 @@ namespace SeapowerMultiplayer
             _transport.OnDataReceived += OnDataReceived;
             _transport.OnPeerConnected += OnPeerConnected;
             _transport.OnPeerDisconnected += OnPeerDisconnected;
+            _transport.OnReceiveFailed += OnReceiveFailed;
         }
 
         // ── Delivery mapping ────────────────────────────────────────────────────
@@ -316,6 +317,7 @@ namespace SeapowerMultiplayer
                         ProtocolVersion = ProtocolInfo.ProtocolVersion,
                         PluginVersion   = PluginInfo.PLUGIN_VERSION,
                         IsPvP           = Plugin.Instance.CfgPvP.Value,
+                        GameVersion     = ProtocolInfo.GameVersion,
                     };
                     _handshake = HandshakeState.AwaitingWelcome;
                     _handshakeDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
@@ -372,6 +374,23 @@ namespace SeapowerMultiplayer
                 // Last: the resets above have already handed local control back,
                 // so this is what stops the client drifting into a solo game.
                 ReconnectManager.OnPeerLost(wasEstablished);
+            });
+        }
+
+        /// <summary>
+        /// A message was abandoned part-way through reassembly. The sender saw a
+        /// successful send and will not retry, so the only recovery is a fresh
+        /// Send from the host — surface that instead of failing silently.
+        /// </summary>
+        private void OnReceiveFailed(string reason)
+        {
+            Log.LogError($"[Net] Inbound message lost: {reason}");
+            _mainThreadQueue.Enqueue(() =>
+            {
+                SimSyncManager.ReportIssue(
+                    "SYNC FAILED — the game data never finished arriving.",
+                    $"{reason} Ask the host to press Send again.");
+                SimSyncManager.Reset();
             });
         }
 
@@ -634,12 +653,23 @@ namespace SeapowerMultiplayer
                 refusal = $"Protocol mismatch: host v{ProtocolInfo.ProtocolVersion}, client v{msg.ProtocolVersion}. Both players need the same mod version.";
                 VersionMismatchNotice = refusal;
             }
+            // Game build must match before anything else gameplay-related: saves embed
+            // per-vessel indices (flight deck elevators, recovery points) that shift
+            // between builds, so syncing one to a mismatched client throws inside the
+            // game's own FlightDeck loader and hangs it on the loading screen forever.
+            // Refusing here is the only point where that is still explainable.
+            else if (!string.IsNullOrEmpty(msg.GameVersion) && msg.GameVersion != ProtocolInfo.GameVersion)
+            {
+                refusal = $"Sea Power version mismatch: host is on {ProtocolInfo.GameVersion}, client is on {msg.GameVersion}. " +
+                          "Both players must run the same game build — update through Steam and restart.";
+                VersionMismatchNotice = refusal;
+            }
             else if (msg.IsPvP != Plugin.Instance.CfgPvP.Value)
                 refusal = $"Mode mismatch: host is {(Plugin.Instance.CfgPvP.Value ? "PvP" : "co-op")}, client is {(msg.IsPvP ? "PvP" : "co-op")}.";
 
             if (refusal != null)
             {
-                Log.LogError($"[Handshake] Refusing client (plugin {msg.PluginVersion}): {refusal}");
+                Log.LogError($"[Handshake] Refusing client (plugin {msg.PluginVersion}, game {msg.GameVersion}): {refusal}");
                 Telemetry.Count("handshake.refused");
                 BroadcastToClients(new WelcomeMessage { Accepted = false, RefusalReason = refusal });
                 _handshake = HandshakeState.Refused;
@@ -658,7 +688,7 @@ namespace SeapowerMultiplayer
                 ClientUidBase = ProtocolInfo.ClientUidBase,
                 StateRateHz   = 10,
             });
-            Log.LogInfo($"[Handshake] Client accepted (plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}). Established.");
+            Log.LogInfo($"[Handshake] Client accepted (plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}, game {ProtocolInfo.GameVersion}). Established.");
             ReconnectManager.OnPeerEstablished();
         }
 
@@ -673,7 +703,8 @@ namespace SeapowerMultiplayer
                 Telemetry.Count("handshake.refused");
                 // The host's build generated this string, so the prefix check works
                 // against both older and newer hosts.
-                if (msg.RefusalReason.StartsWith("Protocol mismatch"))
+                if (msg.RefusalReason.StartsWith("Protocol mismatch")
+                 || msg.RefusalReason.StartsWith("Sea Power version mismatch"))
                     VersionMismatchNotice = msg.RefusalReason;
                 _handshake = HandshakeState.Refused;
                 Stop();

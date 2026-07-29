@@ -2175,6 +2175,16 @@ namespace SeapowerMultiplayer
             // Only apply the override on the client side.
             if (Plugin.Instance.CfgIsHost.Value) return;
             if (OrderHandler.ApplyingFromNetwork) return;
+            // Never during a scene load. The game restores saved state by REPLAYING
+            // orders through the same setOrder path a player uses, and Order.setOrder
+            // drops the call outright when IsControllable is false. Whichever unit the
+            // remote player happened to have selected then silently loses its restored
+            // order - and FlightDeck.LoadStateFromFile immediately reads back the task
+            // that order was supposed to create (`_flightDeckTasksToAdd[Count - 1]`,
+            // unguarded), so an aircraft under a ReturnTask took the whole load down
+            // with an IndexOutOfRange and left the client on a dead loading screen.
+            // A lock is about live order entry; it has no business filtering a restore.
+            if (SessionManager.SceneLoading) return;
             if (UnitLockManager.IsLockedByRemote(__instance.UniqueID))
                 __result = false;
         }
