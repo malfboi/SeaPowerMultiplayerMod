@@ -737,6 +737,71 @@ namespace SeapowerMultiplayer
                         break;
                     }
 
+                    case Messages.OrderType.FormationCommand:
+                        ApplyFormationCommand(unit, msg);
+                        break;
+
+                    case Messages.OrderType.SetFormationMode:
+                    {
+                        var formation = unit.Formation;
+                        if (formation == null) break;
+                        formation.SelectedControlMode = (UnitFormation.ControlMode)(int)msg.Speed;
+                        break;
+                    }
+
+                    case Messages.OrderType.RequestIdentify:
+                    {
+                        // Co-op: the client's "identify yourself" succeeded against the
+                        // shared compliance answer. Repeat the reveal here so the host's
+                        // picture learns the class too - ContactSync then hands it back
+                        // to the client as part of the normal shared picture.
+                        var contact = StateSerializer.FindById(msg.TargetEntityId);
+                        if (contact == null || contact.IsDestroyed) break;
+                        if (Plugin.Instance.CfgPvP.Value) break;
+
+                        // Re-check against OUR roll, which is the authoritative one.
+                        // A client running a stale value cannot talk a merchant into
+                        // identifying itself when the host's answer says otherwise.
+                        if (contact._ai == null || contact._ai.CurrentCompliance != AI.Compliance.Follow)
+                        {
+                            Plugin.Log.LogInfo($"[Contacts] Identify request refused: contact={msg.TargetEntityId}");
+                            break;
+                        }
+
+                        try { Utils.RevealContactToObject(unit, contact, "Comms", 3); }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[Contacts] Identify reveal failed for {msg.TargetEntityId}: {ex.Message}");
+                        }
+                        Plugin.Log.LogInfo($"[Contacts] Identify applied: asker={msg.SourceEntityId} contact={msg.TargetEntityId}");
+                        break;
+                    }
+
+                    case Messages.OrderType.AttackAtWaypoint:
+                    {
+                        // Sonobuoy drops, air-dropped torpedoes and waypoint-edit
+                        // attacks. Positions are geo (mode-independent, as MoveTo).
+                        ObjectBase? atkTarget = msg.TargetEntityId > 0
+                            ? StateSerializer.FindById(msg.TargetEntityId) : null;
+                        int flags = (int)msg.Speed;
+
+                        // after=null appends. The issuing side chains each task after
+                        // the previous one, so a multi-drop pattern lands in the same
+                        // order here; only a drop inserted mid-route (a waypoint was
+                        // selected) ends up at the end of the list instead.
+                        var atkTask = unit.SetAttackAtWaypointTask(
+                            msg.AmmoId, atkTarget,
+                            new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY },
+                            new GeoPosition { _longitude = msg.DestX,   _latitude = msg.DestZ,   _height = msg.DestY },
+                            msg.ShotsToFire, null,
+                            (EngageTask.SalvoType)(flags & 0xFF), msg.Heading,
+                            (flags & 0x100) != 0, (flags & 0x200) != 0);
+
+                        Plugin.Log.LogInfo($"[Order] AttackAtWaypoint: unit={unit.UniqueID} ammo={msg.AmmoId} " +
+                            $"target={msg.TargetEntityId} salvo={msg.ShotsToFire} created={atkTask != null}");
+                        break;
+                    }
+
                     case Messages.OrderType.SetAltitude:
                     {
                         int preset = (int)msg.Speed;
@@ -824,6 +889,80 @@ namespace SeapowerMultiplayer
             {
                 ApplyingFromNetwork = false;
             }
+        }
+
+        /// <summary>Formation membership, shape and formation-wide orders. Runs inside
+        /// Apply's ApplyingFromNetwork scope, so the game calls made here cannot echo
+        /// back out through the formation patches.</summary>
+        private static void ApplyFormationCommand(ObjectBase unit, PlayerOrderMessage msg)
+        {
+            var op = (Messages.FormationOp)msg.ShotsToFire;
+            var formation = unit.Formation;
+
+            switch (op)
+            {
+                case Messages.FormationOp.Create:
+                    // Already leading its own group (the spawn-time replication may
+                    // have built it) - nothing to do.
+                    if (formation != null && formation.LeaderStation?.UnitObject == unit) break;
+                    formation?.DetachUnit(unit);
+                    if (unit._taskforce == null) break;
+                    _ = new UnitFormation(new UnitFormationParameters(
+                            unit._type == ObjectBase.ObjectType.Aircraft)
+                    {
+                        _name         = string.Empty,
+                        _leaderObject = unit,
+                    });
+                    break;
+
+                case Messages.FormationOp.Join:
+                {
+                    var target = StateSerializer.FindById(msg.TargetEntityId)?.Formation;
+                    if (target == null || target == formation) break;
+                    formation?.DetachUnit(unit);
+                    target.AddUnit(unit);
+                    break;
+                }
+
+                case Messages.FormationOp.Detach:
+                    formation?.DetachUnit(unit);
+                    break;
+
+                case Messages.FormationOp.SwapLeader:
+                    formation?.SwapLeader(unit);
+                    break;
+
+                case Messages.FormationOp.CeaseFire:
+                    formation?.CeaseFire(msg.Speed > 0.5f, message: false);
+                    break;
+
+                case Messages.FormationOp.RecallAll:
+                    formation?.AllReturnToFormation(msg.Speed > 0.5f, message: false);
+                    break;
+
+                case Messages.FormationOp.ReturnUnit:
+                    formation?.ReturnToFormation(unit);
+                    break;
+
+                case Messages.FormationOp.Rename:
+                    if (formation != null) formation.Name = msg.AmmoId ?? "";
+                    break;
+
+                case Messages.FormationOp.StationPos:
+                {
+                    int index = (int)msg.Speed;
+                    if (formation == null || index < 0 || index >= formation.Stations.Count) break;
+                    formation.ChangeStationPosition(formation.Stations[index],
+                        new Vector3(msg.DestX, msg.DestY, msg.DestZ));
+                    break;
+                }
+
+                case Messages.FormationOp.Disband:
+                    formation?.Disband();
+                    break;
+            }
+
+            Plugin.Log.LogInfo($"[Formation] Applied {op}: unit={msg.SourceEntityId} target={msg.TargetEntityId}");
         }
     }
 

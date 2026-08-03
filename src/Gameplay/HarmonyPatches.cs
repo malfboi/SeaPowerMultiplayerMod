@@ -444,6 +444,125 @@ namespace SeapowerMultiplayer
             OrderSyncHelper.Postfix(__instance, Msg(__instance, geoPos));
     }
 
+    // ── Attack / sonobuoy-drop waypoint intercept (bidirectional) ───────────
+    //
+    // EVERY player-issued sonobuoy drop lands here, not on the engage-task paths:
+    // AttackingState (single, shift-chained and Ctrl/Alt pattern drops) and
+    // SonobuoyLineState (line drops) all funnel through OffsetAttack →
+    // SetAttackAtWaypointTask, which builds the AttackAtWaypoint task itself - it
+    // never calls setWaypointTask, InsertEngageTask, AttackTask or DropSonobuoyTask,
+    // so none of the existing hooks saw it. The client's drops therefore stayed
+    // local: the host's helicopter never got the waypoints and never dropped, while
+    // the RemoveWaypoints call the drop UI makes first (which IS synced) wiped the
+    // helo's real route host-side. Air-dropped torpedoes and waypoint-edit attacks
+    // take the same path and were broken the same way.
+    //
+    // Geo coordinates go on the wire unconverted (same as MoveTo) - mode-independent
+    // and floating-origin safe. The client keeps its local copy for map display; its
+    // execution is suppressed by Patch_V2_AttackAtWaypoint_Suppress.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetAttackAtWaypointTask),
+        new[] { typeof(string), typeof(ObjectBase), typeof(GeoPosition), typeof(GeoPosition),
+                typeof(int), typeof(VisualActionTask), typeof(EngageTask.SalvoType),
+                typeof(float), typeof(bool), typeof(bool) })]
+    public static class Patch_ObjectBase_SetAttackAtWaypointTask
+    {
+        static PlayerOrderMessage Msg(ObjectBase u, string ammunitionName, ObjectBase targetObject,
+            GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition, int salvo,
+            EngageTask.SalvoType salvoType, float areaRadius, bool formationAttack, bool attackOnlyDetected)
+            => new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.AttackAtWaypoint,
+                AmmoId         = ammunitionName ?? "",
+                ShotsToFire    = salvo,
+                TargetEntityId = targetObject != null ? targetObject.UniqueID : 0,
+                DestX          = (float)waypointGeoPosition._longitude,
+                DestY          = (float)waypointGeoPosition._height,
+                DestZ          = (float)waypointGeoPosition._latitude,
+                TargetX        = (float)targetGeoPosition._longitude,
+                TargetY        = (float)targetGeoPosition._height,
+                TargetZ        = (float)targetGeoPosition._latitude,
+                // The message is out of float fields, so the two attack flags ride in
+                // the high bits of the salvo type. They are only ever non-default on
+                // the WaypointData (mission/save import) overload, but dropping them
+                // would silently change what the host's task does.
+                Speed          = (int)salvoType
+                                 | (formationAttack    ? 0x100 : 0)
+                                 | (attackOnlyDetected ? 0x200 : 0),
+                Heading        = areaRadius,
+            };
+
+        static bool Prefix(ObjectBase __instance, ref AttackAtWaypoint __result,
+                           string ammunitionName, ObjectBase targetObject,
+                           GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition,
+                           int salvo, EngageTask.SalvoType salvoType, float areaRadius,
+                           bool formationAttack, bool attackOnlyDetected)
+        {
+            if (OrderSyncHelper.Prefix(__instance, Msg(__instance, ammunitionName, targetObject,
+                    targetGeoPosition, waypointGeoPosition, salvo, salvoType, areaRadius,
+                    formationAttack, attackOnlyDetected)))
+                return true;
+
+            __result = null; // refused (ally lock / not ours) - callers null-check
+            return false;
+        }
+
+        static void Postfix(ObjectBase __instance,
+                            string ammunitionName, ObjectBase targetObject,
+                            GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition,
+                            int salvo, EngageTask.SalvoType salvoType, float areaRadius,
+                            bool formationAttack, bool attackOnlyDetected)
+            => OrderSyncHelper.Postfix(__instance, Msg(__instance, ammunitionName, targetObject,
+                targetGeoPosition, waypointGeoPosition, salvo, salvoType, areaRadius,
+                formationAttack, attackOnlyDetected));
+    }
+
+
+    // ── Formation control mode (bidirectional) ─────────────────────────────
+    //
+    // SelectedControlMode decides whether an attack order reaches the whole flight
+    // or only the unit clicked. It is read in two places that matter here: the UI
+    // distributes the order across the formation's stations at click time
+    // (AttackingState.NormalAttack), and the host re-reads it when it runs the
+    // formation attack distribution itself (AttackAtWaypoint.AttackCalculations).
+    // Nothing synced it, so a flight the client set to "Follow Leader" was still
+    // whatever the host's copy happened to hold, and the wingmen were left out of
+    // orders given to their leader.
+    //
+    // Keyed on the leader unit: formations carry no id of their own, and the leader
+    // is already replicated with the formation at spawn. The send verdict is
+    // deliberately ignored - a refused write still happens locally (blocking it
+    // would leave a foreign formation with no mode at all while it forms up), it
+    // just does not travel. OrderSyncHelper's own refusal tag is consumed by the
+    // paired Postfix, so nothing is broadcast that was refused.
+    [HarmonyPatch(typeof(UnitFormation), "set_SelectedControlMode")]
+    public static class Patch_UnitFormation_SelectedControlMode
+    {
+        static ObjectBase? Leader(UnitFormation f) => f?.LeaderStation?.UnitObject;
+
+        static PlayerOrderMessage Msg(ObjectBase leader, UnitFormation.ControlMode mode) =>
+            new PlayerOrderMessage
+            {
+                SourceEntityId = leader.UniqueID,
+                Order          = OrderType.SetFormationMode,
+                Speed          = (int)mode,
+            };
+
+        static void Prefix(UnitFormation __instance, UnitFormation.ControlMode value)
+        {
+            var leader = Leader(__instance);
+            if (leader == null || leader.UniqueID == 0) return;
+            OrderSyncHelper.Prefix(leader, Msg(leader, value));
+        }
+
+        static void Postfix(UnitFormation __instance, UnitFormation.ControlMode value)
+        {
+            var leader = Leader(__instance);
+            if (leader == null || leader.UniqueID == 0) return;
+            OrderSyncHelper.Postfix(leader, Msg(leader, value));
+        }
+    }
+
 
     // ── Waypoint delete / clear sync (bidirectional) ──────────────────────
 
@@ -1093,9 +1212,10 @@ namespace SeapowerMultiplayer
     //
     // DropSonobuoyTask.OnExecute also calls the inlined AddEngageTask directly, but
     // on a DIFFERENT method than AttackTask.OnExecute, so the bearing-fire hook above
-    // never covers it (flagged gap). The player's normal sonobuoy drops route through
-    // AttackTask (covered); this closes the Order.Type.DropSonobuoy task path so any
-    // client-issued sonobuoy drop is forwarded too. Same shape as the AttackTask hook
+    // never covers it (flagged gap). The player's own drops do NOT come through here -
+    // they are AttackAtWaypoint tasks (see Patch_ObjectBase_SetAttackAtWaypointTask);
+    // this closes the Order.Type.DropSonobuoy path, which is how scripted and AI
+    // sonobuoy orders arrive. Same shape as the AttackTask hook
     // - forward the drop, let OnExecute run for the order-log/finish(), then strip the
     // locally-appended task. Unlike AttackTask, this path never uses InsertEngageTask
     // for targeted drops either, so we forward both targeted and bearing cases. The
@@ -1354,6 +1474,22 @@ namespace SeapowerMultiplayer
             _refusalPending = false;
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (SessionManager.SceneLoading) return true; // don't send during scene load
+            // Weapons never produce orders worth sending, in EITHER mode. Under v2 the
+            // host simulates every missile, torpedo, decoy and chaff round and streams
+            // the result; anything a weapon does to itself is internal mechanics whose
+            // waypoints and ids mean nothing on the other machine.
+            //
+            // This used to be scoped to PvP, which left co-op broadcasting a
+            // RemoveWaypoints order for every round that DIED: setDestroyedFlag clears
+            // a unit's waypoints as part of teardown (ObjectBase.cs:5514), so each
+            // expiring chaff round, Harpoon, Mk46 and ASROC sent one. A single session
+            // log showed 6,889 of them - two thirds of every line in the file.
+            //
+            // Asked before the ownership gates, not after: a weapon must never be
+            // REFUSED either. The call site is its own destruction, so refusing left a
+            // dying weapon holding its task list, and each refusal logged under a fresh
+            // entity id (3,663 lines in that same log) because every round is new.
+            if (unit is WeaponBase) return true;
             // Client: units we don't own are host-driven replicas. An order reaching
             // here for one came from our own local sim (unit state machines tick
             // outside the suppressed AI class) - block it locally AND upstream.
@@ -1366,23 +1502,6 @@ namespace SeapowerMultiplayer
                 // suppression of orders the player never issued.
                 UnitLockManager.NoteOrderRefused(unit);
                 return Refuse(msg, "allyLock");
-            }
-            // PvP: don't sync orders for weapons (missiles/torpedoes) - their internal
-            // waypoint/guidance operations use local IDs meaningless to the remote side
-            if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
-            // Fix #54 (enhanced Fix #49): Skip order routing for chaff/countermeasure entities.
-            // Primary check: ammunition type (covers initialized entities).
-            // Fallback check: class name (covers entities where _ap is null during spawn).
-            if (unit is WeaponBase wb)
-            {
-                if (wb._ap != null &&
-                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
-                    return true;
-
-                // Fallback: check by class name when _ap is not yet initialized
-                string typeName = unit.GetType().Name;
-                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
-                    return true;
             }
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!TaskforceAssignmentManager.ClientMayControl(unit)) return Refuse(msg, "notMyTaskforce");
@@ -1434,19 +1553,8 @@ namespace SeapowerMultiplayer
             if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (OrderHandler.ApplyingFromNetwork) return;
-            // PvP: don't sync orders for weapons (missiles/torpedoes)
-            if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
-            // Fix #54 (enhanced Fix #49): Same chaff/noisemaker filter as Prefix
-            if (unit is WeaponBase wb2)
-            {
-                if (wb2._ap != null &&
-                    (wb2._ap._type == Ammunition.Type.Chaff || wb2._ap._type == Ammunition.Type.Noisemaker))
-                    return;
-
-                string typeName = unit.GetType().Name;
-                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
-                    return;
-            }
+            // Weapons are host-simulated and streamed in both modes - see Prefix.
+            if (unit is WeaponBase) return;
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
             if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate - skip broadcast
             NetworkManager.Instance.BroadcastToClients(msg);
@@ -1544,6 +1652,15 @@ namespace SeapowerMultiplayer
                 // A depth/altitude slider commit is one deliberate player action, never
                 // a per-frame call - and it has no shared cache slot to keep current.
                 case OrderType.SetHeightCustom:
+                // Formation ops are discrete commands whose meaning is in the opcode,
+                // not in Speed/Heading - the default fingerprint cannot tell two
+                // different ops apart, and repeating one (rejoin, recall) is normal.
+                case OrderType.FormationCommand:
+                // Each attack/drop waypoint is its own discrete task. A pattern or
+                // line drop issues several in one click whose only differing fields
+                // are the positions, which the default fingerprint ignores - dedup
+                // would collapse the whole pattern down to its first buoy.
+                case OrderType.AttackAtWaypoint:
                     return true;
             }
 
@@ -1678,6 +1795,23 @@ namespace SeapowerMultiplayer
         static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
     }
 
+    // Active sonar was the hole in this gate. EnableAllActiveSensors fans out to the
+    // two radar methods above plus EnableActiveSonars, so crew AI acting on a unit the
+    // other player owns had its radar half blocked and its sonar half go through -
+    // straight onto the sonar, which writes _sonar.IsActive directly.
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.EnableActiveSonars))]
+    public static class Patch_EnableActiveSonars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableActiveSonars))]
+    public static class Patch_DisableActiveSonars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
     // ── Radar Enable/Disable (catches both context menu and per-sensor UI) ──
     //
     // The player toggles radars via either:
@@ -1775,6 +1909,12 @@ namespace SeapowerMultiplayer
                 if (SessionManager.SceneLoading) return;
                 // Own send path, so the ally lock has to be asked here too.
                 if (UnitLockManager.BlocksOrdersFor(unit)) return;
+                // ...and the ownership test the radar path gets from OrderSyncHelper.
+                // Without it the client relayed sonar flips its own local sim made on
+                // the remote player's units, and the host applied them to its real
+                // ships. ClientMayControl is no substitute: no task force is ever
+                // assigned, so it returns true for everything.
+                if (Suppression.ClientForeignUnit(unit)) return;
 
                 var msg = OrderSyncHelper.SensorMsg(unit, 2, active);
 

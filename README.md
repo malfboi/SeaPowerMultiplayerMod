@@ -27,10 +27,22 @@ Combat is resolved by the **target** of the engagement. If Player A fires a miss
 
 ## Getting Started
 
-The mod is loaded by **[Anchor Chain](https://seapower-modders.github.io/AnchorChain/)**, the community chainloader for Sea Power. There is no launcher to run - all settings are edited in-game.
+There are four ways to install the mod. Pick whichever suits you best.
 
 <details>
-<summary><b>Option 1: Steam Workshop (Recommended)</b></summary>
+<summary><b>Option 1: Use Steam Workshop (Recommended)</b></summary>
+
+Steam workshop recieves the most up to date fixes and is the simplest installation.
+
+1. DInstall Anchor Chain and follow its setup guide
+2. Install the multiplayer mod from [workshop](https://steamcommunity.com/sharedfiles/filedetails/?id=3769566124).
+3. Enable the mod in the mod menu.
+4. Restart the game.
+
+</details>
+
+<details>
+<summary><b>Option 2: Use the Launcher</b></summary>
 
 1. Subscribe to **Anchor Chain** on the Steam Workshop and follow its [installation guide](https://seapower-modders.github.io/AnchorChain/) to install the BepInEx preloader.
 2. Subscribe to **Seapower Multiplayer** on the Steam Workshop.
@@ -41,7 +53,7 @@ The mod is loaded by **[Anchor Chain](https://seapower-modders.github.io/AnchorC
 </details>
 
 <details>
-<summary><b>Option 2: Manual DLL Install</b></summary>
+<summary><b>Option 3: Manual DLL Install</b></summary>
 
 If you prefer to manage things yourself:
 
@@ -53,7 +65,7 @@ If you prefer to manage things yourself:
 </details>
 
 <details>
-<summary><b>Option 3: Build from Source</b></summary>
+<summary><b>Option 4: Build from Source</b></summary>
 
 1. Clone this repository:
    ```bash

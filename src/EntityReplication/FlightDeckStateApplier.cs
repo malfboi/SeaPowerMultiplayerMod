@@ -58,11 +58,25 @@ namespace SeapowerMultiplayer
             var vob = fd._vehiclesOnBoard;
 
             // Availability + ammo the Flight Ops "aircraft to prepare" list reads.
+            //
+            // WRITE ONLY ON CHANGE. Every one of these setters raises
+            // NotifyPropertyChanged unconditionally, and a snapshot arrives about once
+            // a second for as long as any deck task is running (the host's change
+            // signature includes each task's ready-up countdown text, which ticks).
+            // Re-assigning identical values therefore machine-gunned the Flight Ops
+            // window with property notifications, and the vanilla view model answers
+            // those by rebuilding its aircraft-type / squadron / count lists - a
+            // cascade that ends in UpdateAvailableAircraft() forcing Assigned back to
+            // 1. That is why a client could never ready more than one aircraft: the
+            // count reset roughly once a second, always before the player could press
+            // READY. Every launch order in the logs from that session arrived as
+            // count=1, including five retries in a row on one carrier.
             fd._currentAmmo = msg.CurrentAmmo;
             for (int i = 0; i < msg.VehicleNumbers.Count; i++)
             {
                 var vc = msg.VehicleNumbers[i];
-                if (vc.VehicleIdx < vob.Count && vob[vc.VehicleIdx] != null)
+                if (vc.VehicleIdx >= vob.Count || vob[vc.VehicleIdx] == null) continue;
+                if (vob[vc.VehicleIdx].Numbers != vc.Numbers)
                     vob[vc.VehicleIdx].Numbers = vc.Numbers;
             }
             for (int i = 0; i < msg.SquadronNumbers.Count; i++)
@@ -70,7 +84,8 @@ namespace SeapowerMultiplayer
                 var sc = msg.SquadronNumbers[i];
                 if (sc.VehicleIdx >= vob.Count || vob[sc.VehicleIdx] == null) continue;
                 var squads = vob[sc.VehicleIdx].Squadrons;
-                if (sc.SquadronIdx < squads.Count && squads[sc.SquadronIdx] != null)
+                if (sc.SquadronIdx >= squads.Count || squads[sc.SquadronIdx] == null) continue;
+                if (squads[sc.SquadronIdx].Numbers != sc.Numbers)
                     squads[sc.SquadronIdx].Numbers = sc.Numbers;
             }
 
@@ -94,10 +109,15 @@ namespace SeapowerMultiplayer
                 {
                     if (existing is PendingLaunchTask plt)
                     {
-                        plt.LaunchCount        = t.LaunchCount;
+                        // Change-guarded for the same reason as the counts above -
+                        // LaunchCount, FlightDeckTaskLabel and Info all notify, and
+                        // LaunchCount's setter rewrites Info as a side effect.
+                        if (plt.LaunchCount != t.LaunchCount) plt.LaunchCount = t.LaunchCount;
+                        plt.AssignedDeckSpots  = t.DeckSpots;
+                        plt.AssignedGroundCrew = t.GroundCrew;
                         plt.launchAllowed      = t.LaunchAllowed;
-                        plt.FlightDeckTaskLabel = t.Label;
-                        plt.Info               = t.Info;
+                        if (plt.FlightDeckTaskLabel != t.Label) plt.FlightDeckTaskLabel = t.Label;
+                        if (plt.Info != t.Info) plt.Info = t.Info;
                         SyncLaunchCommand(carrier, plt, t.AwaitingLaunch);
                     }
                     else if (existing == null)
@@ -114,8 +134,8 @@ namespace SeapowerMultiplayer
                 {
                     if (existing != null)
                     {
-                        existing.FlightDeckTaskLabel = t.Label;
-                        existing.Info                = t.Info;
+                        if (existing.FlightDeckTaskLabel != t.Label) existing.FlightDeckTaskLabel = t.Label;
+                        if (existing.Info != t.Info) existing.Info = t.Info;
                     }
                     else
                     {
@@ -204,6 +224,9 @@ namespace SeapowerMultiplayer
             var task = new PendingLaunchTask(fd, vehicle, loadout, squadron, callsign, ltp, 0f, t.LaunchAllowed);
             task._uid = t.Uid;
             task.LaunchCount        = t.LaunchCount;
+            // FlightDeck.OnUpdate sums these for the deck/crew utilisation readouts.
+            task.AssignedDeckSpots  = t.DeckSpots;
+            task.AssignedGroundCrew = t.GroundCrew;
             task.launchAllowed      = t.LaunchAllowed;
             task.FlightDeckTaskLabel = t.Label;
             task.Info               = t.Info;

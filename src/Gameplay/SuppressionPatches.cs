@@ -28,12 +28,16 @@ namespace SeapowerMultiplayer
         /// starts the remote side is player-owned, so its AI must not launch
         /// attacks while the host waits for the player to connect.</summary>
         internal static bool HostSuppressesRemoteTfAi(ObjectBase? unit) =>
+            unit != null && HostSuppressesRemoteTfAi(unit._taskforce);
+
+        /// <summary>Taskforce-level form of the same test, for AI that runs per
+        /// TASKFORCE rather than per unit (Taskforce.CheckAI).</summary>
+        internal static bool HostSuppressesRemoteTfAi(Taskforce? tf) =>
             Plugin.Instance.CfgIsHost.Value
             && Plugin.Instance.CfgPvP.Value
             && NetworkManager.Instance.IsHostRunning
-            && unit != null
-            && unit._taskforce != null
-            && unit._taskforce == Globals._enemyTaskforce;
+            && tf != null
+            && tf == Globals._enemyTaskforce;
 
         /// <summary>CLIENT-side: true for a unit the local player does not own -
         /// the opposing side in PvP, the AI sides in co-op. The per-unit AI class
@@ -248,6 +252,61 @@ namespace SeapowerMultiplayer
             if (!Suppression.ClientActive) return true;
             return Authority.IsAllowed;
         }
+    }
+
+    /// <summary>Taskforce-level AI assignment sweep (10 s timer in Taskforce.OnUpdate).
+    /// CheckVIDAssignment / CheckASWAssignment hand out investigate orders to every
+    /// non-player taskforce - which in PvP includes the remote player's, so the host
+    /// kept tasking the guest's units. The VID branch is the worst of it: for a
+    /// helicopter it calls setOrder(Order.Type.Identify) WITHOUT registering in the
+    /// contact's _enemiesInvestigatingThisUnit list, which is the only thing the sweep
+    /// checks before re-assigning - so the order came back every 10 s and the guest
+    /// could not call their helicopter off. Genuine AI sides are untouched: the gate
+    /// is host + PvP + the remote player's taskforce.</summary>
+    [HarmonyPatch(typeof(Taskforce), nameof(Taskforce.CheckAI))]
+    public static class Patch_V2_RemoteTf_TaskforceAi_Suppress
+    {
+        static bool Prefix(Taskforce __instance) =>
+            !Suppression.HostSuppressesRemoteTfAi(__instance);
+    }
+
+    /// <summary>Crew alert reaction. Reached from ObjectBase.CalculateIncomingThreats
+    /// (via ObjectBase.OnUpdate, NOT AI.OnFixedUpdate - so the AI suppression above
+    /// never covered it) for any taskforce that is not the local player's. It goes
+    /// active on every sensor, forces _weaponStatus to Free by writing the field
+    /// directly - bypassing SetWeaponStatus and therefore its sync, so the two sides
+    /// silently disagree about the guest's weapon status - and force-alerts every
+    /// taskforce unit within 10 nmi.
+    ///
+    /// Both sides need this, for mirrored reasons:
+    ///  - HOST, PvP: the remote player's units are theirs to command.
+    ///  - CLIENT: the remote player's fleet is a non-player taskforce here, so the
+    ///    client's own copy of this ran on their replicas and flipped sonars on. The
+    ///    IsActive subscription then relayed that upstream as a SensorToggle order and
+    ///    the host's real ships started transmitting.
+    ///
+    /// Auto-defence is unaffected: _onAlert only gates the sensor auto-off timers and
+    /// the alert expiry, nothing weapons-related.</summary>
+    [HarmonyPatch(typeof(AI), nameof(AI.CheckForRaiseAlert))]
+    public static class Patch_V2_RaiseAlert_Suppress
+    {
+        static bool Prefix(ObjectBase ____baseObject) =>
+            !Suppression.HostSuppressesRemoteTfAi(____baseObject)
+            && !Suppression.ClientForeignUnit(____baseObject);
+    }
+
+    /// <summary>Attack/sonobuoy-drop waypoints exist on both sides (they sync as
+    /// OrderType.AttackAtWaypoint), but only the host's copy may fire. The client's
+    /// is for map display: when its replica reaches the waypoint the vanilla task
+    /// would run the attack pipeline anyway - inert for an untargeted drop, since
+    /// HandleEngageTasks is host-only, but a TARGETED one calls InsertEngageTask,
+    /// whose client prefix forwards a fire order upstream and the host shoots twice.
+    /// Only the calculation is skipped; the rest of OnUpdate still runs, so the
+    /// local waypoint completes and clears off the map in step with the host's.</summary>
+    [HarmonyPatch(typeof(AttackAtWaypoint), "AttackCalculations")]
+    public static class Patch_V2_AttackAtWaypoint_Suppress
+    {
+        static bool Prefix() => !Suppression.ClientActive;
     }
 
     /// <summary>No weapon collision/fuse raycasts on the client, for ANY weapon -

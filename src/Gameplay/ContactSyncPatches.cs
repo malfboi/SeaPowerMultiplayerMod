@@ -70,6 +70,68 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>
+    /// CLIENT-side: answer "identify yourself" with the HOST's roll, not our own.
+    ///
+    /// AI.GetLegacyCompliance rolls Globals._rnd once per neutral unit and caches it,
+    /// lazily, on first read - so the two machines roll independently and disagree.
+    /// Each player therefore got their own 60% chance off the same merchant, and
+    /// asking on both screens raised the odds of a successful identification to 84%.
+    /// The host's roll travels in ContactSync; here it becomes the answer both
+    /// players get. Unknown means the host has not reported the contact yet, in
+    /// which case the local value stands.
+    /// </summary>
+    [HarmonyPatch(typeof(AI), "get_CurrentCompliance")]
+    public static class Patch_AI_CurrentCompliance_Shared
+    {
+        static void Postfix(ObjectBase ____baseObject, ref AI.Compliance __result)
+        {
+            if (!Suppression.ClientActive) return;
+            if (Plugin.Instance.CfgPvP.Value) return; // co-op only, like the rest of the shared picture
+            if (____baseObject == null || ____baseObject.UniqueID == 0) return;
+
+            var shared = ContactSyncManager.ComplianceFor(____baseObject.UniqueID);
+            if (shared != AI.Compliance.Unknown) __result = shared;
+        }
+    }
+
+    /// <summary>
+    /// CLIENT-side: an identification obtained by radio has to reach the host too.
+    ///
+    /// "Request: identify yourself" ends in Utils.RevealContactToObject with a "Comms"
+    /// sensor type and the identifying classificationOverride - a purely local ECS
+    /// write. The shared picture only flows host → client, so a merchant the CLIENT
+    /// talked into identifying itself stayed unknown on the host's screen forever.
+    /// Forward the request; the host performs the same reveal against its own picture
+    /// and ContactSync carries the resulting class back down. The local reveal still
+    /// runs, so the asking player sees the answer immediately.
+    ///
+    /// Only the comms path is forwarded. ContactRevealManager's own sweep also calls
+    /// this method (sensorType "None") and must not bounce back upstream.
+    /// </summary>
+    [HarmonyPatch(typeof(Utils), nameof(Utils.RevealContactToObject))]
+    public static class Patch_Utils_RevealContactToObject_Share
+    {
+        static void Prefix(ObjectBase hostObject, ObjectBase contactObject, string sensorType)
+        {
+            if (sensorType != "Comms") return;
+            if (!Suppression.ClientActive) return;
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (hostObject == null || contactObject == null) return;
+            if (hostObject.UniqueID == 0 || contactObject.UniqueID == 0) return;
+
+            NetworkManager.Instance.SendToServer(new Messages.PlayerOrderMessage
+            {
+                SourceEntityId = hostObject.UniqueID,
+                Order          = Messages.OrderType.RequestIdentify,
+                TargetEntityId = contactObject.UniqueID,
+            });
+            Plugin.Log.LogInfo($"[Contacts] Upstream identify request: asker={hostObject.UniqueID} " +
+                $"contact={contactObject.UniqueID}");
+        }
+    }
+
+    /// <summary>
     /// CLIENT-side: title the contact information window with the track number the
     /// rest of the UI is showing.
     ///

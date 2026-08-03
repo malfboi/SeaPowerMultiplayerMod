@@ -54,6 +54,12 @@ namespace SeapowerMultiplayer.Messages
             public byte   SquadronIdx;
             public byte   CallsignIdx;
             public short  LaunchCount;
+            // The deck/crew a readying flight is occupying. FlightDeck.OnUpdate sums
+            // these across its pending tasks for the Flight Ops utilisation readouts,
+            // and the client's deck pipeline - which is what assigns them - is
+            // suppressed, so without them mirrored every carrier reads 0%.
+            public short  DeckSpots;
+            public short  GroundCrew;
             public bool   LaunchAllowed;
             public bool   AwaitingLaunch; // host task sits in HandleAwaitSpawnTask - the
                                           // player's LAUNCH command releases it
@@ -104,6 +110,8 @@ namespace SeapowerMultiplayer.Messages
                     writer.Put(t.SquadronIdx);
                     writer.Put(t.CallsignIdx);
                     writer.Put(t.LaunchCount);
+                    writer.Put(t.DeckSpots);
+                    writer.Put(t.GroundCrew);
                     writer.Put(t.LaunchAllowed);
                     writer.Put(t.AwaitingLaunch);
                 }
@@ -159,6 +167,8 @@ namespace SeapowerMultiplayer.Messages
                     t.SquadronIdx    = reader.GetByte();
                     t.CallsignIdx    = reader.GetByte();
                     t.LaunchCount    = reader.GetShort();
+                    t.DeckSpots      = reader.GetShort();
+                    t.GroundCrew     = reader.GetShort();
                     t.LaunchAllowed  = reader.GetBool();
                     t.AwaitingLaunch = reader.GetBool();
                 }

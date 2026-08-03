@@ -551,14 +551,26 @@ namespace SeapowerMultiplayer
         {
             if (Plugin.Instance.CfgIsHost.Value) return;
 
-            var obj = ReplicaRegistry.Find(msg.EntityId) ?? StateSerializer.FindById(msg.EntityId);
+            var replica = ReplicaRegistry.Find(msg.EntityId);
+            var obj = replica ?? StateSerializer.FindById(msg.EntityId);
             if (MotionTrace.IsTracing(msg.EntityId))
                 MotionTrace.TerminalEvent("DESPAWN", msg.EntityId, obj,
                     Utils.longLatToLocalV3(new GeoPosition(msg.LatDeg, msg.LonDeg, msg.HeightM),
                         Globals._currentCenterTile),
                     $"cause={msg.Cause}");
 
-            if (obj is WeaponBase wb)
+            // A weapon that is not one of OUR replicas and was never launched here is
+            // the pooled instance the id merely resolved to, not the thing the host is
+            // despawning. Chaff clouds are pre-pooled per weapon system and the replica
+            // launch path can decline to launch one (decoyNoAttacher / decoyAttacherStuck),
+            // so an ordinary chaff expiry could land on an untouched pool object -
+            // and ChaffCloud.destroyObject dereferences a _collider that only the launch
+            // path ever creates. The NRE escaped the whole main-thread drain.
+            if (obj is WeaponBase unlaunched && replica == null && !unlaunched.isLaunched())
+            {
+                Telemetry.Count("v2.despawnUnlaunched");
+            }
+            else if (obj is WeaponBase wb)
             {
                 using (Authority.Allowed())
                 {

@@ -165,9 +165,16 @@ namespace SeapowerMultiplayer
             _transport?.Poll();
             SamplePacketLoss();
 
-            // Drain queued main-thread actions
+            // Drain queued main-thread actions. One throwing message must not take the
+            // drain down with it: nothing upstream catches, so the exception escaped
+            // Plugin.Update entirely and skipped the rest of the frame's plugin work
+            // (replica driving, carrier ops, telemetry) as well as the queue - for as
+            // many frames as it took to grind through a bad burst.
             while (_mainThreadQueue.TryDequeue(out var action))
-                action();
+            {
+                try { action(); }
+                catch (Exception ex) { Log.LogError($"[Net] queued main-thread action threw: {ex}"); }
+            }
 
             // Handshake timeout: peer connected but never completed Hello/Welcome -
             // almost certainly a pre-v2 plugin or an incompatible phase build.

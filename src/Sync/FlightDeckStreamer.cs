@@ -69,7 +69,7 @@ namespace SeapowerMultiplayer
 
         private static int StrBytes(string s) => (s?.Length ?? 0) * 2 + 5; // worst-case UTF-8 + length prefix
         private static int RowBytes(FlightDeckStateMessage.TaskRow t) =>
-            30 + StrBytes(t.Label) + StrBytes(t.Info) + StrBytes(t.AircraftType) + StrBytes(t.SquadronName);
+            34 + StrBytes(t.Label) + StrBytes(t.Info) + StrBytes(t.AircraftType) + StrBytes(t.SquadronName);
 
         /// <summary>Split a full snapshot into sub-MTU messages (into _chunks).
         /// Availability entries and task rows are independent items, so they can be
@@ -173,6 +173,8 @@ namespace SeapowerMultiplayer
                         SquadronIdx   = (byte)Clamp(plt._squadronIndex),
                         CallsignIdx   = (byte)Clamp(plt._callsignIndex),
                         LaunchCount   = (short)plt.LaunchCount,
+                        DeckSpots     = (short)plt.AssignedDeckSpots,
+                        GroundCrew    = (short)plt.AssignedGroundCrew,
                         LaunchAllowed = plt.launchAllowed,
                         AwaitingLaunch = plt._stateMachine?.CurrentState is HandleAwaitSpawnTask,
                         Label         = plt.FlightDeckTaskLabel,
@@ -219,6 +221,7 @@ namespace SeapowerMultiplayer
                 var t = m.Tasks[i];
                 _sb.Append(t.IsPending ? 'P' : 'D').Append(t.Uid).Append(',')
                    .Append(t.LaunchCount).Append(',')
+                   .Append(t.DeckSpots).Append(',').Append(t.GroundCrew).Append(',')
                    .Append(t.LaunchAllowed ? '1' : '0').Append(',')
                    .Append(t.AwaitingLaunch ? '1' : '0').Append(',')
                    .Append(t.Label).Append(',').Append(t.Info).Append(';');

@@ -41,12 +41,14 @@ namespace SeapowerMultiplayer
             public readonly int     TrackId;
             public readonly bool    Classified; // host knows whose it is
             public readonly object? BoxedClass; // null = host has not identified it
+            public readonly byte    Compliance; // host's AI.Compliance roll, 0 = none yet
 
-            public Override(int trackId, bool classified, object? boxedClass)
+            public Override(int trackId, bool classified, object? boxedClass, byte compliance)
             {
                 TrackId    = trackId;
                 Classified = classified;
                 BoxedClass = boxedClass;
+                Compliance = compliance;
             }
         }
 
@@ -224,7 +226,7 @@ namespace SeapowerMultiplayer
             for (int i = 0; i < msg.Entries.Count; i++)
             {
                 var e = msg.Entries[i];
-                _overrides[e.UniqueId] = new Override(e.TrackId, e.Classified, BoxClass(e.ClassName));
+                _overrides[e.UniqueId] = new Override(e.TrackId, e.Classified, BoxClass(e.ClassName), e.Compliance);
             }
 
             // The override keys ARE the host's contact list, so the reveal sweep
@@ -244,7 +246,15 @@ namespace SeapowerMultiplayer
 
         // ── Host capture ──────────────────────────────────────────────────────
 
-        private static readonly Dictionary<int, (int trackId, bool classified, string cls)> _lastSent = new(128);
+        /// <summary>CLIENT: the host's compliance roll for a contact, or Unknown when
+        /// the host has not reported one. Read by the AI.CurrentCompliance patch so a
+        /// merchant gives both players the same answer.</summary>
+        internal static AI.Compliance ComplianceFor(int uniqueId) =>
+            _overrides.TryGetValue(uniqueId, out var ov)
+                ? (AI.Compliance)ov.Compliance
+                : AI.Compliance.Unknown;
+
+        private static readonly Dictionary<int, (int trackId, bool classified, string cls, byte compliance)> _lastSent = new(128);
         private static readonly ContactSyncMessage _msg = new();
         private static readonly HashSet<int> _seen = new(128);
         private static float _nextFullSweep;
@@ -315,7 +325,15 @@ namespace SeapowerMultiplayer
                 bool classified = vehicle.UnitTaskforce.Value != null;
                 string cls = ReadClassName(vehicle);
 
-                var current = (vehicle.Id, classified, cls);
+                // Only neutrals answer an identification request; for anyone else the
+                // getter hard-codes Ignore. Reading it here is what forces the host's
+                // roll, and it must be the ONLY roll in the session - so restrict it
+                // to the units the request can actually be made of.
+                byte compliance = (obj._ai != null && obj._taskforce == Globals._neutralTaskforce)
+                    ? (byte)obj._ai.CurrentCompliance
+                    : (byte)AI.Compliance.Unknown;
+
+                var current = (vehicle.Id, classified, cls, compliance);
                 if (!full && _lastSent.TryGetValue(id, out var previous) && previous == current)
                     continue;
 
@@ -326,6 +344,7 @@ namespace SeapowerMultiplayer
                     TrackId    = vehicle.Id,
                     Classified = classified,
                     ClassName  = cls,
+                    Compliance = compliance,
                 });
 
                 if (_msg.Entries.Count >= MaxEntriesPerPacket)

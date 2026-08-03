@@ -34,6 +34,13 @@ namespace SeapowerMultiplayer.Messages
             public int    TrackId;
             public bool   Classified; // false = the host has not worked out whose it is
             public string ClassName;  // object ini name, "" = not identified
+
+            /// <summary>The contact's AI.Compliance, so both players share ONE answer
+            /// to "identify yourself". The game rolls it lazily per machine and caches
+            /// it, so each player was getting an independent 60% roll off the same
+            /// merchant - ask on both screens and the odds of a hit went from 60% to
+            /// 84%. 0 (Unknown) = the host has no answer yet, keep the local one.</summary>
+            public byte   Compliance;
         }
 
         /// <summary>True on the periodic full sweep: the client replaces its whole
@@ -62,6 +69,7 @@ namespace SeapowerMultiplayer.Messages
                 writer.Put(e.TrackId);
                 writer.Put(e.Classified);
                 writer.Put(e.ClassName ?? "");
+                writer.Put(e.Compliance);
             }
         }
 
@@ -77,6 +85,7 @@ namespace SeapowerMultiplayer.Messages
                     TrackId    = reader.GetInt(),
                     Classified = reader.GetBool(),
                     ClassName  = reader.GetString(),
+                    Compliance = reader.GetByte(),
                 });
             }
             return msg;

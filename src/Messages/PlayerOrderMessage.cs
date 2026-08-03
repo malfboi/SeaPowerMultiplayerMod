@@ -33,6 +33,32 @@ namespace SeapowerMultiplayer.Messages
         AllowLaunch     = 26,  // v2: client releases a readied pending launch → host (AmmoId = task Guid string)
         SetSpeedCustom  = 27,  // speed slider / typed entry (Speed = commanded knots)
         SetHeightCustom = 28,  // depth or altitude slider / typed entry (Speed = DesiredAltitude, Unity units)
+        AttackAtWaypoint = 29, // attack/sonobuoy-drop waypoint (Dest=waypoint geo, Target=attack geo,
+                               // ShotsToFire=salvo, AmmoId=ammo, Speed=packed salvoType+flags, Heading=areaRadius)
+        RequestIdentify  = 30, // co-op: "request: identify yourself" (Source=asking unit, Target=contact)
+        SetFormationMode = 31, // UnitFormation.SelectedControlMode (Source=leader unit, Speed=ControlMode)
+        FormationCommand = 32, // formation membership/shape/orders - ShotsToFire = FormationOp
+    }
+
+    /// <summary>
+    /// Sub-command for <see cref="OrderType.FormationCommand"/>. Formations have no
+    /// id of their own, so every op is addressed by a UNIT: the member it acts on, or
+    /// the formation's leader for formation-wide orders. Both machines hold the same
+    /// membership (replicated at spawn) and apply the ops in the same order, so the
+    /// key stays valid even across a leader swap.
+    /// </summary>
+    public enum FormationOp
+    {
+        Create     = 0, // Source becomes the leader of a new formation
+        Join       = 1, // Source joins the formation led by TargetEntityId
+        Detach     = 2, // Source leaves its formation
+        SwapLeader = 3, // Source takes over as leader
+        CeaseFire  = 4, // formation-wide cease fire      (Speed = recall flag)
+        RecallAll  = 5, // all units back to station       (Speed = ceaseFire flag)
+        ReturnUnit = 6, // Source back to its own station
+        Rename     = 7, // AmmoId = new name
+        StationPos = 8, // Speed = station index, DestX/Y/Z = new station position
+        Disband    = 9, // formation dissolved
     }
 
     /// <summary>
