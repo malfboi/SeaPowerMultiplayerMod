@@ -566,23 +566,41 @@ namespace SeapowerMultiplayer
             // so an ordinary chaff expiry could land on an untouched pool object -
             // and ChaffCloud.destroyObject dereferences a _collider that only the launch
             // path ever creates. The NRE escaped the whole main-thread drain.
-            if (obj is WeaponBase unlaunched && replica == null && !unlaunched.isLaunched())
+            // A weapon that never ran a local launch has no _weaponInstance either, and
+            // the teardown overrides dereference it as bare as ChaffCloud does its
+            // collider - Torpedo.destroyObject goes straight to
+            // _weaponInstance._propAudioSource. Same class of object, one weapon type
+            // further along, and the same answer: it is not ours to tear down.
+            if (obj is WeaponBase unlaunched && replica == null
+                && (!unlaunched.isLaunched() || unlaunched._weaponInstance == null))
             {
                 Telemetry.Count("v2.despawnUnlaunched");
             }
             else if (obj is WeaponBase wb)
             {
-                using (Authority.Allowed())
+                // Whatever the teardown does, the bookkeeping below has to run: a throw
+                // here used to leave the replica registered under an id the host has
+                // already retired, so every later message for it resolved onto a corpse.
+                try
                 {
-                    if (!wb.IsDestroyed
-                        && (msg.Cause == DespawnCause.Intercepted || msg.Cause == DespawnCause.FuelExpired
-                            || msg.Cause == DespawnCause.Splashed))
+                    using (Authority.Allowed())
                     {
-                        var geo = new GeoPosition(msg.LatDeg, msg.LonDeg, msg.HeightM);
-                        Vector3 pos = Utils.longLatToLocalV3(geo, Globals._currentCenterTile);
-                        wb.Destruction(pos, wb.transform.rotation, null, false);
+                        if (!wb.IsDestroyed
+                            && (msg.Cause == DespawnCause.Intercepted || msg.Cause == DespawnCause.FuelExpired
+                                || msg.Cause == DespawnCause.Splashed))
+                        {
+                            var geo = new GeoPosition(msg.LatDeg, msg.LonDeg, msg.HeightM);
+                            Vector3 pos = Utils.longLatToLocalV3(geo, Globals._currentCenterTile);
+                            wb.Destruction(pos, wb.transform.rotation, null, false);
+                        }
+                        wb.destroyObject(false, false, TacView.TCEvent.Destroyed);
                     }
-                    wb.destroyObject(false, false, TacView.TCEvent.Destroyed);
+                }
+                catch (System.Exception ex)
+                {
+                    Telemetry.Count("v2.despawnTeardownThrew");
+                    Plugin.Log.LogWarning($"[V2] Despawn teardown threw for id={msg.EntityId} " +
+                                          $"({wb.GetType().Name}): {ex.Message}");
                 }
             }
             else if (obj is Aircraft || obj is Helicopter)

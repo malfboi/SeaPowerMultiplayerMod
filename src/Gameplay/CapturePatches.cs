@@ -392,18 +392,24 @@ namespace SeapowerMultiplayer
     /// (unit, mount, container): only the open↔close transitions cross the wire.</summary>
     public static class HatchStateCapture
     {
+        // -1 in the container slot is the launcher's own SYSTEM animation, which has its
+        // own open/closed state independent of any container's.
+        private const int SystemKey = -1;
+
         private static readonly Dictionary<(int unit, int mount, int container), bool> _lastOpen = new();
         internal static void Clear() => _lastOpen.Clear();
 
-        internal static void OnHatch(WeaponSystemLauncher launcher, int containerId, bool open)
+        internal static void OnHatch(WeaponSystemLauncher launcher, int containerId, bool open,
+                                     float delaySec = 0f, bool isSystem = false)
         {
             if (!CaptureState.HostCaptureActive) return;
             var unit = launcher._baseObject;
             if (unit == null) return;
             int mountIdx = CaptureState.MountIndexOf(unit, launcher);
-            if (mountIdx < 0 || containerId < 0 || containerId > 255) return;
+            if (mountIdx < 0) return;
+            if (!isSystem && (containerId < 0 || containerId > 255)) return;
 
-            var key = (unit.UniqueID, mountIdx, containerId);
+            var key = (unit.UniqueID, mountIdx, isSystem ? SystemKey : containerId);
             bool prev = _lastOpen.TryGetValue(key, out bool p) && p;
             if (prev == open) return; // no transition (also skips a close with no prior open)
             _lastOpen[key] = open;
@@ -412,10 +418,43 @@ namespace SeapowerMultiplayer
             {
                 UnitId      = unit.UniqueID,
                 MountIndex  = (short)mountIdx,
-                ContainerId = (byte)containerId,
+                ContainerId = isSystem ? (byte)0 : (byte)containerId,
                 Open        = open,
+                DelaySec    = delaySec,
+                IsSystem    = isSystem,
             });
             Telemetry.Count("v2.capturedHatch");
+        }
+    }
+
+    /// <summary>The launcher's SYSTEM animation - the outer door over a whole launcher
+    /// bank, distinct from the per-container hatches above and driven by its own little
+    /// state machine inside the launcher's update, which client puppets never run.
+    ///
+    /// openSystem() returns false while the animation plays and is called every frame
+    /// until it finishes; the dedup below reduces that to the one transition.</summary>
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.openSystem))]
+    public static class Patch_V2_OpenSystem_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance)
+            => HatchStateCapture.OnHatch(__instance, 0, true, 0f, isSystem: true);
+    }
+
+    /// <summary>closeSystem schedules exactly as the container-level close does, and does
+    /// nothing at all unless the system is currently open - hence the same prefix.
+    /// Declared on WeaponSystem, so this fires for every weapon system; only launchers
+    /// carry replicated hatches, so the rest are filtered out here.</summary>
+    [HarmonyPatch(typeof(WeaponSystem), nameof(WeaponSystem.closeSystem))]
+    public static class Patch_V2_CloseSystem_Capture
+    {
+        static void Prefix(WeaponSystem __instance, ref bool __state)
+            => __state = __instance is WeaponSystemLauncher
+                      && __instance._systemState == WeaponSystem.SystemState.SystemOpen;
+
+        static void Postfix(WeaponSystem __instance, float delay, bool __state)
+        {
+            if (!__state) return;
+            HatchStateCapture.OnHatch((WeaponSystemLauncher)__instance, 0, false, delay, isSystem: true);
         }
     }
 
@@ -426,11 +465,28 @@ namespace SeapowerMultiplayer
             => HatchStateCapture.OnHatch(__instance, containerId, true);
     }
 
+    /// <summary>closeHatches SCHEDULES a close - it records _closeStartDelay and returns,
+    /// and the lid only starts moving once that delay elapses. The delay therefore has to
+    /// travel with the event, or the client shuts its hatch up to three seconds early.
+    ///
+    /// The prefix is what makes the capture honest: the method body does nothing at all
+    /// unless the hatches were open when it was called, and reading the flag afterwards
+    /// cannot tell "scheduled a close" from "was already shut".</summary>
     [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.closeHatches), new[] { typeof(int), typeof(float) })]
     public static class Patch_V2_CloseHatches_Capture
     {
-        static void Postfix(WeaponSystemLauncher __instance, int containerId)
-            => HatchStateCapture.OnHatch(__instance, containerId, false);
+        static void Prefix(WeaponSystemLauncher __instance, int containerId, ref bool __state)
+        {
+            __state = containerId >= 0 && containerId < __instance._containers.Count
+                      && __instance._containers[containerId] != null
+                      && __instance._containers[containerId]._areHatchesOpen;
+        }
+
+        static void Postfix(WeaponSystemLauncher __instance, int containerId, float delay, bool __state)
+        {
+            if (!__state) return;
+            HatchStateCapture.OnHatch(__instance, containerId, false, delay);
+        }
     }
 
     /// <summary>

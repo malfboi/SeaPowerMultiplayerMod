@@ -38,6 +38,7 @@ namespace SeapowerMultiplayer.Messages
         RequestIdentify  = 30, // co-op: "request: identify yourself" (Source=asking unit, Target=contact)
         SetFormationMode = 31, // UnitFormation.SelectedControlMode (Source=leader unit, Speed=ControlMode)
         FormationCommand = 32, // formation membership/shape/orders - ShotsToFire = FormationOp
+        AttackTarget    = 33,  // "attack that contact" designation (TargetEntityId, 0 = clear)
     }
 
     /// <summary>
@@ -59,6 +60,8 @@ namespace SeapowerMultiplayer.Messages
         Rename     = 7, // AmmoId = new name
         StationPos = 8, // Speed = station index, DestX/Y/Z = new station position
         Disband    = 9, // formation dissolved
+        StationOffset = 10, // Speed = station index, DestX/Y/Z = offset from station,
+                            // Heading = flags (1 = setStationHeight, 2 = reachable)
     }
 
     /// <summary>

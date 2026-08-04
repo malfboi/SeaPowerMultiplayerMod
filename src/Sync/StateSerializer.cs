@@ -564,6 +564,18 @@ namespace SeapowerMultiplayer
                     // (sent rudder angle as heading). Heading syncs via waypoints + state corrections.
 
                     case Messages.OrderType.MoveTo:
+                        // setWaypointTask opens with _userRoot.graph and never checks it.
+                        // A unit whose task graph is not built - a replica mid-spawn, or
+                        // an id that resolved onto a pooled object - takes an NRE out of
+                        // the whole order, which is where the handful of
+                        // "OrderHandler.Apply -> setWaypointTask" throws per battle came
+                        // from. The waypoint is not worth a lost frame.
+                        if (unit._userRoot == null)
+                        {
+                            Plugin.Log.LogWarning($"[Order] MoveTo skipped: unit={msg.SourceEntityId} " +
+                                                  $"({unit.name}) has no task graph yet");
+                            break;
+                        }
                         unit.setWaypointTask(new GeoPosition
                         {
                             _longitude = msg.DestX,
@@ -667,6 +679,20 @@ namespace SeapowerMultiplayer
                             case 1: if (enable) unit.EnableSurfaceSearchRadars(); else unit.DisableSurfaceSearchRadars(); break;
                             case 2: if (enable) unit.EnableActiveSonars(); else unit.DisableActiveSonars(); break;
 
+                            // Group 3: one sensor, addressed by its index in
+                            // _obp._sensorSystems - towed array / VDS / dipping sonar
+                            // deployment, which is a SensorSystem.Enable rather than
+                            // anything the group methods reach.
+                            case 3:
+                            {
+                                var sensors = unit._obp?._sensorSystems;
+                                int idx = msg.ShotsToFire;
+                                if (sensors == null || idx < 0 || idx >= sensors.Count) break;
+                                var sensor = sensors[idx];
+                                if (sensor == null) break;
+                                if (enable) sensor.Enable(); else sensor.Disable();
+                                break;
+                            }
                         }
                         break;
                     }
@@ -736,6 +762,10 @@ namespace SeapowerMultiplayer
                         Plugin.Log.LogInfo($"[Sonobuoy] Applied drop: unit={unit.UniqueID} ammo={msg.AmmoId}");
                         break;
                     }
+
+                    case Messages.OrderType.AttackTarget:
+                        AttackDesignationSync.Apply(unit, msg);
+                        break;
 
                     case Messages.OrderType.FormationCommand:
                         ApplyFormationCommand(unit, msg);
@@ -954,6 +984,22 @@ namespace SeapowerMultiplayer
                     if (formation == null || index < 0 || index >= formation.Stations.Count) break;
                     formation.ChangeStationPosition(formation.Stations[index],
                         new Vector3(msg.DestX, msg.DestY, msg.DestZ));
+                    break;
+                }
+
+                case Messages.FormationOp.StationOffset:
+                {
+                    int index = (int)msg.Speed;
+                    if (formation == null || index < 0 || index >= formation.Stations.Count) break;
+                    // OffsetStationPosition dereferences station.UnitObject without a
+                    // check of its own, and the station this names may have lost its
+                    // unit between the send and here.
+                    var target = formation.Stations[index];
+                    if (target?.UnitObject == null) break;
+                    int flags = (int)msg.Heading;
+                    formation.OffsetStationPosition(target,
+                        new Vector3(msg.DestX, msg.DestY, msg.DestZ),
+                        (flags & 1) != 0, (flags & 2) != 0);
                     break;
                 }
 

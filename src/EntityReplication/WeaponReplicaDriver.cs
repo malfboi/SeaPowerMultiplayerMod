@@ -270,12 +270,14 @@ namespace SeapowerMultiplayer
         {
             _replicas.Remove(entityId);
             _pendingSamples.Remove(entityId);
+            _propClock.Remove(entityId);
         }
 
         public static void Reset()
         {
             _replicas.Clear();
             _pendingSamples.Clear();
+            _propClock.Clear();
         }
 
         /// <summary>Unit vector the weapon is travelling along.</summary>
@@ -384,6 +386,8 @@ namespace SeapowerMultiplayer
 
                 if (r.IsMissile)
                     PumpMissileVisuals((Missile)wb);
+                else if (wb is Torpedo torp)
+                    PumpTorpedoProps(kv.Key, torp, dt);
 
                 // Audio follows the weapon
                 if (_soundHandlerRef != null)
@@ -410,6 +414,78 @@ namespace SeapowerMultiplayer
                 _toRemove.Clear();
             }
         }
+
+        /// <summary>
+        /// Spin a torpedo replica's propellers.
+        ///
+        /// Vanilla turns them from Torpedo.moveForward(rotatePropellers: true), which is
+        /// only ever reached from Torpedo.OnFixedUpdate - and that is exactly what the
+        /// KinematicWeapon policy suppresses, because it also carries guidance, seeker,
+        /// fuse and motion integration. This driver took over the motion and left the
+        /// props behind, so a client's torpedoes ran to their targets with dead screws.
+        ///
+        /// Calling the game's own private rotateProps through a cached open delegate
+        /// rather than re-implementing it: the rotation reads _propsRPM and each
+        /// submodel's _rotatesLeft, both set up during resource load, and a local copy
+        /// would drift from them the moment either changes.
+        /// </summary>
+        private static readonly System.Action<Torpedo>? _rotateProps =
+            AccessTools.MethodDelegate<System.Action<Torpedo>>(
+                AccessTools.Method(typeof(Torpedo), "rotateProps"));
+
+        private static bool _warnedNoRotateProps;
+
+        /// <summary>Time owed to each torpedo's propellers, keyed by entity id so it can
+        /// be dropped in Forget along with everything else about that weapon.</summary>
+        private static readonly Dictionary<int, float> _propClock = new();
+
+        private static void PumpTorpedoProps(int entityId, Torpedo t, float gameDt)
+        {
+            if (_rotateProps == null)
+            {
+                if (!_warnedNoRotateProps)
+                {
+                    _warnedNoRotateProps = true;
+                    Plugin.Log.LogWarning("[V2] Torpedo.rotateProps not found - client torpedo " +
+                                          "propellers will not turn (harmless, cosmetic).");
+                }
+                return;
+            }
+
+            // rotateProps turns the screws by a FIXED angle per call - _propsRPM is baked
+            // at load as 1000 * fixedDeltaTime, one fixed step's worth - and vanilla
+            // reaches it once per OnFixedUpdate. Calling it once per RENDERED frame spent
+            // that angle over a frame instead of a step: far too fast, and well past the
+            // blade-symmetry angle each frame, which is what made the screws look like
+            // they were juddering back and forth rather than turning. Pay the clock down
+            // in whole steps instead.
+            //
+            // REAL time, not game time, because that is what vanilla does: FixedUpdate
+            // ticks at a constant real rate whatever the time compression, and the angle
+            // it turns is a constant baked at load. Only the pause is honoured, which is
+            // what the game-time delta is read for.
+            if (gameDt <= 0f) return;
+
+            float step = Time.fixedDeltaTime;
+            if (step <= 0f) return;
+
+            _propClock.TryGetValue(entityId, out float owed);
+            owed += Time.deltaTime;
+
+            // A stall (scene load, one long frame) must not be repaid all at once.
+            int steps = 0;
+            while (owed >= step && steps < MaxPropStepsPerFrame)
+            {
+                _rotateProps(t);
+                owed -= step;
+                steps++;
+            }
+            if (owed > step * MaxPropStepsPerFrame) owed = 0f;
+
+            _propClock[entityId] = owed;
+        }
+
+        private const int MaxPropStepsPerFrame = 4;
 
         /// <summary>
         /// The visual progression Missile.Launch.takeAction would run: canister →

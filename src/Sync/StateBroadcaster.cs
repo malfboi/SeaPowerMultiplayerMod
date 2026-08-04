@@ -18,6 +18,32 @@ namespace SeapowerMultiplayer
             StartCoroutine(WaypointFlushLoop());
             StartCoroutine(SensorStateLoop());
             StartCoroutine(UnitStatusLoop());
+            StartCoroutine(AttackDesignationLoop());
+        }
+
+        // ── Attack designation (client → host) ──────────────────────────────
+        //
+        // The one order with no method to patch - see AttackDesignationSync. Faster
+        // than the other loops because this is a direct player action waiting on a
+        // reply, not background state: a quarter second is the most a click should
+        // sit before the authoritative sim has it.
+        private IEnumerator AttackDesignationLoop()
+        {
+            var wait = new WaitForSeconds(0.25f);
+            while (true)
+            {
+                yield return wait;
+                if (Plugin.Instance.CfgIsHost.Value) continue;
+                if (!NetworkManager.Instance.IsEstablished) continue;
+                if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
+                if (SessionManager.SceneLoading) continue;
+
+                try { AttackDesignationSync.ClientSweep(); }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Attack] Designation sweep failed: {ex.Message}");
+                }
+            }
         }
 
         // ── Bottom-row unit status (host → client, both modes) ──────────────

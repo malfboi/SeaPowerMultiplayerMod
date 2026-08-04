@@ -71,14 +71,19 @@ namespace SeapowerMultiplayer
             // count reset roughly once a second, always before the player could press
             // READY. Every launch order in the logs from that session arrived as
             // count=1, including five retries in a row on one carrier.
+            //
+            // SQUADRON COUNTS FIRST. The game maintains this pair squadron-then-vehicle
+            // everywhere it touches it (FlightDeck.abortLaunchTask at :1715/:1721,
+            // abortAllLaunchTasks at :1812/:1814, AddVehicle, CreatePendingLaunchTask),
+            // and the order is load-bearing rather than stylistic: the Flight Ops window
+            // refreshes off the VEHICLE-level CollectionChanged and never subscribes to
+            // Squadron.PropertyChanged, so writing the vehicle count first rebuilds the
+            // window against a squadron count that is still mid-update. On a
+            // full-squadron abort the refund snapshot rebuilt it at the instant vehicles
+            // were back up and squadrons still read 0 - empty squadron list, null
+            // SelectedSquadron - and because the streamer only re-sends on change, the
+            // view never healed and that deck could not launch again.
             fd._currentAmmo = msg.CurrentAmmo;
-            for (int i = 0; i < msg.VehicleNumbers.Count; i++)
-            {
-                var vc = msg.VehicleNumbers[i];
-                if (vc.VehicleIdx >= vob.Count || vob[vc.VehicleIdx] == null) continue;
-                if (vob[vc.VehicleIdx].Numbers != vc.Numbers)
-                    vob[vc.VehicleIdx].Numbers = vc.Numbers;
-            }
             for (int i = 0; i < msg.SquadronNumbers.Count; i++)
             {
                 var sc = msg.SquadronNumbers[i];
@@ -87,6 +92,13 @@ namespace SeapowerMultiplayer
                 if (sc.SquadronIdx >= squads.Count || squads[sc.SquadronIdx] == null) continue;
                 if (squads[sc.SquadronIdx].Numbers != sc.Numbers)
                     squads[sc.SquadronIdx].Numbers = sc.Numbers;
+            }
+            for (int i = 0; i < msg.VehicleNumbers.Count; i++)
+            {
+                var vc = msg.VehicleNumbers[i];
+                if (vc.VehicleIdx >= vob.Count || vob[vc.VehicleIdx] == null) continue;
+                if (vob[vc.VehicleIdx].Numbers != vc.Numbers)
+                    vob[vc.VehicleIdx].Numbers = vc.Numbers;
             }
 
             // Reconcile the task queue by Guid - the host is authoritative for every

@@ -42,27 +42,39 @@ namespace SeapowerMultiplayer
 
             var vessels = UnitRegistry.Vessels;
             for (int i = 0; i < vessels.Count; i++)
-            {
-                var carrier = vessels[i];
-                var fd = carrier?._obp?._flightDeck;
-                if (fd == null) continue;
-                if (pvp && carrier._taskforce != Globals._enemyTaskforce) continue;
-                if (_nextSendAt.TryGetValue(carrier.UniqueID, out var next) && now < next) continue;
+                StreamDeck(vessels[i], pvp, now);
 
-                var msg = BuildSnapshot(carrier, fd);
-                string sig = Signature(msg);
-                if (_lastSig.TryGetValue(carrier.UniqueID, out var prev) && sig == prev)
-                    continue; // unchanged
+            // Airbases are LandUnits, and they carry flight decks exactly as carriers
+            // do. Streaming ships only meant a client-owned airfield got no snapshots at
+            // all: a returning plane despawned (that half replicates) and then, from its
+            // owner's chair, simply ceased to exist - the deck counts never moved again
+            // and nothing could be relaunched from it. The entity stream and the census
+            // have always covered land units; this was the one place that did not.
+            var landUnits = UnitRegistry.LandUnits;
+            for (int i = 0; i < landUnits.Count; i++)
+                StreamDeck(landUnits[i], pvp, now);
+        }
 
-                _lastSig[carrier.UniqueID] = sig;
-                _nextSendAt[carrier.UniqueID] = now + MinSendIntervalSec;
+        private static void StreamDeck(ObjectBase carrier, bool pvp, float now)
+        {
+            var fd = carrier?._obp?._flightDeck;
+            if (fd == null) return;
+            if (pvp && carrier._taskforce != Globals._enemyTaskforce) return;
+            if (_nextSendAt.TryGetValue(carrier.UniqueID, out var next) && now < next) return;
 
-                Chunk(msg);
-                for (int c = 0; c < _chunks.Count; c++)
-                    NetworkManager.Instance.BroadcastToClients(_chunks[c], LiteNetLib.DeliveryMethod.ReliableOrdered);
-                Telemetry.Count("v2.flightDeckSnapshot");
-                _chunks.Clear();
-            }
+            var msg = BuildSnapshot(carrier, fd);
+            string sig = Signature(msg);
+            if (_lastSig.TryGetValue(carrier.UniqueID, out var prev) && sig == prev)
+                return; // unchanged
+
+            _lastSig[carrier.UniqueID] = sig;
+            _nextSendAt[carrier.UniqueID] = now + MinSendIntervalSec;
+
+            Chunk(msg);
+            for (int c = 0; c < _chunks.Count; c++)
+                NetworkManager.Instance.BroadcastToClients(_chunks[c], LiteNetLib.DeliveryMethod.ReliableOrdered);
+            Telemetry.Count("v2.flightDeckSnapshot");
+            _chunks.Clear();
         }
 
         // ── Chunking ────────────────────────────────────────────────────────────

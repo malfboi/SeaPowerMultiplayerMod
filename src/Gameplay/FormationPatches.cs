@@ -52,6 +52,25 @@ namespace SeapowerMultiplayer
         internal static ObjectBase? Leader(UnitFormation f) => f?.LeaderStation?.UnitObject;
     }
 
+    /// <summary>
+    /// Raised around formation internals whose waypoint churn is DERIVED state - both
+    /// machines compute it identically from the same membership - rather than anything
+    /// a player asked for. While it is up, OrderSyncHelper still lets the call execute
+    /// locally but sends nothing, in either direction.
+    ///
+    /// Depth-counted like <see cref="Authority"/>, and raised from a Prefix/Finalizer
+    /// pair rather than Prefix/Postfix so a throw inside the game method cannot strand
+    /// the flag up and silence every order after it.
+    /// </summary>
+    internal static class FormationInternal
+    {
+        private static int _depth;
+
+        internal static bool Active => _depth > 0;
+        internal static void Enter() => _depth++;
+        internal static void Exit()  { if (_depth > 0) _depth--; }
+    }
+
     /// <summary>Create (isLeader) and join. The constructor reaches a new formation's
     /// leader through this same call, so both cases are caught here.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.AddUnit))]
@@ -189,5 +208,70 @@ namespace SeapowerMultiplayer
             msg.DestZ = newStationPosition.z;
             FormationSync.Send(leader, msg);
         }
+    }
+
+    /// <summary>Temporary station offsets - the sprint-and-drift ASW cycle
+    /// (FormationSprint / FormationDrift / FormationClearBafflesListening all offset
+    /// their station on onEnter, so a towed-array ship can run ahead and then coast
+    /// quietly behind the group).
+    ///
+    /// Unlike ChangeStationPosition this leaves the station itself alone and writes a
+    /// relative-to-station waypoint, and SetRelativeToStationWaypointTask is not a
+    /// patched call - so the RemoveWaypoints it opens with travelled and the task that
+    /// replaced it did not. The other side was left holding a follower with no
+    /// waypoints at all, which its own UnitFormation.OnUpdate answers by calling
+    /// ReturnToFormation - sending back a RemoveWaypoints + ReturnUnit pair that
+    /// overwrote the offset with a plain station task. One machine's ASW state and the
+    /// other machine's station keeping then took turns undoing each other.
+    ///
+    /// The opening RemoveWaypoints still travels; this rides behind it, exactly as
+    /// ReturnToFormation's ReturnUnit does, so the receiving side clears and then
+    /// re-offsets in the same drain.</summary>
+    [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.OffsetStationPosition))]
+    public static class Patch_UnitFormation_OffsetStationPosition
+    {
+        static void Postfix(UnitFormation __instance, Station station, Vector3 offset,
+                            bool setStationHeight, bool reachable)
+        {
+            if (station == null) return;
+
+            var leader = FormationSync.Leader(__instance);
+            if (leader == null) return;
+
+            int index = __instance.Stations.IndexOf(station);
+            if (index < 0) return;
+
+            var msg = FormationSync.Msg(leader, FormationOp.StationOffset);
+            msg.Speed   = index;
+            msg.DestX   = offset.x;
+            msg.DestY   = offset.y;
+            msg.DestZ   = offset.z;
+            msg.Heading = (setStationHeight ? 1 : 0) | (reachable ? 2 : 0);
+            FormationSync.Send(leader, msg);
+        }
+    }
+
+    /// <summary>Automatic leader reassignment - the leader died or started sinking
+    /// (UnitFormation.OnUpdate → UnitOnStationNotValid → here, and again from
+    /// DetachUnit). Nothing it does may travel.
+    ///
+    /// It is not a player order and not a decision either machine has to be told
+    /// about: both run it off the same station list, in the same order, against a
+    /// death both already know about, so both pick the same new leader unprompted.
+    /// What they did NOT do the same way was the waypoint handover. The two
+    /// RemoveWaypoints calls (the new leader dropping its station keeping, the old one
+    /// picking it up) are patched and went on the wire; the CopyWaypointsFrom between
+    /// them, which is what actually moves the dead leader's route onto its
+    /// replacement, is not patched and stayed local. So each side cleared what the
+    /// other had just copied, and a formation that lost its leader came out of it with
+    /// no route on either machine.
+    ///
+    /// Suppressing the send fixes it in both directions at once: each machine keeps
+    /// its own handover, which is the same handover.</summary>
+    [HarmonyPatch(typeof(UnitFormation), "AssignNewLeaderFromAvailableUnits")]
+    public static class Patch_UnitFormation_AssignNewLeader
+    {
+        static void Prefix()    => FormationInternal.Enter();
+        static void Finalizer() => FormationInternal.Exit();
     }
 }

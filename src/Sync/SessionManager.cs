@@ -450,8 +450,8 @@ namespace SeapowerMultiplayer
             {
                 // No companion file arrived - either it was missing next to the host's
                 // save at capture time, or the campaign is one this machine does not
-                // have at all (a generated campaign, say). The linkage still rides in
-                // the save, and SceneCreator only checks that the key is non-empty
+                // have at all. The linkage still rides in the save, and SceneCreator
+                // only checks that the key is non-empty
                 // (TrySetAndCheckLinearCampaignExistenceForMission) before loading the
                 // campaign scene and initialising a campaign that isn't there - which
                 // throws and takes the whole mission load with it. Clear both keys so
