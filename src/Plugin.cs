@@ -227,7 +227,7 @@ namespace SeapowerMultiplayer
             gameObject.AddComponent<StateBroadcaster>();
             gameObject.AddComponent<HostEntityStreamer>();
             gameObject.AddComponent<ContactSyncStreamer>();
-            gameObject.AddComponent<MultiplayerUI>();
+            gameObject.AddComponent<SeapowerMultiplayer.UI.NoesisOverlay>();
 
             // Apply Harmony patches. One bad patch used to abort Awake silently:
             // Steam callbacks never registered and the lobby button did nothing.
@@ -240,6 +240,10 @@ namespace SeapowerMultiplayer
 
                 // Initialize Steam lobby callbacks (safe even if transport is LiteNetLib)
                 SteamLobbyManager.Init();
+
+                // Ask the Workshop whether this build is the current one. Purely
+                // informational - it only ever raises a banner in the overlay.
+                SeapowerMultiplayer.UI.WorkshopVersionCheck.Start();
             }
             catch (Exception ex)
             {
@@ -250,7 +254,7 @@ namespace SeapowerMultiplayer
 
             Log.LogInfo($"SeapowerMultiplayer v{PluginInfo.PLUGIN_VERSION} loaded.");
             Log.LogInfo($"Transport: {CfgTransport.Value}  Mode: {(CfgIsHost.Value ? "HOST" : "CLIENT")}  Port: {CfgPort.Value}");
-            Log.LogInfo("Press F9 in-game to toggle the multiplayer UI overlay.");
+            Log.LogInfo("Press Ctrl+F9 to toggle the multiplayer overlay (works in the main menu too).");
 
             // Check for +connect_lobby launch arg (Steam invite while game was closed)
             if (CfgTransport.Value == "Steam")

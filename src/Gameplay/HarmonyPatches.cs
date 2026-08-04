@@ -13,16 +13,10 @@ using VesselStates;
 
 namespace SeapowerMultiplayer
 {
-    /// <summary>
-    /// While a settings text field in the F9 overlay owns keyboard focus, mute the
-    /// game's hotkey pump - IMGUI can't consume input the game reads through
-    /// Input.GetKeyDown, so typing an IP would otherwise also issue unit commands.
-    /// </summary>
-    [HarmonyPatch(typeof(InputHandler), nameof(InputHandler.OnUpdate))]
-    public static class Patch_InputHandler_OnUpdate
-    {
-        static bool Prefix() => !MultiplayerUI.TextInputFocused;
-    }
+    // The overlay's settings fields used to need a prefix here to mute the game's
+    // hotkey pump while typing. The Noesis overlay sets InputHandler.typingActive
+    // instead - the game's own flag, which OnUpdate already honours - so the
+    // patch is gone rather than duplicated.
 
     // ── UnitRegistry lifecycle hooks ────────────────────────────────────────
     // Harmony patches ObjectBase.Awake (non-virtual, public) and OnDestroy (private)
@@ -185,7 +179,15 @@ namespace SeapowerMultiplayer
         }
     }
 
-    // Guard CIWS weapon constructor - effect prefab can be null during save-file load
+    // Guard CIWS weapon constructor - the effect prefab can be null (tracer audio set
+    // up against a bare EnvironmentAudioManager), and the throw kills the mission-load
+    // coroutine that is building the unit.
+    //
+    // This used to also require SessionManager.SceneLoading, which is set only around
+    // OUR load paths - so a host pressing Play Mission through the game's own menu,
+    // outside a session, still lost the load to the same NRE. The gate bought nothing:
+    // this is a constructor finalizer that only ever swallows NREs, and letting one
+    // through has no upside at any point in the mod's lifecycle.
     [HarmonyPatch(typeof(WeaponSystemCIWS),
         MethodType.Constructor,
         new[] { typeof(ObjectBase), typeof(WeaponParameters), typeof(UnityEngine.GameObject), typeof(ObjectBaseParameters) })]
@@ -193,9 +195,9 @@ namespace SeapowerMultiplayer
     {
         static Exception? Finalizer(Exception __exception)
         {
-            if (SessionManager.SceneLoading && __exception is NullReferenceException)
+            if (__exception is NullReferenceException)
             {
-                Plugin.Log.LogWarning("[Patch] WeaponSystemCIWS NRE suppressed during scene load");
+                Plugin.Log.LogWarning("[Patch] WeaponSystemCIWS NRE suppressed");
                 return null;
             }
             return __exception;

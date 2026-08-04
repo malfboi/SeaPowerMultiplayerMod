@@ -73,7 +73,7 @@ namespace SeapowerMultiplayer
         private static bool IsVoteMode =>
             VoteModeActive && NetworkManager.Instance.IsConnected;
 
-        // ── UI-facing request methods (called by MultiplayerUI buttons) ───────
+        // ── UI-facing request methods (called by the overlay's time buttons) ──
 
         public static void RequestPause()
         {

@@ -446,6 +446,28 @@ namespace SeapowerMultiplayer
                     @"(?im)^(\s*LinearCampaignSavePath\s*=\s*).*$",
                     m => m.Groups[1].Value + Path.GetFileName(campaignPath));
             }
+            else
+            {
+                // No companion file arrived - either it was missing next to the host's
+                // save at capture time, or the campaign is one this machine does not
+                // have at all (a generated campaign, say). The linkage still rides in
+                // the save, and SceneCreator only checks that the key is non-empty
+                // (TrySetAndCheckLinearCampaignExistenceForMission) before loading the
+                // campaign scene and initialising a campaign that isn't there - which
+                // throws and takes the whole mission load with it. Clear both keys so
+                // the battle loads standalone; nothing in a multiplayer session reads
+                // campaign progression anyway.
+                string standalone = Regex.Replace(
+                    patchedSave,
+                    @"(?im)^(\s*(?:LinearCampaignSavePath|LinearCampaignEventName)\s*=\s*).*$",
+                    m => m.Groups[1].Value);
+
+                if (standalone != patchedSave)
+                    Log.LogWarning("[Session] Save is campaign-linked but no campaign file came with it — " +
+                                   "cleared the linkage, the mission loads standalone.");
+
+                patchedSave = standalone;
+            }
 
             // PvP: swap PlayerTaskforce ↔ EnemyTaskforce so client controls the opposing side
             if (Plugin.Instance.CfgPvP.Value)

@@ -71,6 +71,14 @@
       <HintPath>$(GameDir)\Sea Power_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- The game's UI framework. Our overlay is a NoesisView on its own camera,
+         so it works in every scene instead of only inside a loaded mission.
+         Game-provided, so it resolves at Anchor Chain's GetExportedTypes() call
+         and must not be merged - leave it out of ILRepackMerge's MergeInputs. -->
+    <Reference Include="Noesis.NoesisGUI">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- Anchor Chain chainloader (ACPlugin attribute + IAnchorChainMod).
          Checked-in copy of AnchorChain.dll from the releases dev.zip. -->
     <Reference Include="AnchorChain">
