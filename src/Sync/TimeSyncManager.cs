@@ -56,11 +56,43 @@ namespace SeapowerMultiplayer
         /// <summary>Host's CfgTimeVote, synced to client via SessionSync. Only read on client.</summary>
         private static bool _hostVoteModeEnabled;
 
-        /// <summary>Called on client when SessionSync arrives with the host's vote-mode setting.</summary>
+        /// <summary>Called on client when SessionSync arrives, or when the host
+        /// changes the setting mid-session (GameEventType.TimeVoteMode).</summary>
         public static void SetHostVoteMode(bool enabled)
         {
+            if (_hostVoteModeEnabled == enabled) return;
             _hostVoteModeEnabled = enabled;
             Plugin.Log.LogInfo($"[TimeSync] Host vote mode = {enabled}");
+            ClearVoteState();
+        }
+
+        /// <summary>
+        /// Host: tell the client the setting changed. Without this the client only
+        /// ever learns it at SessionSync, so toggling vote mode mid-session left the
+        /// client on the legacy request path - and the host then turned each of its
+        /// requests into a proposal aimed back at the client that sent it.
+        /// </summary>
+        public static void HostBroadcastVoteMode()
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            bool enabled = Plugin.Instance.CfgTimeVote.Value;
+            Plugin.Log.LogInfo($"[TimeSync] Broadcasting vote mode = {enabled}");
+            ClearVoteState();
+            NetworkManager.Instance.BroadcastToClients(new GameEventMessage
+            {
+                EventType = GameEventType.TimeVoteMode,
+                Param     = enabled ? 1f : 0f,
+            });
+        }
+
+        /// <summary>Drop any popup or pending wait left over from the previous mode.</summary>
+        private static void ClearVoteState()
+        {
+            HasPendingProposal     = false;
+            WaitingForVoteResponse = false;
+            ProposalDescription    = "";
         }
 
         /// <summary>
@@ -247,13 +279,61 @@ namespace SeapowerMultiplayer
         public static void OnHostReceivedRequest(float param)
         {
             Plugin.Log.LogInfo($"[TimeSync] Host received time request: param={param}");
-            if (param == 0f)        GameTime.Pause();
-            else if (param == 1f)   GameTime.StopTimeCompression();
-            else if (param == -1f)  GameTime.IncreaseTimeCompression();
-            else if (param == -2f)  GameTime.DecreaseTimeCompression();
-            else                    GameTime.SetTimeCompression(param);
+
+            // Suppressing the prefix below also bypasses its freeze check, and the
+            // freeze outlives the reconnect by the length of the resync - so a
+            // request arriving in that window must still not restart the clock.
+            // Pausing is never blocked, only restarting.
+            if (ReconnectManager.IsFrozen && param != 0f)
+            {
+                Plugin.Log.LogInfo("[TimeSync] Ignoring client time request - session frozen pending reconnect");
+                return;
+            }
+
+            // A request that reached us is already the client asking; applying it
+            // must not re-enter the vote-mode prefix, which would answer with a
+            // proposal sent back to the very client that made the request.
+            // Reachable in vote mode only in the window before a mode change has
+            // propagated - pause and unpause are exempt from voting and always
+            // arrive this way.
+            bool suppressed = _applyingFromNetwork;
+            _applyingFromNetwork = true;
+            try
+            {
+                if (param == 0f)        GameTime.Pause();
+                else if (param == 1f)   GameTime.StopTimeCompression();
+                else if (param == -1f)  GameTime.IncreaseTimeCompression();
+                else if (param == -2f)  GameTime.DecreaseTimeCompression();
+                else                    GameTime.SetTimeCompression(param);
+            }
+            finally
+            {
+                _applyingFromNetwork = suppressed;
+            }
+
             Plugin.Log.LogInfo($"[TimeSync] Host after applying: paused={GameTime.IsPaused()}, TC={GameTime.TimeCompression}");
-            // Broadcast is handled by the Harmony Postfix below
+
+            // Normally the Harmony Postfix broadcasts the confirm, but the speed
+            // Postfixes bail out under CfgTimeVote, so send it ourselves there.
+            // Pause/unpause broadcast unconditionally - don't duplicate those.
+            if (!Plugin.Instance.CfgTimeVote.Value) return;
+            if (param == 0f || param == 1f) return;
+            BroadcastTimeConfirm(GameTime.IsPaused() ? 0f : GameTime.TimeCompression);
+        }
+
+        /// <summary>Host → client: the authoritative time, stamped with the mission clock.</summary>
+        private static void BroadcastTimeConfirm(float timeScale)
+        {
+            if (!NetworkManager.Instance.IsConnected) return;
+            NetworkManager.Instance.BroadcastToClients(new GameEventMessage
+            {
+                EventType      = GameEventType.TimeChanged,
+                Param          = timeScale,
+                SourceEntityId = System.BitConverter.ToInt32(
+                    System.BitConverter.GetBytes(Singleton<SeaPower.Environment>.Instance.Hour * 3600f
+                    + Singleton<SeaPower.Environment>.Instance.Minutes * 60f
+                    + Singleton<SeaPower.Environment>.Instance.Seconds), 0),
+            });
         }
 
         /// <summary>Client receives confirmed time-change broadcast from host.</summary>

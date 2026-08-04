@@ -19,6 +19,32 @@ namespace SeapowerMultiplayer
             StartCoroutine(SensorStateLoop());
             StartCoroutine(UnitStatusLoop());
             StartCoroutine(AttackDesignationLoop());
+            StartCoroutine(WeaponStatusLoop());
+        }
+
+        // ── Weapon status / doctrine (both machines, own fleet) ─────────────
+        //
+        // The group-level doctrine paths write _weaponStatus directly instead of
+        // calling SetWeaponStatus, so the order patch never sees them - see
+        // WeaponStatusSync. Deliberately NOT host-gated: each side relays its own
+        // fleet's doctrine to the other. A second is plenty for a setting a player
+        // changes by hand, and keeps the sweep off the hot path.
+        private IEnumerator WeaponStatusLoop()
+        {
+            var wait = new WaitForSeconds(1f);
+            while (true)
+            {
+                yield return wait;
+                if (!NetworkManager.Instance.IsEstablished) continue;
+                if (SimSyncManager.CurrentState != SimState.Synchronized) continue;
+                if (SessionManager.SceneLoading) continue;
+
+                try { WeaponStatusSync.Sweep(); }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Doctrine] Weapon status sweep failed: {ex.Message}");
+                }
+            }
         }
 
         // ── Attack designation (client → host) ──────────────────────────────

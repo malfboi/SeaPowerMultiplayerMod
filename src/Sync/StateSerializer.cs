@@ -663,6 +663,10 @@ namespace SeapowerMultiplayer
 
                     case Messages.OrderType.SetWeaponStatus:
                         unit.SetWeaponStatus((ObjectBase.WeaponStatus)(int)msg.Speed, false);
+                        // Tell the doctrine sweep this one came off the wire, so it does
+                        // not read the change back as a local action and return it to the
+                        // machine that sent it.
+                        WeaponStatusSync.NoteApplied(unit);
                         break;
 
                     case Messages.OrderType.SetEMCON:
@@ -1052,6 +1056,11 @@ namespace SeapowerMultiplayer
 
                 case GameEventType.TimeProposalResponse:
                     TimeSyncManager.OnProposalResponseReceived(msg.Param);
+                    break;
+
+                case GameEventType.TimeVoteMode:
+                    if (!Plugin.Instance.CfgIsHost.Value)
+                        TimeSyncManager.SetHostVoteMode(msg.Param == 1f);
                     break;
 
                 case GameEventType.UnitSelected:

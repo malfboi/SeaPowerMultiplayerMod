@@ -72,23 +72,9 @@
       <Private>false</Private>
     </Reference>
     <!-- The game's UI framework. Our overlay is a NoesisView on its own camera,
-         so it works in every scene instead of only inside a loaded mission.
-         Game-provided, so it resolves at Anchor Chain's GetExportedTypes() call
-         and must not be merged - leave it out of ILRepackMerge's MergeInputs. -->
+         so it works in every scene instead of only inside a loaded mission. -->
     <Reference Include="Noesis.NoesisGUI">
       <HintPath>$(GameDir)\Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <!-- Anchor Chain chainloader (ACPlugin attribute + IAnchorChainMod).
-         Checked-in copy of AnchorChain.dll from the releases dev.zip. -->
-    <Reference Include="AnchorChain">
-      <HintPath>..\lib\AnchorChain.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <!-- AnchorChain is built against netstandard 2.1; reference the Unity facade
-         so net472 can consume it. -->
-    <Reference Include="netstandard">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\netstandard.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

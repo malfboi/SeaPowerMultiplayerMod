@@ -157,6 +157,10 @@ namespace SeapowerMultiplayer
             CfgPvP         = Config.Bind("Network", "PvP",          true,        "True = PvP mode (opposing taskforces); False = co-op (shared ally control)");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
+            // The client defers to the host's setting, and SessionSync only carries
+            // it at join time. The overlay makes it editable mid-session, so push
+            // every change - otherwise the client stays on the legacy request path.
+            CfgTimeVote.SettingChanged += (_, __) => TimeSyncManager.HostBroadcastVoteMode();
             CfgDisconnectTimeoutSec = Config.Bind("Network", "DisconnectTimeoutSec", 20,
                 "Seconds of silence before the link is declared dead. The stock transport defaults " +
                 "(LiteNetLib 5s, Steam 10s) drop high-latency players during ordinary stalls. " +
@@ -242,7 +246,8 @@ namespace SeapowerMultiplayer
                 SteamLobbyManager.Init();
 
                 // Ask the Workshop whether this build is the current one. Purely
-                // informational - it only ever raises a banner in the overlay.
+                // informational - it only ever raises a banner in the overlay, and
+                // it no-ops on this branch's non-workshop install layout.
                 SeapowerMultiplayer.UI.WorkshopVersionCheck.Start();
             }
             catch (Exception ex)

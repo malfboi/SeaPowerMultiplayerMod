@@ -373,6 +373,7 @@ namespace SeapowerMultiplayer
                 UnitStatusManager.Reset();
                 UnitLockManager.Reset();
                 AttackDesignationSync.Reset();
+                WeaponStatusSync.Reset();
                 StateApplier.ResetOrphanTracking();
                 Patch_Vehicle_UpdateAllData_PvP.ClearCache();
                 Patch_ObjectBase_HandleEngageTasks.Reset();
