@@ -193,6 +193,14 @@ namespace SeapowerMultiplayer
         private static bool  _hasTransitEma;
         private static double _lastBatchHostSec = -1d;
 
+        /// <summary>Arrival jitter, in game-seconds. Truer link-quality signal than
+        /// transport ping - it is what the render delay is actually sized against.</summary>
+        internal static float ArrivalJitterSec => _emaTransitDevGameSec;
+
+        /// <summary>Host send cadence as the client actually observes it, which at
+        /// low host framerate is slower than the configured Hz.</summary>
+        internal static float HostCadenceSec => _emaIntervalGameSec;
+
         // ── Alignment (first batch after scene load re-keys local IDs) ───────
         private static bool _pendingAlignment;
         public static void SetPendingAlignment() => _pendingAlignment = true;

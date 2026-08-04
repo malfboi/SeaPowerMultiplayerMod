@@ -1,0 +1,47 @@
+name = "seapower-telemetry"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Raw batches, stored exactly as received (gzipped NDJSON).
+# A 30-day lifecycle rule is REQUIRED and is not expressible here - set it with:
+#   npx wrangler r2 bucket lifecycle add spmp-telemetry --prefix raw/ --expire-days 30
+# Without it, storage breaches the 10 GB free tier in roughly five weeks at
+# 100 concurrent players, and the privacy notice's retention promise is false.
+[[r2_buckets]]
+binding = "LOGS"
+bucket_name = "spmp-telemetry"
+
+# Analytics Engine is a Workers Paid ($5/mo) feature. On the free plan, comment
+# this block out - the worker checks `env.AE` and simply skips the metric write,
+# so R2 remains a complete record and nothing else changes.
+[[analytics_engine_datasets]]
+binding = "AE"
+dataset = "spmp_metrics"
+
+# Counted on every request, including rejected ones.
+[[ratelimits]]
+name = "INGEST_LIMIT"
+namespace_id = "1001"
+simple = { limit = 60, period = 60 }
+
+[[ratelimits]]
+name = "IP_LIMIT"
+namespace_id = "1002"
+simple = { limit = 300, period = 60 }
+
+[observability]
+enabled = true
+
+# Account IDs are not secret - this one already appears in wrangler output and
+# in API error messages. The token that goes with it is a secret (below).
+[vars]
+CF_ACCOUNT_ID = "f8f77709a65631885574159c6736502a"
+
+# Secrets (npx wrangler secret put <NAME>):
+#   DISCORD_WEBHOOK_URL - optional; fatal errors get posted there
+# Vars:
+#   KILL_SWITCH = "1"   - accept and discard, to stop ingest without a client build
+#
+# There is deliberately no ingest key. See the note at the top of src/index.js:
+# a secret shipped inside a public DLL authenticates nobody, so abuse is bounded
+# by the rate limits above, the body-size cap, and R2 expiry instead.

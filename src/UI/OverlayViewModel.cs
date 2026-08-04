@@ -92,6 +92,9 @@ namespace SeapowerMultiplayer.UI
         public DelegateCommand DismissFatalCommand     { get; }
         public DelegateCommand ResetSettingsCommand    { get; }
 
+        public DelegateCommand EnableDiagnosticsCommand  { get; }
+        public DelegateCommand DeclineDiagnosticsCommand { get; }
+
         public OverlayViewModel()
         {
             ToggleExpandedCommand    = new DelegateCommand(_ => PanelExpanded    = !PanelExpanded);
@@ -160,6 +163,17 @@ namespace SeapowerMultiplayer.UI
             DismissMismatchCommand = new DelegateCommand(_ => NetworkManager.DismissVersionMismatch());
             DismissFatalCommand    = new DelegateCommand(_ => { _fatalDismissed = true; Refresh(true); });
             ResetSettingsCommand   = new DelegateCommand(_ => ResetToDefaults());
+
+            EnableDiagnosticsCommand  = new DelegateCommand(_ =>
+            {
+                Analytics.AcceptConsent();
+                Raise(nameof(ShareDiagnostics)); Raise(nameof(DiagnosticsIdText));
+            });
+            DeclineDiagnosticsCommand = new DelegateCommand(_ =>
+            {
+                Analytics.DeclineConsent();
+                Raise(nameof(ShareDiagnostics));
+            });
         }
 
         // ── Panel chrome ─────────────────────────────────────────────────────
@@ -409,6 +423,25 @@ namespace SeapowerMultiplayer.UI
             set { SetCfg(Plugin.Instance.CfgVerboseDebug, value); Raise(nameof(VerboseLogging)); }
         }
 
+        /// <summary>Consent, revocable at any time. Takes effect immediately -
+        /// SetEnabled starts or stops the capture and the uploader outright.</summary>
+        public bool ShareDiagnostics
+        {
+            get => Plugin.Instance.CfgShareDiagnostics.Value;
+            set { Analytics.SetEnabled(value); Raise(nameof(ShareDiagnostics)); Raise(nameof(DiagnosticsIdText)); }
+        }
+
+        /// <summary>Shown under the checkbox so a player can quote it in a deletion
+        /// request. Empty until diagnostics have been enabled at least once.</summary>
+        public string DiagnosticsIdText
+        {
+            get
+            {
+                string id = Plugin.Instance.CfgInstallId.Value;
+                return string.IsNullOrEmpty(id) ? "" : $"Anonymous ID: {id}";
+            }
+        }
+
         /// <summary>Co-op only: in PvP the two pictures are meant to differ.</summary>
         public bool SharedPictureEnabled => !Plugin.Instance.CfgPvP.Value;
         public Visibility PvPIntelNoticeVisibility => Vis(Plugin.Instance.CfgPvP.Value);
@@ -444,6 +477,10 @@ namespace SeapowerMultiplayer.UI
             var p = Plugin.Instance;
             // CfgTransport and CfgIsHost are driven by the Steam lobby flow, not
             // by the user, so resetting them here would fight it.
+            // CfgShareDiagnostics, CfgDiagnosticsAsked and CfgInstallId are
+            // deliberately absent. "Reset to defaults" silently revoking - or
+            // silently re-granting - a consent decision would be wrong, and
+            // re-prompting or churning the anonymous id is worse.
             ConfigEntryBase[] all =
             {
                 p.CfgPvP, p.CfgTimeVote, p.CfgVerboseDebug,
@@ -597,12 +634,15 @@ namespace SeapowerMultiplayer.UI
         private string _allyLockText = "";
         public string AllyLockText { get => _allyLockText; private set => Set(ref _allyLockText, value); }
 
+        private Visibility _consent = Visibility.Collapsed;
+        public Visibility ConsentVisibility { get => _consent; private set => Set(ref _consent, value); }
+
         /// <summary>True when something must be on screen even with the panel
         /// closed - the overlay camera stays enabled for these.</summary>
         public bool AnyPopupActive =>
             _timeVote  == Visibility.Visible || _connLost  == Visibility.Visible ||
             _mismatch  == Visibility.Visible || _allyLock  == Visibility.Visible ||
-            _fatalPopup == Visibility.Visible;
+            _fatalPopup == Visibility.Visible || _consent == Visibility.Visible;
 
         // ── Refresh ──────────────────────────────────────────────────────────
 
@@ -654,6 +694,11 @@ namespace SeapowerMultiplayer.UI
 
         private void RefreshPopups(NetworkManager nm)
         {
+            // One-time diagnostics consent. Deliberately evaluated here rather
+            // than behind the panel-visible check: it has to appear in the main
+            // menu with the panel closed, which is what AnyPopupActive drives.
+            ConsentVisibility = Vis(Analytics.ShouldPromptConsent);
+
             // Time vote
             bool vote = TimeSyncManager.HasPendingProposal;
             TimeVoteVisibility = Vis(vote);
@@ -851,6 +896,8 @@ namespace SeapowerMultiplayer.UI
             Raise(nameof(ContactSync));
             Raise(nameof(DrawingSync));
             Raise(nameof(VerboseLogging));
+            Raise(nameof(ShareDiagnostics));
+            Raise(nameof(DiagnosticsIdText));
             Raise(nameof(SharedPictureEnabled));
             Raise(nameof(PvPIntelNoticeVisibility));
         }

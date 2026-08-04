@@ -157,12 +157,31 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>Relay a unit's return to station - but only when the call actually did
+    /// something.
+    ///
+    /// ReturnToFormation returns without touching the unit if the formation has no
+    /// leader, or if the unit has no station in it, and a postfix runs on those paths
+    /// too. Relaying a no-op is not merely wasteful here, it is unbounded: OnUpdate calls
+    /// ReturnToFormation for every follower that has no waypoints, and the early return
+    /// leaves it with none, so the condition still holds on the next frame. A formation
+    /// whose leader has been destroyed and not yet replaced therefore re-sent ReturnUnit
+    /// for every follower EVERY FRAME - on a path that is exempt from order dedup and has
+    /// no rate floor, reliable-ordered, with an unthrottled log line per message at the
+    /// far end, and a RemoveWaypoints + re-add on the receiver each time.
+    ///
+    /// Both conditions are read after the call because the method mutates neither, so
+    /// this needs no prefix to capture them first.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.ReturnToFormation))]
     public static class Patch_UnitFormation_ReturnToFormation
     {
-        static void Postfix(ObjectBase obj)
+        static void Postfix(UnitFormation __instance, ObjectBase obj)
         {
-            if (obj != null) FormationSync.Send(obj, FormationSync.Msg(obj, FormationOp.ReturnUnit));
+            if (obj == null) return;
+            if (__instance.LeaderStation?.UnitObject == null) return;
+            if (__instance.GetStationForUnit(obj) == null) return;
+
+            FormationSync.Send(obj, FormationSync.Msg(obj, FormationOp.ReturnUnit));
         }
     }
 

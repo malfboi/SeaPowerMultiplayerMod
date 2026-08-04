@@ -484,6 +484,13 @@ namespace SeapowerMultiplayer.UI
               <TextBlock Style=""{StaticResource Dim}"" Visibility=""{Binding PvPIntelNoticeVisibility}""
                          Text=""Co-op only - sharing these would give away intel""/>
 
+              <!-- Top level, not under Advanced: a consent setting has to be
+                   findable without expanding a disclosure triangle. -->
+              <TextBlock Text=""Diagnostics"" Style=""{StaticResource Dim}"" Margin=""0,8,0,2""/>
+              <CheckBox Content=""Share diagnostics (helps fix bugs)""
+                        IsChecked=""{Binding ShareDiagnostics, Mode=TwoWay}""/>
+              <TextBlock Text=""{Binding DiagnosticsIdText}"" Style=""{StaticResource Dim}""/>
+
               <Button Style=""{StaticResource Fold}"" Command=""{Binding ToggleAdvancedCommand}"">
                 <Grid>
                   <TextBlock Text=""Advanced"" FontSize=""11"" Foreground=""{StaticResource Text.Head}""/>
@@ -668,6 +675,32 @@ namespace SeapowerMultiplayer.UI
                  Text=""Multiplayer is disabled for this session. The game itself is unaffected. Check BepInEx/LogOutput.log for the full error and report it on the Workshop page.""/>
       <Button Style=""{StaticResource Btn}"" Content=""Dismiss"" Margin=""0,10,0,0""
               Command=""{Binding DismissFatalCommand}""/>
+    </StackPanel>
+  </Border>
+
+  <!-- One-time diagnostics consent. Vagueness here is what makes people decline,
+       so it enumerates exactly what does and does not leave the machine. -->
+  <Border Style=""{StaticResource Popup}"" Width=""460"" Visibility=""{Binding ConsentVisibility}"">
+    <StackPanel>
+      <TextBlock Style=""{StaticResource PopupTitle}"" Text=""Share Diagnostics?""/>
+      <TextBlock TextWrapping=""Wrap""
+                 Text=""Sending anonymous diagnostics helps fix desyncs and connection problems.""/>
+      <TextBlock Style=""{StaticResource Dim}"" Margin=""0,8,0,0"" TextWrapping=""Wrap""
+                 Text=""What is sent: this mod's log messages, connection quality (ping, packet loss, bandwidth), frame rate, replica drift, and your mission, mode and version.""/>
+      <TextBlock Style=""{StaticResource Dim}"" Margin=""0,4,0,0"" TextWrapping=""Wrap""
+                 Text=""What is not sent: your name, your Steam ID, your IP address, chat or saves. Steam IDs, names and file paths are scrubbed before anything leaves your PC.""/>
+      <TextBlock Style=""{StaticResource Dim}"" Margin=""0,4,0,0"" TextWrapping=""Wrap""
+                 Text=""You are identified only by a random ID stored on this PC. Data is only sent while you are in a multiplayer session, and is deleted after 30 days. You can turn this off any time in SETTINGS.""/>
+      <Grid Margin=""0,10,0,0"">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width=""*""/>
+          <ColumnDefinition Width=""*""/>
+        </Grid.ColumnDefinitions>
+        <Button Grid.Column=""0"" Style=""{StaticResource Btn}"" Content=""Enable"" Margin=""0,0,4,0""
+                Command=""{Binding EnableDiagnosticsCommand}""/>
+        <Button Grid.Column=""1"" Style=""{StaticResource Btn}"" Content=""No thanks"" Margin=""4,0,0,0""
+                Command=""{Binding DeclineDiagnosticsCommand}""/>
+      </Grid>
     </StackPanel>
   </Border>
 

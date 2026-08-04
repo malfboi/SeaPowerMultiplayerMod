@@ -135,6 +135,18 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgContactSync = null!;
         internal ConfigEntry<bool> CfgDrawingSync = null!;
 
+        // Opt-in diagnostics
+        internal ConfigEntry<bool>   CfgShareDiagnostics = null!;
+        internal ConfigEntry<bool>   CfgDiagnosticsAsked = null!;
+        internal ConfigEntry<string> CfgInstallId        = null!;
+        internal ConfigEntry<string> CfgDiagnosticsUrl   = null!;
+
+        /// <summary>Verbose diagnostics are on when the player asked for them, and
+        /// also while diagnostics sharing is on - investigating replication bugs is
+        /// the entire point of opting in. Kept separate from CfgVerboseDebug so the
+        /// opt-in never silently rewrites a value the player can see.</summary>
+        internal bool VerboseEffective => CfgVerboseDebug.Value || Analytics.Enabled;
+
         private Harmony _harmony = null!;
         private int _sceneReadyFrames;
         private const int SceneSettleFrames = 30; // ~0.5s buffer after IsLoadingDone
@@ -217,6 +229,21 @@ namespace SeapowerMultiplayer
                 "both players. Either side may draw; the whole layer is replaced on the other side " +
                 "when it changes. Ignored in PvP.");
 
+            // Opt-in diagnostics. Off until the player says otherwise; nothing is
+            // captured or sent while it is off. See PRIVACY.md.
+            CfgShareDiagnostics = Config.Bind("Diagnostics", "ShareDiagnostics", false,
+                "Share anonymous diagnostics (logs, ping/packet loss, frame rate, replica drift) " +
+                "to help fix desyncs and connection bugs. Off by default. Steam IDs, names and " +
+                "file paths are scrubbed before anything leaves this PC.");
+            CfgDiagnosticsAsked = Config.Bind("Diagnostics", "Asked", false,
+                "Internal: the one-time consent prompt has been shown. Delete to see it again.");
+            CfgInstallId = Config.Bind("Diagnostics", "InstallId", "",
+                "Internal: random anonymous id, generated the first time diagnostics are enabled. " +
+                "Quote it to have your data deleted. Delete this line to get a new one.");
+            CfgDiagnosticsUrl = Config.Bind("Diagnostics", "Endpoint", "",
+                "Override the diagnostics upload endpoint. Leave blank for the default; " +
+                "used to point at a local wrangler dev instance during development.");
+
             // Two-instance test harness: SPMP_* environment variables override the
             // shared config file so one install can run host + client instances.
             ApplyEnvOverrides();
@@ -226,6 +253,9 @@ namespace SeapowerMultiplayer
             // overrides so a stale cfg value can't select a transport that the mod
             // no longer exposes.
             CfgTransport.Value = "Steam";
+            
+            // Before PatchAll, so a patch failure below is captured and uploaded.
+            Analytics.Init();
 
             // Attach helper MonoBehaviours to this same GameObject
             gameObject.AddComponent<StateBroadcaster>();
@@ -433,6 +463,9 @@ namespace SeapowerMultiplayer
             // Advance per-frame telemetry ring (send-bytes flatness)
             Telemetry.FrameTick();
 
+            // Opt-in diagnostics: metric sampling + error-flush timing. No-op when off.
+            Analytics.Tick();
+
             // v2: drive kinematic weapon replicas (client) + keep defence switch asserted.
             // Normally already done this frame by the RenderPosition.OnUpdate prefix, so
             // the camera sees our writes; this is the fallback when that never runs.
@@ -549,6 +582,9 @@ namespace SeapowerMultiplayer
 
         private void OnDestroy()
         {
+            // First: the session-end batch is the most valuable one, and it needs
+            // the link state that Stop() is about to tear down.
+            Analytics.Shutdown();
             MotionTrace.Close();
             NetworkManager.Instance.Stop();
             _harmony.UnpatchSelf();

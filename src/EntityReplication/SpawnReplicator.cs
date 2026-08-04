@@ -421,7 +421,7 @@ namespace SeapowerMultiplayer
             if (!isSub)
                 ConsumeShooterStores(shooter, ap._ammunitionFileName);
 
-            if (Plugin.Instance.CfgVerboseDebug.Value)
+            if (Plugin.Instance.VerboseEffective)
                 Plugin.Log.LogDebug($"[SpawnReplicator] Spawned replica id={msg.EntityId} " +
                     $"ammo={msg.AmmoName} shooter={msg.ShooterId} target={msg.TargetId} live={liveLocal}");
         }
@@ -487,7 +487,7 @@ namespace SeapowerMultiplayer
             // is what distinguishes a client-side divergence from an ammo this
             // platform never tracks as "loaded".
             Telemetry.Count("v2.storesConsumeMissed");
-            if (!Plugin.Instance.CfgVerboseDebug.Value) return;
+            if (!Plugin.Instance.VerboseEffective) return;
             var seen = new System.Text.StringBuilder();
             foreach (var ws in systems)
             {

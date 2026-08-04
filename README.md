@@ -201,6 +201,22 @@ Found a bug? [Open an issue](../../issues/new) with:
 
 Or hop into the [Discord](https://discord.gg/rMMnwJHc8w) and let us know.
 
+### Sharing diagnostics
+
+You can opt in to sending anonymous diagnostics — logs, ping and packet loss,
+frame rate and replica drift — which is by far the most useful thing you can do
+to help fix desyncs. Ctrl+F9 → **SETTINGS** → **Share diagnostics**.
+
+It is **off by default**, you are asked once, and you can turn it off again at any
+time. Steam IDs, names and file paths are scrubbed before anything leaves your PC,
+uploads only happen during an actual multiplayer session, and raw data is deleted
+after 30 days. See [PRIVACY.md](PRIVACY.md) for the full detail, including what
+the redaction does *not* catch.
+
+Worth knowing: Sea Power's own crash reporting turns itself off whenever mods are
+loaded, so while this mod is installed nobody is receiving crash data from your
+session at all.
+
 <br>
 
 ## Troubleshooting
