@@ -467,6 +467,13 @@ namespace SeapowerMultiplayer
                         else if (unit is Vessel vesNm) vesNm.launchNoisemaker();
                         break;
 
+                    case Messages.OrderType.DropFuelTanks:
+                        // Both directions: the sender already dropped locally. The
+                        // method is self-guarding (_fuelTanksDropped), so a drop
+                        // this machine worked out for itself makes this a no-op.
+                        unit.DropFueltanks(msg.Speed != 0f);
+                        break;
+
                     case Messages.OrderType.ManualGunFire:
                     {
                         // v2: client gun trigger - aim the mount with the client's

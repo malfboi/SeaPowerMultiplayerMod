@@ -124,6 +124,7 @@ export default {
     }
 
     const header = text ? firstJsonLine(text) : null;
+    const scan = text ? scanLogLines(text) : { errs: 0, fatals: [] };
 
     try {
       await env.LOGS.put(key, raw, {
@@ -133,6 +134,11 @@ export default {
           role: header?.role || '', transport: header?.tr || '',
           mode: header?.mode || '', trigger: header?.trig || '',
           country: request.headers.get('cf-ipcountry') || '',
+          // Error count so the dashboard can skip clean batches by listing
+          // alone. Without it, finding yesterday's crash means decompressing
+          // every batch since, which is why that panel could only afford to
+          // look at the newest handful.
+          errs: String(scan.errs),
         },
       });
     } catch (err) {
@@ -152,13 +158,14 @@ export default {
     // batch, and AE simply not being emulated locally.
     console.log(
       `ingest ${key} bytes=${raw.byteLength} decoded=${text ? 'yes' : 'no'} ` +
-      `metricLines=${metrics} ae=${env.AE ? 'bound' : 'MISSING'} trig=${header?.trig ?? '?'}`
+      `metricLines=${metrics} errs=${scan.errs} ae=${env.AE ? 'bound' : 'MISSING'} ` +
+      `trig=${header?.trig ?? '?'}`
     );
 
     // Fatal lines are worth a Discord ping so they surface without anyone
     // querying R2. Best-effort, and never blocks the response.
-    if (env.DISCORD_WEBHOOK_URL && text && header) {
-      ctx.waitUntil(notifyFatal(env, header, text).catch(() => {}));
+    if (env.DISCORD_WEBHOOK_URL && header && scan.fatals.length) {
+      ctx.waitUntil(notifyFatal(env, header, scan.fatals).catch(() => {}));
     }
 
     return noContent();
@@ -265,17 +272,27 @@ function writeMetrics(env, request, header, text) {
 
 const num = (v) => (typeof v === 'number' && isFinite(v) ? v : 0);
 
-async function notifyFatal(env, header, text) {
+// One pass over the log lines for both consumers: the error count that rides
+// along in R2 custom metadata, and the first few fatals for Discord. Two scans
+// over a decompressed megabyte to answer two questions about the same lines
+// would be one scan too many.
+function scanLogLines(text) {
+  let errs = 0;
   const fatals = [];
   for (const line of text.split('\n')) {
-    if (!line.startsWith('{"t":"l"') && !line.startsWith('{"t":"x"')) continue;
+    const isExc = line.startsWith('{"t":"x"');
+    if (!isExc && !line.startsWith('{"t":"l"')) continue;
     let r;
     try { r = JSON.parse(line); } catch { continue; }
-    if (r.lv === 'F' || r.t === 'x') fatals.push(r.m);
-    if (fatals.length >= 3) break;
-  }
-  if (fatals.length === 0) return;
 
+    const fatal = isExc || r.lv === 'F';
+    if (fatal || r.lv === 'E') errs++;
+    if (fatal && fatals.length < 3) fatals.push(r.m);
+  }
+  return { errs, fatals };
+}
+
+async function notifyFatal(env, header, fatals) {
   await fetch(env.DISCORD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

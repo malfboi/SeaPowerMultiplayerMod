@@ -473,6 +473,7 @@ namespace SeapowerMultiplayer
             CarrierOpsHandler.Tick();
             WeaponHatchHandler.Tick();
             Suppression.EnforceDefenseFlag();
+            Suppression.EnforceInterceptSymmetry();
             UnitLockManager.SampleInput();
 
             // Ctrl+F11 motion trace. Last of the per-frame hooks so the FRAME row

@@ -365,6 +365,7 @@ namespace SeapowerMultiplayer
                 HatchStateCapture.Clear();
                 ReplicaRegistry.Clear();
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
+                Suppression.EnforceInterceptSymmetry(); // restores the difficulty handicap
                 TaskforceAssignmentManager.Reset();
                 ContactSyncManager.Reset();
                 ContactRevealManager.Reset();
@@ -382,6 +383,7 @@ namespace SeapowerMultiplayer
                 Patch_Vessel_SetTelegraph.Reset();
                 Patch_Submarine_SetTelegraph.Reset();
                 Patch_Compartments_UpdateWantedVelocityInKnots.ClearLogCache();
+                Patch_V2_Compartments_Sink.ClearLogCache();
                 Patch_Vessel_ApplyRudderThrust.ClearLogCache();
                 Patch_VesselPropulsionSystem_OnUpdate.ClearLogCache();
 

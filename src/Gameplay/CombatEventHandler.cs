@@ -35,7 +35,8 @@ namespace SeapowerMultiplayer
         {
             var comps = unit.Compartments;
             if (comps != null)
-                comps.DestroyByExplosion();
+                using (Authority.Allowed())   // client-side DestroyByExplosion is host-only
+                    comps.DestroyByExplosion();
             else
                 unit.notifyOfExternalDestruction();
 

@@ -10,6 +10,18 @@ namespace SeapowerMultiplayer.Messages
         public byte CompartmentCount;
         public bool IsSinking;
 
+        /// <summary>Seconds the host's copy has been sinking. Compartments drives the
+        /// whole descent off _sinkTime - depth is (GameTime.time - _sinkTime) / 3 and
+        /// the rigidbody's velocity cap is 0.01 * that - so a client that stamped its
+        /// own _sinkTime sits at a permanently different point on the curve. Sent as
+        /// ELAPSED rather than absolute so it survives any clock offset between the
+        /// two machines: the client reconstructs _sinkTime = now - SinkElapsed.</summary>
+        public float SinkElapsed;
+
+        /// <summary>Host's _capSized. Gates the list-angle handling in OnFixedUpdate,
+        /// so a client that never capsized keeps righting a ship the host rolled over.</summary>
+        public bool CapSized;
+
         // Per FloodingCompartment (count * 2 entries: port[0..n], starboard[0..n])
         // Each: _currentIntegrity, _currentFlooding, _currentWaterLevel, _floodingRate
         public float[] FloodingData;   // length = count * 2 * 4
@@ -32,6 +44,8 @@ namespace SeapowerMultiplayer.Messages
             w.Put(TargetEntityId);
             w.Put(CompartmentCount);
             w.Put(IsSinking);
+            w.Put(SinkElapsed);
+            w.Put(CapSized);
 
             for (int i = 0; i < FloodingData.Length; i++)
                 w.Put(FloodingData[i]);
@@ -58,6 +72,8 @@ namespace SeapowerMultiplayer.Messages
             msg.TargetEntityId  = r.GetInt();
             msg.CompartmentCount = r.GetByte();
             msg.IsSinking       = r.GetBool();
+            msg.SinkElapsed     = r.GetFloat();
+            msg.CapSized        = r.GetBool();
 
             int floodLen = msg.CompartmentCount * 2 * 4;
             msg.FloodingData = new float[floodLen];

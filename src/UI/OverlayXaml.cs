@@ -59,11 +59,19 @@ namespace SeapowerMultiplayer.UI
       <Setter Property=""TextWrapping"" Value=""Wrap""/>
     </Style>
 
+    <!-- Focusable=False on every control below except the text fields.
+         A focused control answers the keyboard, and the overlay shares a
+         keyboard with the game: a button left holding focus turned the Enter
+         the player pressed for the sim into a button press on the panel.
+         Nothing here needs keyboard operation - the panel is mouse-driven, and
+         the text fields are the only place a key should land. -->
+
     <!-- Ordinary panel button -->
     <Style x:Key=""Btn"" TargetType=""Button"">
       <Setter Property=""Foreground"" Value=""{StaticResource Text.Normal}""/>
       <Setter Property=""FontSize"" Value=""12""/>
       <Setter Property=""Margin"" Value=""0,2,0,0""/>
+      <Setter Property=""Focusable"" Value=""False""/>
       <Setter Property=""Template"">
         <Setter.Value>
           <ControlTemplate TargetType=""Button"">
@@ -93,6 +101,7 @@ namespace SeapowerMultiplayer.UI
       <Setter Property=""Foreground"" Value=""{StaticResource Text.Head}""/>
       <Setter Property=""FontSize"" Value=""11""/>
       <Setter Property=""FontWeight"" Value=""Bold""/>
+      <Setter Property=""Focusable"" Value=""False""/>
       <Setter Property=""HorizontalContentAlignment"" Value=""Stretch""/>
       <Setter Property=""Margin"" Value=""0,6,0,0""/>
       <Setter Property=""Template"">
@@ -150,6 +159,7 @@ namespace SeapowerMultiplayer.UI
       <Setter Property=""Foreground"" Value=""{StaticResource Text.Normal}""/>
       <Setter Property=""FontSize"" Value=""12""/>
       <Setter Property=""Margin"" Value=""0,3,0,0""/>
+      <Setter Property=""Focusable"" Value=""False""/>
       <Setter Property=""Template"">
         <Setter.Value>
           <ControlTemplate TargetType=""CheckBox"">
@@ -188,6 +198,7 @@ namespace SeapowerMultiplayer.UI
       <Setter Property=""Foreground"" Value=""{StaticResource Text.Normal}""/>
       <Setter Property=""FontSize"" Value=""12""/>
       <Setter Property=""Margin"" Value=""0,0,12,0""/>
+      <Setter Property=""Focusable"" Value=""False""/>
       <Setter Property=""Template"">
         <Setter.Value>
           <ControlTemplate TargetType=""RadioButton"">
@@ -243,18 +254,31 @@ namespace SeapowerMultiplayer.UI
   <!-- Background must stay null: this stretches the full screen height, and a
        themed default would make the whole right-hand column hit-testable and
        swallow clicks that belong to the game. -->
-  <ScrollViewer HorizontalAlignment=""Right"" VerticalAlignment=""Stretch""
+  <!-- Focusable=False: a ScrollViewer takes focus and keyboard-scrolls by
+       default, which would eat arrow and page keys meant for the game.
+       The RenderTransform is what the header drag moves. Render, not layout,
+       so the panel keeps its right-anchored slot and only the drawn position
+       changes - and Noesis hit-tests through the transform, so it still takes
+       clicks where you see it. -->
+  <ScrollViewer x:Name=""PanelScroll""
+                HorizontalAlignment=""Right"" VerticalAlignment=""Stretch""
                 Margin=""10"" Width=""356"" VerticalScrollBarVisibility=""Auto""
                 HorizontalScrollBarVisibility=""Disabled"" Background=""{x:Null}""
+                Focusable=""False""
                 Visibility=""{Binding PanelVisibility}"">
+    <ScrollViewer.RenderTransform>
+      <TranslateTransform/>
+    </ScrollViewer.RenderTransform>
     <Border x:Name=""Panel"" VerticalAlignment=""Top""
             CornerRadius=""8"" Padding=""12"" Margin=""0,0,4,0""
             Background=""{StaticResource Bg.Panel}""
             BorderBrush=""{StaticResource Edge}"" BorderThickness=""1"">
       <StackPanel>
 
-        <!-- Header -->
-        <Grid>
+        <!-- Header. Doubles as the drag handle, wired up in NoesisOverlay -
+             Background must be Transparent (not null) for the empty parts of
+             the row to hit-test, which is most of what there is to grab. -->
+        <Grid x:Name=""DragBar"" Background=""Transparent"">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width=""Auto""/>
             <ColumnDefinition Width=""Auto""/>
@@ -275,7 +299,7 @@ namespace SeapowerMultiplayer.UI
             <TextBlock Text=""{Binding VersionText}"" FontWeight=""Bold""
                        FontSize=""13"" VerticalAlignment=""Center""
                        Foreground=""{StaticResource Text.Head}""/>
-            <TextBlock Text=""Ctrl+F9"" Margin=""8,0,0,0"" VerticalAlignment=""Center""
+            <TextBlock Text=""Ctrl+F9 to show/hide menu"" Margin=""8,0,0,0"" VerticalAlignment=""Center""
                        Style=""{StaticResource Dim}""/>
           </StackPanel>
           <TextBlock Grid.Column=""3"" Text=""PvP"" VerticalAlignment=""Center""
@@ -342,6 +366,9 @@ namespace SeapowerMultiplayer.UI
                 <Button Style=""{StaticResource Btn}"" Content=""Send State &amp; Wait""
                         Command=""{Binding SendStateCommand}""
                         Visibility=""{Binding SendStateVisibility}""/>
+                <TextBlock Style=""{StaticResource Dim}"" Margin=""0,4,0,0"" TextWrapping=""Wrap""
+                           Visibility=""{Binding SendStateHintVisibility}""
+                           Text=""Start or load a mission, then send it to the other player.""/>
               </StackPanel>
 
               <StackPanel Visibility=""{Binding LobbyOwnerButtonsVisibility}"">
@@ -387,6 +414,9 @@ namespace SeapowerMultiplayer.UI
                 <Button Style=""{StaticResource Btn}"" Content=""Send State &amp; Wait""
                         Command=""{Binding SendStateCommand}""
                         Visibility=""{Binding SendStateVisibility}""/>
+                <TextBlock Style=""{StaticResource Dim}"" Margin=""0,4,0,0"" TextWrapping=""Wrap""
+                           Visibility=""{Binding SendStateHintVisibility}""
+                           Text=""Start or load a mission, then send it to the other player.""/>
               </StackPanel>
             </StackPanel>
 

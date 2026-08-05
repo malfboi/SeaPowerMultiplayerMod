@@ -176,12 +176,34 @@ namespace SeapowerMultiplayer
             SendCorrections(UnitRegistry.Submarines);
         }
 
+        /// <summary>Send one unit's damage state right now, outside the periodic loop.
+        /// Used when the host starts a sink: the state stream's FlagSinking gets the
+        /// client descending within ~100 ms, but the sink CLOCK (_sinkTime) only rides
+        /// DamageState, so waiting for the next correction means descending off the
+        /// wrong clock and then snapping. ReliableOrdered because it is a one-shot that
+        /// sets that clock - the periodic loop stays unreliable and re-asserts it.</summary>
+        public static void SendDamageStateNow(ObjectBase? unit)
+        {
+            if (unit == null) return;
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            var msg = DamageStateSerializer.Capture(unit);
+            if (msg != null)
+                NetworkManager.Instance.SendToOther(msg, DeliveryMethod.ReliableOrdered);
+        }
+
         private static void SendCorrections<T>(System.Collections.Generic.IReadOnlyList<T> units) where T : ObjectBase
         {
             for (int i = 0; i < units.Count; i++)
             {
                 var unit = units[i];
-                if (unit == null || unit.IsDestroyed) continue;
+                // NOT skipped when IsDestroyed: DestroyByExplosion only sets the
+                // destroyed flag - it does not sink anything. A destroyed hulk keeps
+                // flooding and burning and only crosses the sink threshold later, so
+                // dropping it here froze the client's fire and flooding at whatever the
+                // last pre-death snapshot said, and starved the sink clock entirely.
+                if (unit == null) continue;
                 var comps = unit.Compartments;
                 if (comps == null) continue;
 

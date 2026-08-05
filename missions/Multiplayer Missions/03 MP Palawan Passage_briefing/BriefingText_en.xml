@@ -1,0 +1,66 @@
+<Grid
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+<Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="10"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="10"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="10"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="10"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+    </Grid.ColumnDefinitions>
+	<!--TextBlock Grid.Row="1" Grid.ColumnSpan="4" HorizontalAlignment="Left" Text="1985-8-18" FontSize="{StaticResource Font.Size.Header}"/-->
+	<TextBlock Grid.Row="1" Grid.ColumnSpan="4" HorizontalAlignment="Left" FontSize="{StaticResource Font.Size.Header}">
+	FLASH
+	<LineBreak/>
+	Z 070230Z JUN 85
+	</TextBlock>
+
+    <TextBlock Grid.Row="3" Grid.Column="0" FontSize="{StaticResource Font.Size.Header}" Text="FM"/>
+    <TextBlock Grid.Row="3" Grid.Column="2" FontSize="{StaticResource Font.Size.Header}" Text="CTF 77 YOKOSUKA JA"/>
+    <TextBlock Grid.Row="4" Grid.Column="0" FontSize="{StaticResource Font.Size.Header}" Text="TO"/>
+    <TextBlock Grid.Row="4" Grid.Column="2" FontSize="{StaticResource Font.Size.Header}" Text="CO USS RENTZ FFG-46"/>
+	<TextBlock Grid.Row="5" Grid.Column="0" FontSize="{StaticResource Font.Size.Header}" Text="INFO"/>
+    <TextBlock Grid.Row="5" Grid.Column="2" FontSize="{StaticResource Font.Size.Header}">
+		CINCPACFLT PEARL HARBOR HI<LineBreak/>
+		COMUSJAPAN YOKOTA AB
+	</TextBlock>
+    <TextBlock Grid.Row="7" Grid.Column="0" FontSize="{StaticResource Font.Size.Header}" Text="SUBJ"/>
+    <TextBlock Grid.Row="7" Grid.Column="2" FontSize="{StaticResource Font.Size.Header}" Text="NEW ORDERS - DEFENSE OF SINGAPORE"/>
+    <TextBlock Grid.Row="9" Grid.ColumnSpan="4" FontSize="{StaticResource Font.Size.Header}" TextWrapping="Wrap">
+		SECRET
+		<LineBreak/>
+		<LineBreak/>
+		1. (S) ENEMY AIR AND NAVAL FORCES NOW THREATEN SINGAPORE.
+		<LineBreak/>
+		<LineBreak/>
+		2. (S) EFFECTIVE IMMEDIATELY, USS RENTZ FFG-46 DETACHED FROM OKINAWA.
+		<LineBreak/>
+		<LineBreak/>
+		3. (S) PROCEED AT BEST SPEED TO SANDAKAN MALAYSIA TO JOIN ALLIED REINFORCEMENT GROUP FORMING UP THERE.
+		<LineBreak/>
+		<LineBreak/>
+		4. (S) ENEMY SUBMARINE PRESENCE SUSPECTED IN PALAWAN PASSAGE AND NORTHWEST OF BORNEO. INTEL BELIEVES CHINESE SUBMARINES MAY HAVE LAID MINES IN NORTH BALABAC STRAIT.
+		<LineBreak/>
+		<LineBreak/>
+		5. (S) NOTE: ALL ALLIED SUBMARINES FULLY COMMITTED AT TAIWAN AND OKINAWA. PALAWAN AREA IS FREE FIRE ZONE FOR SUBSURFACE CONTACTS.
+		<LineBreak/>
+		<LineBreak/>
+		6. (S) REACH SANDAKAN AND AWAIT FURTHER ORDERS. GOOD LUCK.
+		<LineBreak/>
+		<LineBreak/>
+		SECRET
+		<LineBreak/>
+		DECL OADR BT
+	</TextBlock>
+</Grid>

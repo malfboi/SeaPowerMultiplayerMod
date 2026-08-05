@@ -1040,6 +1040,22 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // WeaponSystem.ReturnEngageTask re-inserts a task the weapon system already
+    // holds (it restores _uid from _alignmentUID afterwards) - the sim putting back
+    // its own work, NOT a new player order. InsertEngageTask cannot tell the two
+    // apart, so the ally lock refused it and the client forwarded it upstream. This
+    // flag lets the InsertEngageTask prefix tell them apart.
+    [HarmonyPatch(typeof(WeaponSystem), nameof(WeaponSystem.ReturnEngageTask))]
+    public static class Patch_V2_WeaponSystem_ReturnEngageTask
+    {
+        internal static bool InProgress;
+
+        static void Prefix() => InProgress = true;
+
+        // Finalizer, not Postfix: clears the flag even if the body throws.
+        static void Finalizer() => InProgress = false;
+    }
+
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.InsertEngageTask))]
     public static class Patch_ObjectBase_InsertEngageTask
     {
@@ -1054,13 +1070,42 @@ namespace SeapowerMultiplayer
         // and are forwarded separately via Patch_V2_AttackTask_BearingFire below.
         // Known remaining gap (same inlining reason): DropSonobuoyTask bypasses this.
 
-        static bool Prefix(ObjectBase __instance, ref EngageTask __result,
+        // Refusals must NOT skip the original method. Vanilla InsertEngageTask can
+        // never return null, so every caller dereferences the result unconditionally
+        // (AttackTask.OnExecute, AttackAtWaypoint.SingleAttack, WeaponSystem
+        // .ReturnEngageTask, AI's attack paths). Returning null threw a
+        // NullReferenceException out of the behaviour tree node, which also meant
+        // AttackTask never reached finish() and the unit's order tree stalled.
+        // Instead let the task be created and strip it in the postfix (__state),
+        // which is what the client fire path already did.
+        static bool Prefix(ObjectBase __instance,
                            string ammoId, ObjectBase targetObject, Vector3 targetPosition,
-                           int shotsToFire, bool autoAttack, int priority)
+                           int shotsToFire, bool autoAttack, int priority, ref bool __state)
         {
+            __state = false;
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (!NetworkManager.Instance.IsEstablished) return true;
             if (SessionManager.SceneLoading) return true;
+
+            // Two sim-internal insertions that are not orders:
+            //
+            //  - WeaponSystem.ReturnEngageTask re-inserts a task the weapon system
+            //    already holds. Refusing it would silently delete an engagement the
+            //    player has already ordered (the AI returns a task whenever an
+            //    aircraft's weapon system retargets); forwarding it would duplicate
+            //    the shot upstream.
+            //  - DropFueltanks jettisons the tanks by queueing them as an engage
+            //    task. It syncs as its own DropFuelTanks order, so forwarding this
+            //    as a fire order would send the drop twice, under the tank's ammo id.
+            //
+            // The host keeps the task in both cases; the client still strips it, as
+            // it does every engage task, because the host owns execution.
+            if (Patch_V2_WeaponSystem_ReturnEngageTask.InProgress
+                || Patch_ObjectBase_DropFueltanks.InProgress)
+            {
+                __state = !Plugin.Instance.CfgIsHost.Value;
+                return true;
+            }
 
             // Ally lock, BOTH sides. This used to sit below the host early-return,
             // so it only ever gated the client: the host could pick a target with a
@@ -1076,8 +1121,8 @@ namespace SeapowerMultiplayer
             {
                 UnitLockManager.NoteOrderRefused(__instance);
                 Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} locked by remote");
-                __result = null;
-                return false;
+                __state = true;
+                return true;
             }
 
             if (Plugin.Instance.CfgIsHost.Value) return true;
@@ -1085,32 +1130,28 @@ namespace SeapowerMultiplayer
             // AI/auto insertions die here (client AI is suppressed - belt and braces).
             if (autoAttack)
             {
-                __result = null;
-                return false;
+                __state = true;
+                return true;
             }
 
             if (!TaskforceAssignmentManager.ClientMayControl(__instance))
             {
                 Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} not controllable (TF assignment)");
-                __result = null;
-                return false;
+                __state = true;
+                return true;
             }
 
             SendClientFireOrder(__instance, ammoId, targetObject, targetPosition, shotsToFire);
 
-            // Let the native method run: the caller (AttackTask) dereferences the
-            // returned task. The postfix removes the local enqueue - the host owns
-            // execution; the weapon returns as a replica via EntitySpawn.
+            // The postfix removes the local enqueue - the host owns execution; the
+            // weapon returns as a replica via EntitySpawn.
+            __state = true;
             return true;
         }
 
-        static void Postfix(ObjectBase __instance, EngageTask __result)
+        static void Postfix(ObjectBase __instance, EngageTask __result, bool __state)
         {
-            if (__result == null) return;
-            if (OrderHandler.ApplyingFromNetwork) return;
-            if (!NetworkManager.Instance.IsEstablished) return;
-            if (SessionManager.SceneLoading) return;
-            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (!__state || __result == null) return;
             __instance._currentEngageTasks.Remove(__result);
         }
 
@@ -2134,6 +2175,53 @@ namespace SeapowerMultiplayer
 
             return true;
         }
+    }
+
+    // ── Fuel-tank jettison (both directions) ────────────────────────────────
+    //
+    // Unlike chaff, this is not purely a player action: an aircraft drops its tanks
+    // by itself once loadout fuel runs out (Aircraft.OnFixedUpdate) or when a missile
+    // threatens it (ObjectBase.cs combat drop), and it changes LOCAL unit state the
+    // entity stream does not carry - _fuelTanksDropped, max fuel and max range. So it
+    // syncs both ways through OrderSyncHelper: the client's drop goes upstream, the
+    // host's is broadcast down. DropFueltanks guards on _fuelTanksDropped, so a drop
+    // both machines worked out independently costs nothing on the second call.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DropFueltanks))]
+    public static class Patch_ObjectBase_DropFueltanks
+    {
+        /// <summary>Set while the body runs, so the jettison EngageTask it inserts is
+        /// not mistaken for a fire order - see Patch_ObjectBase_InsertEngageTask.</summary>
+        internal static bool InProgress;
+
+        static PlayerOrderMessage Msg(ObjectBase u, bool combatDrop) =>
+            new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.DropFuelTanks,
+                Speed          = combatDrop ? 1f : 0f,
+            };
+
+        static bool Prefix(ObjectBase __instance, bool combatDrop, ref bool __state)
+        {
+            // The method's own guard, checked up front. Without it a landing or
+            // control-less aircraft - which returns early WITHOUT setting
+            // _fuelTanksDropped - would re-enter from OnFixedUpdate every frame and
+            // send an order per frame for a drop that never happens.
+            __state = !__instance._fuelTanksDropped && __instance._hasControl && !__instance.isLanding;
+            if (!__state) return true;
+
+            InProgress = true;
+            return OrderSyncHelper.Prefix(__instance, Msg(__instance, combatDrop));
+        }
+
+        static void Postfix(ObjectBase __instance, bool combatDrop, bool __state)
+        {
+            if (!__state) return;
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, combatDrop));
+        }
+
+        // Finalizer, not Postfix: clears the flag even if the body throws.
+        static void Finalizer() => InProgress = false;
     }
 
     // ── Manual noisemaker deployment (Shift+D) ──────────────────────────────

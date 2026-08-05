@@ -152,4 +152,34 @@
     <Message Text="Copied plugin to $(GameDir2)\$(ModDir)\" Importance="high" />
   </Target>
 
+  <!-- Bundled scenarios. FileManager builds the mod search path from the folders
+       under StreamingAssets and merges every CHECKED one's "missions" tree into a
+       single list, which is what the scenario menu walks (ScenarioMenuViewModel
+       .GetMissions, recursive - hence RecursiveDir). Shipping the folder is the
+       whole feature; no code is involved. A subfolder becomes a group whose title
+       comes from its own _info.ini.
+
+       Deployed into StreamingAssets\user rather than a folder of our own:
+       GetSearchDirectories registers every other StreamingAssets subfolder
+       isActive:false, and it only turns on once ticked in the mod menu and written
+       to usersettings.ini's [LoadOrder] - so a folder of our own would leave the
+       missions invisible until the player found that checkbox. "user" is added
+       isActive:true, isEditable:false: always on, never togglable, which matches the
+       DLL loading through BepInEx regardless of mod-menu state. (The Anchor Chain
+       branch ships them inside the mod folder instead, because there that folder is
+       ticked by definition - the mod could not have loaded otherwise.)
+
+       .meta files are Unity editor artifacts; the base game ships none. -->
+  <Target Name="CopyMissions" AfterTargets="Build" Condition="'$(SkipDeploy)' != 'true'">
+    <PropertyGroup>
+      <MissionsDir>Sea Power_Data\StreamingAssets\user\missions</MissionsDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <ModMissions Include="..\missions\**\*" Exclude="..\missions\**\*.meta" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ModMissions)" DestinationFiles="@(ModMissions->'$(GameDir)\$(MissionsDir)\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Copy SourceFiles="@(ModMissions)" DestinationFiles="@(ModMissions->'$(GameDir2)\$(MissionsDir)\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Message Text="Copied @(ModMissions->Count()) mission file(s) to $(MissionsDir)\" Importance="high" />
+  </Target>
+
 </Project>

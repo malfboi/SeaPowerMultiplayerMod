@@ -630,7 +630,8 @@ namespace SeapowerMultiplayer
             {
                 var comps = unit.Compartments;
                 if (comps != null && !comps._isSinking)
-                    comps.Sink(Compartments.SinkFocus.All, false);
+                    using (Authority.Allowed())
+                        comps.Sink(Compartments.SinkFocus.All, false);
             }
             else if (!unit.IsDestroyed)
             {

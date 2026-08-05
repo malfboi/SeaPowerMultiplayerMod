@@ -24,6 +24,20 @@ namespace SeapowerMultiplayer
         /// <summary>True while the client is loading a scene. Suppresses patches that crash during load.</summary>
         public static bool SceneLoading { get; private set; }
 
+        /// <summary>
+        /// True when a mission scene is loaded and has finished loading.
+        ///
+        /// Everything a capture sends comes from a live scene: SaveGame writes the
+        /// current mission, UnitRegistry reads it, Environment.Seconds is its clock.
+        /// In the main menu none of that exists, so the host must not start a sync
+        /// from there. Detected directly rather than tracked as a flag, for the same
+        /// reason DoUnloadAndLoad does it - a mission the player loaded on their own
+        /// never went through any of our code.
+        /// </summary>
+        public static bool MissionIsLive
+            => Singleton<SceneCreator>.InstanceExists(false)
+               && Singleton<SceneCreator>.Instance.IsLoadingDone;
+
         private static int _pendingRngSeed;
         private static float _pendingGameSeconds;
 
@@ -123,6 +137,25 @@ namespace SeapowerMultiplayer
 
         public static void CaptureAndSend()
         {
+            // Checked before anything else, and before any state is touched. The
+            // old path went ahead from the main menu: it paused, set
+            // WaitingForClient, saved a session with no mission in it, and shipped
+            // that to the client - leaving the host on "Waiting for client to
+            // load..." and the client waiting for a mission that never comes.
+            // Neither side had any way back except a disconnect.
+            if (!MissionIsLive)
+            {
+                Log.LogWarning("[Session] CaptureAndSend skipped — no mission loaded");
+                SimSyncManager.ReportIssue(
+                    "No mission loaded — nothing to send.",
+                    "Start or load a mission first, then press Send State & Wait.",
+                    // A warning, not an error: the player has done nothing wrong,
+                    // they are just early. Errors here would also colour the banner
+                    // red and count against the diagnostics error rate.
+                    warning: true);
+                return;
+            }
+
             if (_pendingSavePath != null)
             {
                 Log.LogWarning("[Session] CaptureAndSend skipped — a save is still being written");
@@ -542,10 +575,7 @@ namespace SeapowerMultiplayer
             // branch with a scene live destroys TerrainManager mid-mission -
             // AutogenManager then NREs every LateUpdate on the blank
             // auto-created replacement (_biomesName is null until init()).
-            bool sceneLive = Singleton<SceneCreator>.InstanceExists(false)
-                          && Singleton<SceneCreator>.Instance.IsLoadingDone;
-
-            if (sceneLive)
+            if (MissionIsLive)
             {
                 // Already in-game: use the game's proper unload-then-load path.
                 // DoUnload (99999) tears down terrain/textures, unloads scene 2, and
@@ -718,6 +748,11 @@ namespace SeapowerMultiplayer
                 ClearDetectionData();
             }
 
+            // The session loads paused, and the plotting refresh that puts own units on
+            // the map is pause-gated - seed it here or the map stays blank until the
+            // host unpauses. After ClearDetectionData, which rewrites the same table.
+            PlotOwnUnitsNow("scene ready");
+
             // Center camera on first player unit (fixes PvP camera starting on wrong side)
             if (!isHost)
             {
@@ -810,6 +845,43 @@ namespace SeapowerMultiplayer
             }
 
             Log.LogInfo($"[Session] PvP: cleared {totalSpotted} spotted objects and {totalContacts} foreign contacts");
+        }
+
+        /// <summary>
+        /// Push every player-taskforce unit's own truth track onto the plotting table.
+        ///
+        /// The tactical map plots Globals._playerTaskforce.PlottingTable.Vehicles
+        /// (SeapowerUI.MapKnownUnits), and a unit only enters that table when its
+        /// self-track is pushed. The routine that does that for a whole side is
+        /// Taskforce.updateTaskforceContacts, whose ONLY caller is
+        /// TaskforceManager.OnUpdate - which opens with
+        /// <c>if (GameTime.IsPaused()) return;</c>. A received session loads paused and
+        /// stays paused until the host unpauses, so the side that arrived through the
+        /// PvP save swap has no own-unit entries and the guest's map is blank until the
+        /// first unpause.
+        ///
+        /// Safe to call while paused: the self-track is built by OwnSideSensor.MakeTruth
+        /// straight off the unit's transform, not from the ECS geo sync that the paused
+        /// update would otherwise have run first. Idempotent - pushing a truth track for
+        /// a unit already in the table updates it in place, which is exactly what the
+        /// unpaused cadence does every DataLinkUpdateRate seconds.
+        ///
+        /// Calling the game's own per-taskforce routine rather than looping
+        /// UpdateOwnPlottingState() by hand: it already skips wakebubbles and chaff and
+        /// follows up with the single PlottingTable.Update the per-unit calls do not do.
+        /// </summary>
+        public static void PlotOwnUnitsNow(string reason)
+        {
+            var tf = Globals._playerTaskforce;
+            if (tf == null || tf.PlottingTable == null)
+            {
+                Log.LogWarning($"[Session] PlotOwnUnitsNow ({reason}): no player taskforce plotting table");
+                return;
+            }
+
+            tf.updateTaskforceContacts();
+            Log.LogInfo($"[Session] Plotted own units ({reason}): {tf.TaskforceObjects.Count} units -> " +
+                        $"{tf.PlottingTable.Vehicles.Count} vehicles on the player plot");
         }
 
         /// <summary>

@@ -34,6 +34,8 @@ namespace SeapowerMultiplayer
                 TargetEntityId  = unit.UniqueID,
                 CompartmentCount = (byte)count,
                 IsSinking       = comps._isSinking,
+                SinkElapsed     = comps._isSinking ? GameTime.time - comps._sinkTime : 0f,
+                CapSized        = comps._capSized,
                 FloodingData    = new float[count * 2 * 4],
                 SystemData      = new float[count * 2],
                 DcTeams         = new int[count + 1],
@@ -96,7 +98,11 @@ namespace SeapowerMultiplayer
         public static void Apply(DamageStateMessage msg)
         {
             var unit = StateSerializer.FindById(msg.TargetEntityId);
-            if (unit == null || unit.IsDestroyed) return;
+            // Destroyed units still sync: they burn, flood and sink AFTER
+            // DestroyByExplosion sets the flag (it does not sink anything itself),
+            // and a hulk that stops accepting corrections keeps whatever fire it had
+            // at the moment of death and never learns the host's sink clock.
+            if (unit == null) return;
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
 
             var comps = unit.Compartments;
@@ -107,8 +113,22 @@ namespace SeapowerMultiplayer
 
             // Trigger sinking BEFORE setting values - Sink() modifies flooding rates,
             // and our snapshot values (captured after sinking started) should overwrite them.
+            // Under Authority: Sink() is host-only on the client (the client's own
+            // OnFixedUpdate thresholds are suppressed), and this IS the host telling us.
             if (msg.IsSinking && !comps._isSinking)
-                comps.Sink(Compartments.SinkFocus.All, false);
+                using (Authority.Allowed())
+                    comps.Sink(Compartments.SinkFocus.All, false);
+
+            // Put the sink clock and capsize state where the host has them, every
+            // snapshot rather than only at the transition: Sink() stamps _sinkTime
+            // locally, so without this the descent runs off whenever OUR copy started
+            // and stays offset for the rest of the sink. Re-asserting also self-heals
+            // a dropped snapshot (this message is unreliable).
+            if (comps._isSinking)
+            {
+                comps._sinkTime = GameTime.time - msg.SinkElapsed;
+                comps._capSized = msg.CapSized;
+            }
 
             // Apply flooding compartment data
             for (int i = 0; i < count; i++)

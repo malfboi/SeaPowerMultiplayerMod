@@ -190,7 +190,22 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _panelExpanded, value)) { Raise(nameof(BodyVisibility)); Raise(nameof(ExpandGlyph)); } }
         }
         public Visibility BodyVisibility => Vis(_panelExpanded);
-        public string ExpandGlyph => _panelExpanded ? "▼" : "▶";
+        public string ExpandGlyph => _panelExpanded ? GlyphOpen : GlyphClosed;
+
+        /// <summary>
+        /// Foldout arrows, shared by all seven sections so the pair can only ever
+        /// be changed together.
+        ///
+        /// The closed arrow is U+25BA BLACK RIGHT-POINTING POINTER, NOT the
+        /// visually identical U+25B6 BLACK RIGHT-POINTING TRIANGLE it replaced.
+        /// U+25B6 is an emoji codepoint (it is the base of the ▶️ play button) and
+        /// most text fonts skip it - Segoe UI carries ▼ but not ▶ - so it dropped
+        /// out of the UI font, fell through to the colour emoji font, and drew as
+        /// a blue-backed play button sitting next to six flat triangles. U+25BA is
+        /// in the same fonts as ▼ and needs no fallback at all.
+        /// </summary>
+        private const string GlyphOpen   = "▼";
+        private const string GlyphClosed = "►";
 
         private string _versionText = "";
         public string VersionText { get => _versionText; private set => Set(ref _versionText, value); }
@@ -272,6 +287,12 @@ namespace SeapowerMultiplayer.UI
 
         private Visibility _sendState = Visibility.Collapsed;
         public Visibility SendStateVisibility { get => _sendState; private set => Set(ref _sendState, value); }
+
+        // Shown in the button's place while the host is still in the menu. Swapped
+        // rather than disabled: a greyed-out button invites clicking it to find out
+        // why, and the answer is a whole sentence.
+        private Visibility _sendStateHint = Visibility.Collapsed;
+        public Visibility SendStateHintVisibility { get => _sendStateHint; private set => Set(ref _sendStateHint, value); }
 
         private string _liteNetPrimary = "Connect";
         public string LiteNetPrimaryText { get => _liteNetPrimary; private set => Set(ref _liteNetPrimary, value); }
@@ -365,7 +386,7 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _settingsExpanded, value)) { Raise(nameof(SettingsVisibility)); Raise(nameof(SettingsGlyph)); } }
         }
         public Visibility SettingsVisibility => Vis(_settingsExpanded);
-        public string SettingsGlyph => _settingsExpanded ? "▼" : "▶";
+        public string SettingsGlyph => _settingsExpanded ? GlyphOpen : GlyphClosed;
 
         private bool _advancedExpanded;
         public bool AdvancedExpanded
@@ -374,7 +395,7 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _advancedExpanded, value)) { Raise(nameof(AdvancedVisibility)); Raise(nameof(AdvancedGlyph)); } }
         }
         public Visibility AdvancedVisibility => Vis(_advancedExpanded);
-        public string AdvancedGlyph => _advancedExpanded ? "▼" : "▶";
+        public string AdvancedGlyph => _advancedExpanded ? GlyphOpen : GlyphClosed;
 
         /// <summary>PvP is baked into the handshake and lobby metadata, so it can
         /// only change while nothing is running.</summary>
@@ -513,7 +534,7 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _detailsExpanded, value)) { Raise(nameof(DetailsVisibility)); Raise(nameof(DetailsGlyph)); } }
         }
         public Visibility DetailsVisibility => Vis(_detailsExpanded);
-        public string DetailsGlyph => _detailsExpanded ? "▼" : "▶";
+        public string DetailsGlyph => _detailsExpanded ? GlyphOpen : GlyphClosed;
 
         private bool _unitsExpanded = true;
         public bool UnitsExpanded
@@ -522,7 +543,7 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _unitsExpanded, value)) { Raise(nameof(UnitsVisibility)); Raise(nameof(UnitsGlyph)); } }
         }
         public Visibility UnitsVisibility => Vis(_unitsExpanded);
-        public string UnitsGlyph => _unitsExpanded ? "▼" : "▶";
+        public string UnitsGlyph => _unitsExpanded ? GlyphOpen : GlyphClosed;
 
         private bool _projectilesExpanded;
         public bool ProjectilesExpanded
@@ -531,7 +552,7 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _projectilesExpanded, value)) { Raise(nameof(ProjectilesVisibility)); Raise(nameof(ProjectilesGlyph)); } }
         }
         public Visibility ProjectilesVisibility => Vis(_projectilesExpanded);
-        public string ProjectilesGlyph => _projectilesExpanded ? "▼" : "▶";
+        public string ProjectilesGlyph => _projectilesExpanded ? GlyphOpen : GlyphClosed;
 
         private Brush _detailsDot = Ok;
         public Brush DetailsDotBrush { get => _detailsDot; private set => Set(ref _detailsDot, value); }
@@ -590,7 +611,7 @@ namespace SeapowerMultiplayer.UI
             set { if (Set(ref _countersExpanded, value)) { Raise(nameof(CountersVisibility)); Raise(nameof(CountersGlyph)); } }
         }
         public Visibility CountersVisibility => Vis(_countersExpanded);
-        public string CountersGlyph => _countersExpanded ? "▼" : "▶";
+        public string CountersGlyph => _countersExpanded ? GlyphOpen : GlyphClosed;
 
         public ObservableCollection<string> Counters { get; } = new ObservableCollection<string>();
 
@@ -765,6 +786,9 @@ namespace SeapowerMultiplayer.UI
 
         private void RefreshNetwork(NetworkManager nm, Plugin p, bool connected)
         {
+            // Only the host needs a mission of its own - the client gets one from
+            // the host's save, so waiting in the menu is exactly what it should do.
+            bool canSend = SessionManager.MissionIsLive;
             bool isSteam = p.CfgTransport.Value == "Steam";
             SteamVisibility = Vis(isSteam);
             LiteNetVisibility = Vis(!isSteam);
@@ -804,7 +828,8 @@ namespace SeapowerMultiplayer.UI
                 LobbyOwnerButtonsVisibility = Vis(!connected && inLobby && isOwner);
                 LobbyGuestButtonsVisibility = Vis(!connected && inLobby && !isOwner);
                 NoLobbyButtonsVisibility    = Vis(!connected && !inLobby);
-                SendStateVisibility         = Vis(connected && nm.IsHost);
+                SendStateVisibility         = Vis(connected && nm.IsHost && canSend);
+                SendStateHintVisibility     = Vis(connected && nm.IsHost && !canSend);
             }
             else
             {
@@ -827,7 +852,8 @@ namespace SeapowerMultiplayer.UI
                     : "Connect";
                 LiteNetPrimaryVisibility = Vis(!connected);
                 ConnectedButtonsVisibility = Vis(connected);
-                SendStateVisibility = Vis(connected && isHost);
+                SendStateVisibility = Vis(connected && isHost && canSend);
+                SendStateHintVisibility = Vis(connected && isHost && !canSend);
             }
         }
 
@@ -857,8 +883,11 @@ namespace SeapowerMultiplayer.UI
             else if (!issue && connected)
             {
                 // Connected but nothing synced yet - saying nothing here used to
-                // read as a healthy session.
-                text = isHost ? "Not synced - press Send State & Wait" : "Not synced - waiting for host";
+                // read as a healthy session. The host gets told to load a mission
+                // rather than to press a button that is not on screen yet.
+                text = !isHost                     ? "Not synced - waiting for host"
+                     : SessionManager.MissionIsLive ? "Not synced - press Send State & Wait"
+                                                    : "Not synced - start a mission first";
             }
 
             SyncStateText = text;

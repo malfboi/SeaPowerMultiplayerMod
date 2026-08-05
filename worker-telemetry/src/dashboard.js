@@ -207,48 +207,176 @@ function card(title, note, inner, p) {
 // Log lines never reach Analytics Engine - it stores numbers and dimensions, so
 // there is nowhere to put a message string. Anything textual has to come from
 // the gzipped NDJSON blobs, which means listing recent objects and decompressing
-// them per page load. Bounded hard: this is a handful of R2 GETs on every view,
-// and R2 Class B operations are the thing that would actually cost money.
+// them per page load. R2 Class B operations are the thing that would actually
+// cost money, so the GET count is what gets budgeted - not the time span.
+//
+// Two questions, two sets of objects:
+//
+//   tail    the newest few batches, every level - "what is happening right now"
+//   errors  the newest batches that ingest FLAGGED as containing errors, which
+//           reaches back days for the same number of GETs
+//
+// That flag is the whole trick. Taking the newest N batches and hoping they
+// contain the errors is a lottery a busy session always wins: one player
+// uploading clean metric batches every minute buries a crash within the hour.
+// Listing is cheap and returns custom metadata, so clean batches are skipped
+// without ever being fetched.
+//
+// The union is fetched once - a batch that is both newest and error-bearing is
+// decompressed a single time.
 
-const MAX_BATCHES = 8;
+const TAIL_BATCHES  = 8;    // newest batches, all levels, for the log tail
+const ERROR_BATCHES = 40;   // error-bearing batches - the GET budget
+const SCAN_DAYS_MAX = 14;   // R2 retention is 30 days; listing further is free but pointless
+const FETCH_CONC    = 6;    // decompressed batches held at once
+const MAX_GROUPS    = 60;
 
-async function recentRecords(env) {
-  const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+async function collectLogs(env, days) {
+  const dayKey = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const scanDays = Math.max(2, Math.min(SCAN_DAYS_MAX, days));
 
   let objects = [];
-  for (const d of [day(0), day(1)]) {
-    const listed = await env.LOGS.list({ prefix: `raw/${d}/`, limit: 1000 });
+  let truncated = false;
+  for (let n = 0; n < scanDays; n++) {
+    const listed = await env.LOGS.list({
+      prefix: `raw/${dayKey(n)}/`, limit: 1000, include: ['customMetadata'],
+    });
     objects = objects.concat(listed.objects || []);
-    if (objects.length >= 200) break;   // plenty to find the newest few
+    // Keys sort lexicographically and install IDs are random, so a truncated
+    // page is not "the oldest 1000" - it is an arbitrary 1000. Say so rather
+    // than quietly rendering a partial day as if it were the whole day.
+    truncated = truncated || !!listed.truncated;
   }
-  if (!objects.length) return [];
+
+  const empty = { tail: [], groups: [], batches: 0, listed: objects.length, scanDays, truncated };
+  if (!objects.length) return empty;
 
   objects.sort((a, b) => new Date(b.uploaded) - new Date(a.uploaded));
-  objects = objects.slice(0, MAX_BATCHES);
+
+  // `errs` is written by ingest. Objects predating that field have it
+  // undefined rather than "0", and are treated as maybes - otherwise the panel
+  // would go blank for everything uploaded before this deploy.
+  const tail = objects.slice(0, TAIL_BATCHES);
+  const errorish = objects
+    .filter((o) => o.customMetadata?.errs !== '0')
+    .slice(0, ERROR_BATCHES);
+
+  const isTail = new Set(tail.map((o) => o.key));
+  const keys = [...new Set([...tail, ...errorish].map((o) => o.key))];
+
+  const tailRecords = [];
+  const errorRecords = [];
+
+  for (let i = 0; i < keys.length; i += FETCH_CONC) {
+    await Promise.all(keys.slice(i, i + FETCH_CONC).map(async (key) => {
+      const recs = await readBatch(env, key);
+      // Batches pulled only for their errors are discarded down to those
+      // errors. Forty decompressed batches held whole would meet the isolate
+      // memory limit long before they finished rendering.
+      if (isTail.has(key)) tailRecords.push(...recs);
+      for (const r of recs) if (isError(r)) errorRecords.push(r);
+    }));
+  }
+
+  tailRecords.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return {
+    tail: tailRecords,
+    groups: groupErrors(errorRecords),
+    batches: keys.length,
+    listed: objects.length,
+    scanDays,
+    truncated,
+  };
+}
+
+async function readBatch(env, key) {
+  const obj = await env.LOGS.get(key);
+  if (!obj) return [];
+
+  let text;
+  try {
+    text = await new Response(obj.body.pipeThrough(new DecompressionStream('gzip'))).text();
+  } catch {
+    return [];   // a truncated upload should cost one batch, not the panel
+  }
 
   const out = [];
-  for (const meta of objects) {
-    const obj = await env.LOGS.get(meta.key);
-    if (!obj) continue;
-
-    let text;
-    try {
-      text = await new Response(obj.body.pipeThrough(new DecompressionStream('gzip'))).text();
-    } catch {
-      continue;   // a truncated upload should cost one batch, not the panel
-    }
-
-    let hdr = null;
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let rec;
-      try { rec = JSON.parse(line); } catch { continue; }
-      if (rec.t === 'h') { hdr = rec; continue; }
-      if (rec.t === 'l' || rec.t === 'x') out.push({ ...rec, h: hdr });
-    }
+  let hdr = null;
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    let rec;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (rec.t === 'h') { hdr = rec; continue; }
+    if (rec.t === 'l' || rec.t === 'x') out.push({ ...rec, h: hdr });
   }
-  out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
   return out;
+}
+
+const isError = (r) => r.t === 'x' || r.lv === 'E' || r.lv === 'F';
+
+// ── Error grouping ─────────────────────────────────────────────────────────
+//
+// One fault produces one row. Untouched, the panel is forty copies of the same
+// NullReference with a different tick number in it, and the second distinct
+// fault is off the bottom of the list.
+//
+// Numbers are what make copies look like different bugs: entity ids, tick
+// counts, coordinates, byte totals, elapsed times. Blanking them collapses the
+// copies and leaves the sentence that names the fault. The stack's first frame
+// joins the key so two unrelated call sites raising the same generic message
+// stay apart.
+
+// No trailing \b: a unit suffix is normal in these messages ("after 12.4s"),
+// and requiring a boundary after the digits leaves the last one behind, so
+// "12.4s" and "0.9s" would stay two different faults.
+const NUMS = /\b0x[0-9a-fA-F]+|\d+(?:[.,:]\d+)*/g;
+
+const normalise = (s) => String(s ?? '').replace(NUMS, '#').replace(/\s+/g, ' ').trim();
+
+function firstFrame(stack) {
+  for (const line of String(stack ?? '').split('\n')) {
+    const t = line.trim();
+    if (t) return normalise(t).slice(0, 160);
+  }
+  return '';
+}
+
+function groupErrors(records) {
+  const byKey = new Map();
+
+  for (const r of records) {
+    const lv = r.t === 'x' ? 'F' : (r.lv || '?');
+    const key = `${lv}|${normalise(r.m).slice(0, 240)}|${firstFrame(r.st)}`;
+
+    let g = byKey.get(key);
+    if (!g) {
+      g = {
+        lv, count: 0, first: 0, last: 0, sample: r,
+        sessions: new Set(), installs: new Set(), versions: new Set(), wordings: new Set(),
+      };
+      byKey.set(key, g);
+    }
+
+    // `n` is the client-side collapse of an exception that fired every frame
+    // (LogRingSink dedupes those before they ever reach the ring). Counting
+    // records instead of occurrences would understate those by orders of
+    // magnitude - exactly the ones worth finding.
+    g.count += Math.max(1, Number(r.n) || 1);
+    if (r.ts) {
+      if (!g.first || r.ts < g.first) g.first = r.ts;
+      // Newest occurrence supplies the displayed text and stack: an old stack
+      // for a bug still happening today is the less useful of the two.
+      if (r.ts >= g.last) { g.last = r.ts; g.sample = r; }
+    }
+    if (r.h?.s)  g.sessions.add(r.h.s);
+    if (r.h?.i)  g.installs.add(r.h.i);
+    if (r.h?.pv) g.versions.add(r.h.pv);
+    if (r.m)     g.wordings.add(r.m);
+  }
+
+  // Newest first, because "recent errors" is the question this panel answers;
+  // the occurrence and install counts are there to say which rows matter.
+  return [...byKey.values()].sort((a, b) => b.last - a.last);
 }
 
 const LEVEL = {
@@ -260,7 +388,7 @@ const LEVEL = {
   D: { name: 'Debug', color: 'var(--muted)' },
 };
 
-const clock = (ms) => !ms ? '—'
+const clock = (ms) => !ms || !isFinite(ms) ? '—'
   : new Date(ms).toISOString().replace('T', ' ').slice(5, 19);
 
 /** Severity reads from the chip's text as well as its colour, never colour alone. */
@@ -269,21 +397,33 @@ function chip(lv) {
   return `<span class="chip" style="--c:${l.color}">${esc(l.name)}</span>`;
 }
 
-function errorList(records) {
-  const errs = records.filter((r) => r.t === 'x' || r.lv === 'E' || r.lv === 'F').slice(0, 40);
-  if (!errs.length) return `<p class="empty">No errors in the batches checked. That is the good outcome.</p>`;
+function errorGroups(groups) {
+  if (!groups.length)
+    return `<p class="empty">No errors in the batches scanned. That is the good outcome.</p>`;
+
+  const shown = groups.slice(0, MAX_GROUPS);
 
   return `<div class="scroll"><table class="log"><thead><tr>
-    <th>When (UTC)</th><th>Level</th><th>Version</th><th>Session</th><th>Message</th></tr></thead><tbody>
-    ${errs.map((r) => `<tr>
-      <td class="mono">${esc(clock(r.ts))}</td>
-      <td>${chip(r.t === 'x' ? 'F' : r.lv)}</td>
-      <td>${esc(r.h?.pv || '—')}</td>
-      <td class="mono">${esc((r.h?.s || '').slice(0, 8))}</td>
-      <td class="msg">${esc(r.m)}${r.st
-        ? `<details><summary>stack</summary><pre>${esc(r.st)}</pre></details>` : ''}</td>
+    <th>Last seen (UTC)</th><th>Level</th><th class="n">Times</th><th class="n">Installs</th>
+    <th class="n">Sessions</th><th>Versions</th><th>Message</th></tr></thead><tbody>
+    ${shown.map((g) => `<tr>
+      <td class="mono">${esc(clock(g.last))}</td>
+      <td>${chip(g.lv)}</td>
+      <td class="n">${fmt(g.count)}</td>
+      <td class="n">${fmt(g.installs.size)}</td>
+      <td class="n">${fmt(g.sessions.size)}</td>
+      <td>${esc([...g.versions].sort().join(', ') || '—')}</td>
+      <td class="msg">${esc(g.sample.m)}
+        <div class="meta">first seen ${esc(clock(g.first))}${
+          g.wordings.size > 1 ? ` · ${g.wordings.size} wordings collapsed` : ''}</div>
+        ${g.sample.st
+          ? `<details><summary>stack</summary><pre>${esc(g.sample.st)}</pre></details>` : ''}
+      </td>
     </tr>`).join('')}
-  </tbody></table></div>`;
+  </tbody></table></div>
+  ${groups.length > shown.length
+    ? `<p class="empty">${fmt(groups.length - shown.length)} further distinct errors not shown.</p>`
+    : ''}`;
 }
 
 function logTail(records, limit = 120) {
@@ -317,7 +457,7 @@ export async function renderDashboard(env, days) {
   const inMission = `AND double18 > 0 AND double18 < 14400`;
 
   const [kpi, perDay, rttByTransport, errByVersion, byMode,
-         errPerDay, errByMission, perrByMission, records] = await Promise.all([
+         errPerDay, errByMission, hitchByMission, perrByMission, logs] = await Promise.all([
     panel(env, `SELECT COUNT(DISTINCT blob2) AS sessions, COUNT(DISTINCT blob1) AS players,
                        avg(double2) AS rtt_p95, avg(double3) AS loss,
                        avg(double7) AS fps, sum(double9 * _sample_interval) AS hitches,
@@ -338,16 +478,28 @@ export async function renderDashboard(env, days) {
     panel(env, `SELECT floor(double18 / 300) * 5 AS mins,
                        sum(double19 * _sample_interval) AS errs
                 FROM ${T} WHERE ${since} ${inMission} GROUP BY mins ORDER BY mins`),
+    // double9 is the hitch count over one 10 s window, so x6 is per minute of
+    // play. A rate, not a total: later buckets hold fewer sessions, and a raw
+    // sum would read that thinning out as the stutters going away.
+    panel(env, `SELECT floor(double18 / 300) * 5 AS mins,
+                       avg(double9) * 6 AS mean_pm,
+                       max(double9) * 6 AS worst_pm,
+                       COUNT(DISTINCT blob2) AS sessions
+                FROM ${T} WHERE ${since} ${inMission} GROUP BY mins ORDER BY mins`),
     panel(env, `SELECT floor(double18 / 300) * 5 AS mins,
                        avg(double13) AS perr, avg(double11) AS drift
                 FROM ${T} WHERE ${since} ${inMission} GROUP BY mins ORDER BY mins`),
     (async () => {
-      try { return { rows: await recentRecords(env), error: null, query: 'R2 list + get' }; }
-      catch (err) { return { rows: [], error: err.message, query: 'R2 list + get' }; }
+      try { return { data: await collectLogs(env, D), error: null, query: 'R2 list + get' }; }
+      catch (err) {
+        return { data: { tail: [], groups: [], batches: 0, listed: 0, scanDays: 0 },
+                 error: err.message, query: 'R2 list + get' };
+      }
     })(),
   ]);
 
   const k = kpi.rows[0] || {};
+  const L = logs.data;
 
   // Pivot the transport rows into one series per transport, aligned on date.
   const tDays = [...new Set(rttByTransport.rows.map((r) => r.d))].sort();
@@ -413,7 +565,9 @@ th[scope=row],thead th:first-child{text-align:left}
 table.log{margin:0;font-size:12.5px}
 table.log th{position:sticky;top:0;background:var(--surface);z-index:1}
 table.log td,table.log th{text-align:left;vertical-align:top;white-space:nowrap}
+table.log td.n,table.log th.n{text-align:right;font-variant-numeric:tabular-nums}
 table.log td.msg{white-space:normal;min-width:340px}
+table.log td.msg .meta{color:var(--muted);font-size:11.5px;margin-top:2px}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
 .chip{display:inline-block;padding:0 6px;border-radius:999px;font-size:11px;line-height:17px;
   color:var(--c);border:1px solid color-mix(in srgb,var(--c) 45%,transparent);
@@ -479,6 +633,19 @@ footer{max-width:1120px;margin:18px auto 0;color:var(--muted);font-size:12px}
       label: fmt(r.mins) + 'm', value: Number(r.errs) })), ' errors'),
     errByMission)}
 
+  ${card('Stutters by time into the mission',
+    'Frames over 100 ms, as a rate per minute of play, bucketed by mission elapsed. The mean is what a typical player feels; the worst window is the ugliest single ten seconds any session recorded. Both climbing to the right is the signature of something accumulating — entity count, a leak, replica churn — rather than a slow PC, which would be flat.',
+    lineChart('hitchmis', hitchByMission.rows.map((r) => fmt(r.mins) + 'm'), [
+      { name: 'Stutters per minute (mean)', values: hitchByMission.rows.map((r) => Number(r.mean_pm)) },
+      { name: 'Worst 10 s window', values: hitchByMission.rows.map((r) => Number(r.worst_pm)) },
+    ]), hitchByMission)}
+
+  ${card('Sessions reaching each point in the mission',
+    'The denominator for the two charts above. A bucket backed by one session is one player’s bad afternoon, not a trend.',
+    barChart('missess', hitchByMission.rows.map((r) => ({
+      label: fmt(r.mins) + 'm', value: Number(r.sessions) })), ' sessions'),
+    hitchByMission)}
+
   ${card('Replica accuracy by time into the mission',
     'Mean prediction error and drift in metres against mission elapsed. A curve that climbs is desync accumulating; a flat line is the sync layer holding.',
     lineChart('perrmis', perrByMission.rows.map((r) => fmt(r.mins) + 'm'), [
@@ -487,12 +654,13 @@ footer{max-width:1120px;margin:18px auto 0;color:var(--muted);font-size:12px}
     ]), perrByMission)}
 
   ${card('Recent errors',
-    `Newest first, from the last ${MAX_BATCHES} uploaded batches. Log text lives only in R2 — Analytics Engine holds numbers, so this panel reads the raw blobs directly.`,
-    errorList(records.rows), records)}
+    `One row per distinct fault, newest first. Identical errors are collapsed — numbers inside the message are ignored when matching, so the same bug with a different entity id counts once and the "Times" column carries the volume. Scanned the last ${L.scanDays} days: ${fmt(L.listed)} batches listed, ${fmt(L.batches)} fetched (only those ingest flagged as carrying an error, plus the newest few).${
+      L.truncated ? ' ⚠ A day exceeded the 1000-object listing page, so some batches were not considered.' : ''}`,
+    errorGroups(L.groups), logs)}
 
   ${card('Recent log lines',
-    'The same batches, all levels, newest first — including Debug, which never reaches LogOutput.log on the player machine.',
-    logTail(records.rows), records)}
+    `The newest ${TAIL_BATCHES} batches only, all levels, newest first — including Debug, which never reaches LogOutput.log on the player machine. Unlike the errors above this is a raw tail, so a chatty session will fill it.`,
+    logTail(L.tail), logs)}
 </main>
 <footer>Analytics Engine retains 90 days. Raw NDJSON lives in R2 for 30 days and carries
 per-session counters this page does not show.</footer>

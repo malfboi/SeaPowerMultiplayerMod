@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 225; // formation command replication
+        public const ushort ProtocolVersion = 227; // DamageState carries sink clock + capsize
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

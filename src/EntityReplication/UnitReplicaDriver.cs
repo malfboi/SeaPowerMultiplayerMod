@@ -284,7 +284,8 @@ namespace SeapowerMultiplayer
                 if (sinking && comps != null && !comps._isSinking)
                 {
                     _samples.Remove(e.EntityId);
-                    comps.Sink(Compartments.SinkFocus.All, false);
+                    using (Authority.Allowed())
+                        comps.Sink(Compartments.SinkFocus.All, false);
                     continue;
                 }
                 if (comps != null && comps._isSinking) { _samples.Remove(e.EntityId); continue; }
