@@ -131,6 +131,19 @@ namespace SeapowerMultiplayer
                 {
                     Plugin.Log.LogWarning($"[Sensors] Sync failed: {ex.Message}");
                 }
+
+                // Jam assignments ride the same loop for the same reason - they are
+                // the other half of the emitter picture (see JamStateMessage), and
+                // needed in both modes. Separate try so one failing does not take
+                // the other down, or mislabel it.
+                try
+                {
+                    if (Plugin.Instance.CfgIsHost.Value) JamStateManager.HostBroadcast();
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[Jam] Sync failed: {ex.Message}");
+                }
             }
         }
 

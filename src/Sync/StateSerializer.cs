@@ -877,6 +877,46 @@ namespace SeapowerMultiplayer
                         break;
                     }
 
+                    case Messages.OrderType.JamSystem:
+                    {
+                        // Offensive ECM. Applied through setOrder, not by writing the
+                        // ECM system directly, so the host runs the same JamTask
+                        // single-player does - system selection, the order log line
+                        // and CurrentOrder all included. The result travels back as
+                        // JamState, not as an echo of this order.
+                        if (msg.TargetEntityId != 0)
+                        {
+                            ObjectBase? jamTarget = StateSerializer.FindById(msg.TargetEntityId);
+                            if (jamTarget == null)
+                            {
+                                Plugin.Log.LogWarning($"[Order] JamSystem: target id={msg.TargetEntityId} " +
+                                    $"not found - {unit?.name} (id={msg.SourceEntityId}) not jamming");
+                                break;
+                            }
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { unit.setOrder(Order.Type.Jam, jamTarget, displayOrderText: true); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                            Plugin.Log.LogInfo($"[Order] Applied JamSystem for {unit?.name} " +
+                                $"(id={msg.SourceEntityId}): target={jamTarget.name}");
+                        }
+                        else
+                        {
+                            // Bearing jam - geo on the wire unconverted, as MoveTo.
+                            var jamGeo = new GeoPosition
+                            {
+                                _longitude = msg.TargetX,
+                                _latitude  = msg.TargetZ,
+                                _height    = msg.TargetY,
+                            };
+                            OrderHandler.ApplyingFromNetwork = true;
+                            try { unit.setOrder(Order.Type.Jam, jamGeo, displayOrderText: true); }
+                            finally { OrderHandler.ApplyingFromNetwork = false; }
+                            Plugin.Log.LogInfo($"[Order] Applied JamSystem for {unit?.name} " +
+                                $"(id={msg.SourceEntityId}): bearing {msg.TargetZ:F3},{msg.TargetX:F3}");
+                        }
+                        break;
+                    }
+
                     case Messages.OrderType.ClassifyContact:
                     {
                         RelationsState classification = (RelationsState)(int)msg.Speed;

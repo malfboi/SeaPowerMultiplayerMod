@@ -37,6 +37,7 @@ namespace SeapowerMultiplayer.Messages
         SensorState              = 33,  // host → client: per-sensor emitter state (AI radars the client cannot decide)
         ContactReport            = 34,  // client → host: object ids the client's plotting table holds (the other half of ContactSync)
         UnitStatus               = 35,  // host → client: bottom-row status line + per-mount engagement state
+        JamState                 = 36,  // host → client: offensive ECM jam assignments (who is jamming what)
     }
 
     public interface INetMessage

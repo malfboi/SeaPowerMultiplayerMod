@@ -1756,6 +1756,11 @@ namespace SeapowerMultiplayer
                 // are the positions, which the default fingerprint ignores - dedup
                 // would collapse the whole pattern down to its first buoy.
                 case OrderType.AttackAtWaypoint:
+                // A jam order's meaning is entirely in its TARGET, which the default
+                // fingerprint (Speed, Heading - both unused here) cannot see:
+                // re-pointing a jammer from one contact to another fingerprints
+                // identically to the first order and would be dropped as a duplicate.
+                case OrderType.JamSystem:
                     return true;
             }
 
@@ -2799,6 +2804,62 @@ namespace SeapowerMultiplayer
             // state overwrote it, and the two order stacks disagreed from then on.
             if (!OrderSyncHelper.Prefix(__instance, msg)) return;
             OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    // ── Offensive ECM jam order (client → host) ─────────────────────────────
+    //
+    // The EA-6B's pod is a weapons-panel entry, not an ordinary order, and it takes
+    // its own route: WeaponEntry sets MouseControlState.EngageWithECM, the click
+    // builds an AttackWithSystemTask, and that calls setOrder(Order.Type.Jam, ...) -
+    // one overload for a unit target, another for a bearing. None of it touched any
+    // existing hook, so a client's jam ran locally and died there: JamTask wrote
+    // _associatedTarget onto the client's own copy, the host's ECM was never pointed
+    // at anything, and nothing in the authoritative sim was jammed. (Nothing was even
+    // logged as refused - no message was ever built.)
+    //
+    // Send only. The return direction is JamStateManager's whole-set snapshot, not an
+    // order echo: the host's own jamming is mostly AI - UpdateOffensiveAutoJam and
+    // the defensive auto-jam write _associatedTarget DIRECTLY, never through
+    // setOrder - so an order broadcast would replicate the player's jams and silently
+    // miss every AI one.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setOrder),
+        new[] { typeof(Order.Type), typeof(ObjectBase), typeof(bool) })]
+    public static class Patch_ObjectBase_SetOrder_Jam
+    {
+        internal static PlayerOrderMessage Msg(ObjectBase u, ObjectBase? target, GeoPosition geo)
+            => new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.JamSystem,
+                TargetEntityId = target != null ? target.UniqueID : 0,
+                TargetX        = (float)geo._longitude,
+                TargetY        = (float)geo._height,
+                TargetZ        = (float)geo._latitude,
+            };
+
+        static bool Prefix(ObjectBase __instance, Order.Type type, ObjectBase targetObject)
+        {
+            if (type != Order.Type.Jam) return true;
+            // A refusal (host-driven replica, ally lock, not our taskforce) blocks the
+            // local execution too - otherwise the client points its own copy of a unit
+            // it does not own at a target the host will never jam.
+            return OrderSyncHelper.Prefix(__instance, Msg(__instance, targetObject, default));
+        }
+    }
+
+    /// <summary>The bearing form of the same order - a jam aimed at a point rather
+    /// than a contact. Separate class because the two overloads take differently
+    /// named parameters, which Harmony injects by name.</summary>
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setOrder),
+        new[] { typeof(Order.Type), typeof(GeoPosition), typeof(bool) })]
+    public static class Patch_ObjectBase_SetOrderGeo_Jam
+    {
+        static bool Prefix(ObjectBase __instance, Order.Type type, GeoPosition geoPosition)
+        {
+            if (type != Order.Type.Jam) return true;
+            return OrderSyncHelper.Prefix(__instance,
+                Patch_ObjectBase_SetOrder_Jam.Msg(__instance, null, geoPosition));
         }
     }
 

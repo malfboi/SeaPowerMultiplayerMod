@@ -40,6 +40,7 @@ namespace SeapowerMultiplayer.Messages
         FormationCommand = 32, // formation membership/shape/orders - ShotsToFire = FormationOp
         AttackTarget    = 33,  // "attack that contact" designation (TargetEntityId, 0 = clear)
         DropFuelTanks   = 34,  // aircraft/helicopter fuel-tank jettison (Speed = combatDrop flag)
+        JamSystem       = 35,  // offensive ECM jam order (TargetEntityId, or TargetX/Y/Z geo for a bearing jam)
     }
 
     /// <summary>

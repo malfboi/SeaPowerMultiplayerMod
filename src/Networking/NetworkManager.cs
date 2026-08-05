@@ -371,6 +371,7 @@ namespace SeapowerMultiplayer
                 ContactRevealManager.Reset();
                 DrawingSyncManager.Reset();
                 SensorStateManager.Reset();
+                JamStateManager.Reset();
                 UnitStatusManager.Reset();
                 UnitLockManager.Reset();
                 AttackDesignationSync.Reset();
@@ -595,6 +596,13 @@ namespace SeapowerMultiplayer
                 {
                     var msg = UnitStatusMessage.Deserialize(reader);
                     _mainThreadQueue.Enqueue(() => UnitStatusManager.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.JamState:
+                {
+                    var msg = JamStateMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => JamStateManager.ApplyReceived(msg));
                     break;
                 }
 

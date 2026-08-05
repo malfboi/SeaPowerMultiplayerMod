@@ -9,7 +9,7 @@ namespace SeapowerMultiplayer.Net2
     /// </summary>
     public static class ProtocolInfo
     {
-        public const ushort ProtocolVersion = 227; // DamageState carries sink clock + capsize
+        public const ushort ProtocolVersion = 228; // JamState + JamSystem order (offensive ECM)
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices
