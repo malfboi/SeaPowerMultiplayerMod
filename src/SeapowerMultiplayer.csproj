@@ -77,6 +77,22 @@
       <HintPath>$(GameDir)\Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Anchor Chain chainloader (ACPlugin attribute + IAnchorChainMod).
+         Checked-in copy of AnchorChain.dll from the releases dev.zip.
+         NOTE: these two references are steam-branch only, so every merge from a
+         BepInEx-plugin branch is liable to drop them again - that is how they
+         went missing before. If AnchorChainEntry.cs stops compiling after a
+         merge, this block is the first place to look. -->
+    <Reference Include="AnchorChain">
+      <HintPath>..\lib\AnchorChain.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- AnchorChain is built against netstandard 2.1; reference the Unity facade
+         so net472 can consume it. -->
+    <Reference Include="netstandard">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\netstandard.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- LiteNetLib — UDP networking. Merged into our DLL by ILRepack below. -->
