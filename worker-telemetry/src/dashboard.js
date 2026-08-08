@@ -325,6 +325,13 @@ const isError = (r) => r.t === 'x' || r.lv === 'E' || r.lv === 'F';
 // copies and leaves the sentence that names the fault. The stack's first frame
 // joins the key so two unrelated call sites raising the same generic message
 // stay apart.
+//
+// The level is deliberately NOT in the key. One Unity exception reaches the
+// ring twice - once as an exception record (short condition, stack in `st`) and
+// once as a log line (condition with "Stack trace:" and the frames glued onto
+// the message) - so keying on level split every one of them into a Fatal row
+// and an Error row saying the same thing. Stripping the appended stack makes
+// the two messages identical, and the pair collapses into the one fault it is.
 
 // No trailing \b: a unit suffix is normal in these messages ("after 12.4s"),
 // and requiring a boundary after the digits leaves the last one behind, so
@@ -333,29 +340,42 @@ const NUMS = /\b0x[0-9a-fA-F]+|\d+(?:[.,:]\d+)*/g;
 
 const normalise = (s) => String(s ?? '').replace(NUMS, '#').replace(/\s+/g, ' ').trim();
 
-function firstFrame(stack) {
-  for (const line of String(stack ?? '').split('\n')) {
-    const t = line.trim();
-    if (t) return normalise(t).slice(0, 160);
-  }
-  return '';
-}
+/** The condition alone, without the stack some sinks append to the message. */
+const stripStack = (m) => String(m ?? '').replace(/\s*Stack trace:[\s\S]*$/, '').trim();
+
+/** Frames, wherever this record happens to carry them. */
+const stackOf = (r) => {
+  if (r.st) return String(r.st);
+  const m = /Stack trace:\s*([\s\S]*)$/.exec(String(r.m ?? ''));
+  return m ? m[1] : '';
+};
+
+// Enough of the stack to keep two call sites raising the same generic message
+// apart, taken whitespace-insensitively: the same frames arrive newline-joined
+// in `st` and space-joined when a sink glued them onto the message, and a
+// line-based read would call those two different faults.
+const topFrames = (stack) => normalise(stack).slice(0, 160);
 
 function groupErrors(records) {
   const byKey = new Map();
 
   for (const r of records) {
-    const lv = r.t === 'x' ? 'F' : (r.lv || '?');
-    const key = `${lv}|${normalise(r.m).slice(0, 240)}|${firstFrame(r.st)}`;
+    // An exception record carries no level of its own; the sink raises it at
+    // Error, so calling it Fatal would invent a severity the client never set.
+    const lv = r.t === 'x' ? 'E' : (r.lv || '?');
+    const msg = stripStack(r.m);
+    const stack = stackOf(r);
+    const key = `${normalise(msg).slice(0, 240)}|${topFrames(stack)}`;
 
     let g = byKey.get(key);
     if (!g) {
       g = {
-        lv, count: 0, first: 0, last: 0, sample: r,
+        lv, count: 0, first: 0, last: 0, msg, stack,
         sessions: new Set(), installs: new Set(), versions: new Set(), wordings: new Set(),
       };
       byKey.set(key, g);
     }
+    if (lv === 'F') g.lv = 'F';   // a real Fatal anywhere in the group wins
 
     // `n` is the client-side collapse of an exception that fired every frame
     // (LogRingSink dedupes those before they ever reach the ring). Counting
@@ -364,14 +384,15 @@ function groupErrors(records) {
     g.count += Math.max(1, Number(r.n) || 1);
     if (r.ts) {
       if (!g.first || r.ts < g.first) g.first = r.ts;
-      // Newest occurrence supplies the displayed text and stack: an old stack
-      // for a bug still happening today is the less useful of the two.
-      if (r.ts >= g.last) { g.last = r.ts; g.sample = r; }
+      // Newest occurrence supplies the displayed text: an old stack for a bug
+      // still happening today is the less useful of the two.
+      if (r.ts >= g.last) { g.last = r.ts; g.msg = msg; if (stack) g.stack = stack; }
     }
+    if (!g.stack && stack) g.stack = stack;
     if (r.h?.s)  g.sessions.add(r.h.s);
     if (r.h?.i)  g.installs.add(r.h.i);
     if (r.h?.pv) g.versions.add(r.h.pv);
-    if (r.m)     g.wordings.add(r.m);
+    if (msg)     g.wordings.add(msg);
   }
 
   // Newest first, because "recent errors" is the question this panel answers;
@@ -413,11 +434,11 @@ function errorGroups(groups) {
       <td class="n">${fmt(g.installs.size)}</td>
       <td class="n">${fmt(g.sessions.size)}</td>
       <td>${esc([...g.versions].sort().join(', ') || '—')}</td>
-      <td class="msg">${esc(g.sample.m)}
+      <td class="msg">${esc(g.msg)}
         <div class="meta">first seen ${esc(clock(g.first))}${
           g.wordings.size > 1 ? ` · ${g.wordings.size} wordings collapsed` : ''}</div>
-        ${g.sample.st
-          ? `<details><summary>stack</summary><pre>${esc(g.sample.st)}</pre></details>` : ''}
+        ${g.stack
+          ? `<details><summary>stack</summary><pre>${esc(g.stack)}</pre></details>` : ''}
       </td>
     </tr>`).join('')}
   </tbody></table></div>
@@ -478,12 +499,19 @@ export async function renderDashboard(env, days) {
     panel(env, `SELECT floor(double18 / 300) * 5 AS mins,
                        sum(double19 * _sample_interval) AS errs
                 FROM ${T} WHERE ${since} ${inMission} GROUP BY mins ORDER BY mins`),
-    // double9 is the hitch count over one 10 s window, so x6 is per minute of
-    // play. A rate, not a total: later buckets hold fewer sessions, and a raw
-    // sum would read that thinning out as the stutters going away.
+    // double9 is the hitch count over one 10 s window. Divided by the sessions
+    // that reached the bucket, that is what one player lives through in those
+    // five minutes. Per session, not a raw total: later buckets hold fewer
+    // sessions, and a bare sum would read that thinning out as the stutters
+    // going away. max(double9) * 30 puts the worst window on the same axis -
+    // what the bucket would cost if all five minutes were that bad.
+    //
+    // The numerator carries _sample_interval but COUNT(DISTINCT) cannot; a
+    // sampled distinct count is already an estimate. Both are unweighted often
+    // enough at this volume that the ratio holds.
     panel(env, `SELECT floor(double18 / 300) * 5 AS mins,
-                       avg(double9) * 6 AS mean_pm,
-                       max(double9) * 6 AS worst_pm,
+                       sum(double9 * _sample_interval) / COUNT(DISTINCT blob2) AS mean_per_session,
+                       max(double9) * 30 AS worst_per_session,
                        COUNT(DISTINCT blob2) AS sessions
                 FROM ${T} WHERE ${since} ${inMission} GROUP BY mins ORDER BY mins`),
     panel(env, `SELECT floor(double18 / 300) * 5 AS mins,
@@ -602,6 +630,8 @@ footer{max-width:1120px;margin:18px auto 0;color:var(--muted);font-size:12px}
     ${tile('Frame rate', fmt(k.fps) + ' fps', 'mean')}
     ${tile('Stutters', fmt(k.hitches), 'frames over 100 ms')}
     ${tile('Errors', fmt(k.errs), 'logged at Error or above')}
+    ${tile('Distinct faults', logs.error ? '—' : fmt(L.groups.length),
+           `in ${L.scanDays}d of scanned logs`)}
   </div>
 
   ${card('Sessions per day', 'Distinct session IDs. Both players in one match count separately.',
@@ -634,10 +664,10 @@ footer{max-width:1120px;margin:18px auto 0;color:var(--muted);font-size:12px}
     errByMission)}
 
   ${card('Stutters by time into the mission',
-    'Frames over 100 ms, as a rate per minute of play, bucketed by mission elapsed. The mean is what a typical player feels; the worst window is the ugliest single ten seconds any session recorded. Both climbing to the right is the signature of something accumulating — entity count, a leak, replica churn — rather than a slow PC, which would be flat.',
+    'Frames over 100 ms, divided by the sessions that reached each bucket — so the mean is what one player lives through during those five minutes, not a total that grows with how many people played. The worst line takes the ugliest single ten seconds any session recorded and scales it across the bucket, which is the same axis read as a worst case. Both climbing to the right is the signature of something accumulating — entity count, a leak, replica churn — rather than a slow PC, which would be flat.',
     lineChart('hitchmis', hitchByMission.rows.map((r) => fmt(r.mins) + 'm'), [
-      { name: 'Stutters per minute (mean)', values: hitchByMission.rows.map((r) => Number(r.mean_pm)) },
-      { name: 'Worst 10 s window', values: hitchByMission.rows.map((r) => Number(r.worst_pm)) },
+      { name: 'Stutters per session (mean)', values: hitchByMission.rows.map((r) => Number(r.mean_per_session)) },
+      { name: 'Worst 10 s window, scaled', values: hitchByMission.rows.map((r) => Number(r.worst_per_session)) },
     ]), hitchByMission)}
 
   ${card('Sessions reaching each point in the mission',
@@ -654,7 +684,7 @@ footer{max-width:1120px;margin:18px auto 0;color:var(--muted);font-size:12px}
     ]), perrByMission)}
 
   ${card('Recent errors',
-    `One row per distinct fault, newest first. Identical errors are collapsed — numbers inside the message are ignored when matching, so the same bug with a different entity id counts once and the "Times" column carries the volume. Scanned the last ${L.scanDays} days: ${fmt(L.listed)} batches listed, ${fmt(L.batches)} fetched (only those ingest flagged as carrying an error, plus the newest few).${
+    `One row per distinct fault, newest first — the row count is the "Distinct faults" tile. Matching ignores numbers inside the message, so the same bug with a different entity id or tick counts once and the "Times" column carries the volume; it also ignores the level and any stack appended to the message, so a Unity exception that reaches the log twice is one row rather than a Fatal and an Error saying the same thing. Scanned the last ${L.scanDays} days: ${fmt(L.listed)} batches listed, ${fmt(L.batches)} fetched (only those ingest flagged as carrying an error, plus the newest few).${
       L.truncated ? ' ⚠ A day exceeded the 1000-object listing page, so some batches were not considered.' : ''}`,
     errorGroups(L.groups), logs)}
 
