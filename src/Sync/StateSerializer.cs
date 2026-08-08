@@ -273,7 +273,6 @@ namespace SeapowerMultiplayer
 
         internal static void RunAlignmentFromUnitStates(List<UnitState> units)
         {
-            int savedUid = Singleton<SceneCreator>.Instance._UID;
             var reassignments = new List<(ObjectBase obj, int hostId)>();
 
             // PvP: the state update contains the remote player's units. After PvP
@@ -317,7 +316,9 @@ namespace SeapowerMultiplayer
             foreach (var (obj, hostId) in reassignments)
                 obj.SetUniqueId(hostId);
 
-            Singleton<SceneCreator>.Instance._UID = savedUid;
+            // _UID is deliberately NOT put back the way it was found. Restoring it here
+            // undid SetUniqueId's own collision defence - see SpawnReplicator.AssignHostId
+            // for the same removal and why the counter no longer needs protecting.
             // SetUniqueId bypasses the Awake/OnDestroy hooks, so the id index is now
             // holding the pre-remap ids.
             UnitRegistry.Reindex();
@@ -398,7 +399,11 @@ namespace SeapowerMultiplayer
         private static readonly Dictionary<(int, Messages.OrderType), (float lastLogTime, int suppressedCount)> _logThrottle = new();
         private const float LogInterval = 10f;
 
-        public static void ClearLogThrottle() => _logThrottle.Clear();
+        public static void ClearLogThrottle()
+        {
+            _logThrottle.Clear();
+            _formationLogThrottle.Clear();
+        }
 
         private static Vehicle FindVehicleForUnit(ObjectBase unit)
         {
@@ -1059,7 +1064,34 @@ namespace SeapowerMultiplayer
                     break;
             }
 
-            Plugin.Log.LogInfo($"[Formation] Applied {op}: unit={msg.SourceEntityId} target={msg.TargetEntityId}");
+            LogFormationApplied(op, msg);
+        }
+
+        /// <summary>Throttled per (unit, op), like Apply's own generic order line.
+        ///
+        /// The caller's generic "[Order] entity=..." line is already throttled, so this
+        /// one was the only unthrottled per-message log left on the receive path - which
+        /// meant a repeating formation op cost a BepInEx disk write per message on top of
+        /// the work it asked for. That turned the ReturnUnit flood (see
+        /// Patch_UnitFormation_ReturnToFormation) into a freeze rather than just wasted
+        /// bandwidth. The suppressed count is kept so a future flood is still visible.</summary>
+        private static readonly Dictionary<(int, Messages.FormationOp), (float lastLogTime, int suppressedCount)>
+            _formationLogThrottle = new();
+
+        private static void LogFormationApplied(Messages.FormationOp op, PlayerOrderMessage msg)
+        {
+            var key = (msg.SourceEntityId, op);
+            if (_formationLogThrottle.TryGetValue(key, out var throttle) &&
+                Time.unscaledTime - throttle.lastLogTime < LogInterval)
+            {
+                _formationLogThrottle[key] = (throttle.lastLogTime, throttle.suppressedCount + 1);
+                return;
+            }
+
+            string suffix = (throttle.suppressedCount > 0) ? $" (suppressed {throttle.suppressedCount} similar)" : "";
+            Plugin.Log.LogInfo($"[Formation] Applied {op}: unit={msg.SourceEntityId} " +
+                $"target={msg.TargetEntityId}{suffix}");
+            _formationLogThrottle[key] = (Time.unscaledTime, 0);
         }
     }
 

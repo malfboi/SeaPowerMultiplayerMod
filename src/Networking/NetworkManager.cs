@@ -361,6 +361,7 @@ namespace SeapowerMultiplayer
                 UnitIdentityApplier.Reset();
                 EntityCensusManager.Reset();
                 Patch_V2_MissionEnd_Capture.Reset();
+                GuestIdFloor.Disarm();
                 CaptureState.Clear();
                 HatchStateCapture.Clear();
                 ReplicaRegistry.Clear();
@@ -738,6 +739,9 @@ namespace SeapowerMultiplayer
             SessionParams = msg;
             _handshake = HandshakeState.Established;
             VersionMismatchNotice = null;
+            // Before the session load starts, which is the point - the guest allocates
+            // ids all the way through a load, so a floor armed afterwards is too late.
+            GuestIdFloor.Arm(msg.ClientUidBase);
             Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz).");
             ReconnectManager.OnPeerEstablished();
         }

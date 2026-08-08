@@ -71,6 +71,31 @@ namespace SeapowerMultiplayer
         internal static void Exit()  { if (_depth > 0) _depth--; }
     }
 
+    /// <summary>Raised for the duration of <see cref="UnitFormation.OnUpdate"/>, purely
+    /// so the calls it makes can be told apart from the ones a player makes. Nothing is
+    /// suppressed by this flag on its own - see
+    /// <see cref="Patch_UnitFormation_ReturnToFormation"/>, its only reader.
+    ///
+    /// Deliberately NOT wired to <see cref="FormationInternal"/> wholesale: OnUpdate also
+    /// reaches the AI radar sweep (CheckAutomation → CheckForRadarScan) and unit launch
+    /// (CheckAI → CheckForUnitLaunch), which are host decisions the client does have to
+    /// be told about.</summary>
+    internal static class FormationUpdate
+    {
+        private static int _depth;
+
+        internal static bool Active => _depth > 0;
+        internal static void Enter() => _depth++;
+        internal static void Exit()  { if (_depth > 0) _depth--; }
+    }
+
+    [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.OnUpdate))]
+    public static class Patch_UnitFormation_OnUpdate
+    {
+        static void Prefix()    => FormationUpdate.Enter();
+        static void Finalizer() => FormationUpdate.Exit();
+    }
+
     /// <summary>Create (isLeader) and join. The constructor reaches a new formation's
     /// leader through this same call, so both cases are caught here.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.AddUnit))]
@@ -171,17 +196,52 @@ namespace SeapowerMultiplayer
     /// far end, and a RemoveWaypoints + re-add on the receiver each time.
     ///
     /// Both conditions are read after the call because the method mutates neither, so
-    /// this needs no prefix to capture them first.</summary>
+    /// this needs no prefix to capture them first.
+    ///
+    /// STATION KEEPING IS NOT AN ORDER. UnitFormation.OnUpdate calls ReturnToFormation
+    /// once a frame for every follower that has run out of waypoints, and that is derived
+    /// state in the FormationInternal sense: both machines hold the same membership and
+    /// the same station positions, so both re-issue the station task unprompted. Relaying
+    /// it was an unbounded per-frame send on a path with no dedup and no rate floor -
+    /// and worse, self-sustaining, because ReturnToFormation opens with RemoveWaypoints,
+    /// which IS relayed while the SetRelativeWaypointTask that follows it is not. The
+    /// clear and the re-add travel as two separate reliable messages, so any frame in
+    /// which the receiver drains the clear without its companion re-add leaves that
+    /// follower waypointless - re-arming the same watchdog on the far side, which fires
+    /// the pair straight back. One waypoint completion was enough to start it and nothing
+    /// stopped it: a live session logged a solid run of ReturnUnit for a single destroyer,
+    /// reliable-ordered, with an unthrottled log line and a RemoveWaypoints + re-add per
+    /// message at the far end, and both players at ~1 FPS.
+    ///
+    /// So the OnUpdate-driven call is executed and sent NOTHING, in either direction -
+    /// FormationInternal covers the whole call, silencing its RemoveWaypoints too, not
+    /// just the ReturnUnit below. Every other caller is a discrete one-shot (the station
+    /// context menu, a route that finished, a formation cease-fire-and-recall) and still
+    /// travels.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.ReturnToFormation))]
     public static class Patch_UnitFormation_ReturnToFormation
     {
-        static void Postfix(UnitFormation __instance, ObjectBase obj)
+        static void Prefix(ref bool __state)
         {
+            __state = FormationUpdate.Active;
+            if (__state) FormationInternal.Enter();
+        }
+
+        static void Postfix(UnitFormation __instance, ObjectBase obj, bool __state)
+        {
+            if (__state) return; // station keeping - derived, see above
             if (obj == null) return;
             if (__instance.LeaderStation?.UnitObject == null) return;
             if (__instance.GetStationForUnit(obj) == null) return;
 
             FormationSync.Send(obj, FormationSync.Msg(obj, FormationOp.ReturnUnit));
+        }
+
+        // Finalizer, not the Postfix, so a throw inside the game method cannot strand
+        // FormationInternal up and silence every order after it.
+        static void Finalizer(bool __state)
+        {
+            if (__state) FormationInternal.Exit();
         }
     }
 

@@ -193,6 +193,27 @@ namespace SeapowerMultiplayer
             Patch_Submarine_SetDepth.Reset();
             OrderDeduplicator.Clear();
 
+            // Capture state is scoped to a SESSION, not to the connection. Its only
+            // other Clear() is on peer disconnect, and two battles played in one lobby
+            // never disconnect - so the census went on advertising the previous
+            // mission's SpawnLedger into the new one, the client asked for the ids it
+            // could not resolve, and HandleDiffRequest replayed last battle's units,
+            // weapons and sonobuoys into a mission they were never part of. Ids are
+            // allocated deterministically, so most stale ids collided with live ones and
+            // were masked; the visible ghosts were the ids the new battle did not reuse.
+            //
+            // Here rather than in OnSceneReady, which the suggested fix named: the host
+            // never reaches OnSceneReady. It sets SceneLoading true and false again a
+            // few lines above without ever loading a scene, so OnSceneReady's guard
+            // would log "SceneLoading=false, ignoring" and return - and SpawnLedger is
+            // host-only state (HostCaptureActive requires CfgIsHost). CaptureAndSend IS
+            // the host's session boundary, which is why every other per-session reset is
+            // already in this block.
+            CaptureState.Clear();
+            HatchStateCapture.Clear();
+            Patch_V2_MissionEnd_Capture.Reset();
+            EntityCensusManager.Reset();
+
             // PvP: flush stale engage tasks on enemy puppet units so the remote
             // player's save-restored tasks don't fire without their say-so.
             if (Plugin.Instance.CfgPvP.Value)
@@ -692,20 +713,25 @@ namespace SeapowerMultiplayer
             {
                 UnitReplicaDriver.SetPendingAlignment(); // v2 unit stream runs the alignment
 
+                // The client half of the same session scoping the host does in
+                // CaptureAndSend. _missCount is the one that bites: two consecutive
+                // censuses without an id REMOVE the local replica, so counts carried
+                // over from the previous battle can evict a replica this one just
+                // spawned. _lastRequestSeq would also suppress a legitimate first
+                // request for an id the last battle had already asked about.
+                EntityCensusManager.Reset();
+
                 // v2: save files contain in-flight weapons and the load relaunches
                 // them LIVE - demote them all to inert replicas (host streams them)
                 SpawnReplicator.DemoteLoadedWeapons();
 
-                // v2: move the client's UID counter into its private band so any
-                // client-local spawns never collide with host-assigned ids
-                var welcome = NetworkManager.Instance.SessionParams;
-                if (welcome != null && welcome.ClientUidBase > 0
-                    && SeaPower.Singleton<SeaPower.SceneCreator>.InstanceExists(false)
-                    && SeaPower.Singleton<SeaPower.SceneCreator>.Instance._UID < welcome.ClientUidBase)
-                {
-                    SeaPower.Singleton<SeaPower.SceneCreator>.Instance._UID = welcome.ClientUidBase;
-                    Plugin.Log.LogInfo($"[Session] Client UID counter rebased to {welcome.ClientUidBase}");
-                }
+                // The one-shot UID rebase that used to sit here is gone. It ran after the
+                // load had settled, but the guest allocates ids all the way THROUGH a
+                // load - the weapon pool alone takes hundreds - so the objects that
+                // actually collided were already numbered by the time it fired, and
+                // SceneCreator reassigns _UID from the save partway through a load
+                // regardless. GuestIdFloor holds the same floor on the allocator itself,
+                // armed at Welcome and re-checked per call.
             }
 
             // PvP: flush pre-existing engage tasks on the remote player's units.

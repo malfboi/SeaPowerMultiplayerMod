@@ -1032,8 +1032,24 @@ namespace SeapowerMultiplayer
                 // Re-assert the telegraph when the value differs OR when we are still
                 // holding a custom command the host has since dropped - _telegraph does
                 // not move while a custom speed is set, so it alone can read "in sync".
+                //
+                // The third case is a unit with NO speed command at all. A save-based
+                // session sync restores _telegraph but not SpeedCommand, which the game
+                // only ever builds inside setTelegraph/SetSpeedCommand - so a ship whose
+                // restored telegraph happens to match the host's was never going to be
+                // called here, and its command stayed null for the rest of the mission.
+                // The null-guards downstream (Patch_Compartments_UpdateWantedVelocityInKnots
+                // and friends) then hold it at zero thrust and it is dragged along by
+                // position corrections instead of sailing - 29 ships in one playtest.
+                //
+                // Not covered by the custom-speed test above it: CustomCommandKnots is NaN
+                // both for a null command and for a healthy TelegraphSpeed, so it cannot
+                // tell the two apart. setTelegraph rebuilds the command unconditionally
+                // (no early return on a matching value), so one forced call repairs it and
+                // the condition stops holding.
                 if (unit.getTelegraph() != e.Telegraph
-                    || !float.IsNaN(StateSerializer.CustomCommandKnots(unit)))
+                    || !float.IsNaN(StateSerializer.CustomCommandKnots(unit))
+                    || unit.SpeedCommand?.Value == null)
                 {
                     bool prev = OrderHandler.ApplyingFromNetwork;
                     OrderHandler.ApplyingFromNetwork = true;

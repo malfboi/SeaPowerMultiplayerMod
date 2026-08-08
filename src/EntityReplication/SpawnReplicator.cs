@@ -54,14 +54,21 @@ namespace SeapowerMultiplayer
             _spawnFailures.Clear();
         }
 
-        /// <summary>Assign the host's id without polluting the client's UID counter
-        /// (SetUniqueId bumps it when the assigned id is higher).</summary>
-        private static void AssignHostId(ObjectBase obj, int hostId)
-        {
-            int savedUid = Singleton<SceneCreator>.Instance._UID;
-            obj.SetUniqueId(hostId);
-            Singleton<SceneCreator>.Instance._UID = savedUid;
-        }
+        /// <summary>Assign the host's id.
+        ///
+        /// This used to save and restore SceneCreator._UID around the call, to keep the
+        /// client's counter from being dragged up by a host id. That kept the counter
+        /// monotonic but disabled the game's ONLY defence against exactly the collision
+        /// it was worried about: SetUniqueId advances _UID past any id it adopts
+        /// (ObjectBase.cs:1638-1645), which is what stops a later local allocation
+        /// landing on an id already in use. Putting it back meant the guest went on
+        /// handing its own chaff and decoys numbers the host was replicating into.
+        ///
+        /// The restore is gone and the defence is left alone. It costs nothing in the
+        /// normal case - GuestIdFloor holds the counter above ClientUidBase, so an
+        /// incoming host id is far below it and SetUniqueId's comparison never fires -
+        /// and it is the backstop for any path where the floor is not armed.</summary>
+        private static void AssignHostId(ObjectBase obj, int hostId) => obj.SetUniqueId(hostId);
 
         // ── Spawn ─────────────────────────────────────────────────────────────
 
@@ -610,10 +617,79 @@ namespace SeapowerMultiplayer
                     obj.destroyObject(false, false, TacView.TCEvent.Destroyed);
                 AircraftReplicaDriver.Forget(msg.EntityId);
             }
+            EvictFromFormations(obj);
             WeaponReplicaDriver.Forget(msg.EntityId);
             DeckPuppetDriver.Forget(msg.EntityId);
             ReplicaRegistry.Unregister(msg.EntityId);
             Tombstone(msg.EntityId);
+        }
+
+        /// <summary>Make sure no local formation is left seating a unit this despawn
+        /// retired. Only the two teardown branches above run destroyObject, whose first
+        /// act is the formation detach - every other path (a Vessel/Submarine/LandUnit
+        /// despawn, an unlaunched pooled weapon, or a lookup that missed entirely) fell
+        /// straight through to the bookkeeping and left the station seated.
+        ///
+        /// A stranded station is not inert. UnitFormation.get_InFormationSummary is a
+        /// Noesis binding, and it filters on <c>UnitObject != null</c> - which is Unity's
+        /// operator, so it screens out a DESTROYED object but not a live pooled one that
+        /// has been recycled out from under the station. It then dereferences
+        /// <c>UnitObject._obp._typeAbbr</c>, and a pooled object carries no _obp. That
+        /// throws on EVERY UI frame from then on, which is the engine's "repeated
+        /// exceptions - degraded performance" warning after aircraft recover to a deck.
+        ///
+        /// Two passes because the id is not always enough. When the despawn resolved to
+        /// its own object, DetachUnit is the complete operation and it runs. When it
+        /// resolved to nothing (tombstoned, or an id that landed on the wrong object)
+        /// there is no handle to detach, so the corpse has to be recognised by the same
+        /// thing that trips the binding - a seated unit with no _obp. That scan is
+        /// bounded by formations x stations and only runs on a despawn, not per frame.
+        ///
+        /// The corpse is evicted by emptying its seat rather than through DetachUnit,
+        /// which would dereference the dead object again on the way out
+        /// (CleanUpStation reads obj._taskforce before it clears the seat, and calls
+        /// RemoveWaypoints after) - trading a repeating exception for a one-shot inside
+        /// the message drain is not a fix. An EMPTY station is a state the engine
+        /// already handles everywhere: AddUnit reuses it, InFormationSummary filters it,
+        /// OnUpdate's station-keeping skips it, and UnitOnStationNotValid reports it, so
+        /// a corpse that was the LEADER is handed over by the formation's own next
+        /// update rather than needing anything here.</summary>
+        private static void EvictFromFormations(ObjectBase? obj)
+        {
+            if (obj != null)
+            {
+                obj.Formation?.DetachUnit(obj);
+                return;
+            }
+
+            ScanForCorpses(Globals._playerTaskforce);
+            ScanForCorpses(Globals._enemyTaskforce);
+            ScanForCorpses(Globals._neutralTaskforce);
+        }
+
+        private static void ScanForCorpses(Taskforce? tf)
+        {
+            var formations = tf?.Formations;
+            if (formations == null) return;
+
+            for (int f = formations.Count - 1; f >= 0; f--)
+            {
+                var stations = formations[f]?.Stations;
+                if (stations == null) continue;
+
+                for (int s = stations.Count - 1; s >= 0; s--)
+                {
+                    var station = stations[s];
+                    // Unity's operator, so a DESTROYED object reads as null here and is
+                    // already screened out by the binding - the one that gets through is
+                    // a live pooled object recycled out from under the station.
+                    if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
+
+                    Plugin.Log.LogWarning($"[V2] Formation '{formations[f].Name}' was seating a " +
+                        "recycled object with no parameters - emptying the station.");
+                    station.UnitObject = null;
+                }
+            }
         }
 
         public static void HandleDestroyEvent(DestroyEventMessage msg)
