@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using SeaPower;
@@ -189,6 +190,51 @@ namespace SeapowerMultiplayer
         static System.Reflection.MethodBase TargetMethod() =>
             AccessTools.Method(typeof(FlightDeck), "handleFlightDeckTasks");
         static bool Prefix() => !Suppression.ClientActive;
+    }
+
+    /// <summary>The cost of that kill-switch, paid once per received session.
+    ///
+    /// FlightDeck.addFlightDeckTask defaults to delayed:true, which only STAGES a task
+    /// in _flightDeckTasksToAdd; handleFlightDeckTasks is what migrates the staging
+    /// list into FlightDeckTasks - and the patch above stops it running at all on a
+    /// client. FlightDeck.LoadStateFromFile rebuilds every saved task through that same
+    /// delayed add (FlightDeck.cs:2681 for pending launches, :2777 and :2950 for the
+    /// active ones), so on a guest they all loaded correctly and then sat in the
+    /// staging list for the rest of the battle: not in FlightDeckTasks, so not in the
+    /// Flight Ops window and not seen by FlightDeckStateApplier's reconcile either.
+    ///
+    /// The save has already spent them - CreatePendingLaunchTask decrements
+    /// squadron.Numbers and vehicle.Numbers before the save is written - so a strike
+    /// readied before the battle was missing from the deck AND from the hangar on the
+    /// other machine, with nothing to say so. One suppression, which is why it hit
+    /// carrier, ASW escort and airfield identically.
+    ///
+    /// Draining is exactly what the suppressed method would have done for the add
+    /// list, and nothing else: the pump stays off, so the queue still never advances
+    /// or spawns aircraft locally. Postfixed on the load itself rather than swept
+    /// later, so the deck is whole before anything reads it.</summary>
+    [HarmonyPatch(typeof(FlightDeck), "LoadStateFromFile",
+        new[] { typeof(IniHandler), typeof(string) })]
+    public static class Patch_V2_FlightDeckLoad_Drain
+    {
+        static void Postfix(FlightDeck __instance)
+        {
+            // Not Suppression.ClientActive: a session load is exactly when the
+            // handshake may not be up yet, and on a client the pump never runs at any
+            // point, so migrating early is always right.
+            if (Plugin.Instance.CfgIsHost.Value) return;
+
+            var staged = __instance._flightDeckTasksToAdd;
+            if (staged == null || staged.Count == 0) return;
+
+            int n = staged.Count;
+            for (int i = 0; i < n; i++) __instance.FlightDeckTasks.Add(staged[i]);
+            staged.Clear();
+
+            Plugin.Log.LogInfo($"[FlightDeck] {__instance._baseObject?.getUIDAndName()}: " +
+                $"restored {n} saved deck task(s) from the session " +
+                $"(queue now {__instance.FlightDeckTasks.Count})");
+        }
     }
 
     /// <summary>Companion kill-switch: handleFlightDeckTasks only drives onUpdate;
@@ -542,8 +588,9 @@ namespace SeapowerMultiplayer
     ///
     /// Left alone deliberately: Loitering, PlayerOverride, PerformingAirOps,
     /// AvoidingCollision, Aligning and EmergencySurface are not gated on ownership -
-    /// a player's own boat uses them too. CounterLaunch and TorpedoEvasion are
-    /// auto-defence, handled by their own patch above.</summary>
+    /// a player's own boat uses them too. TorpedoEvasion is auto-defence and has its
+    /// own patch above; CounterLaunch is the same shape but is registered through this
+    /// one - see the AiEntry list.</summary>
     public static class RemoteTfSubStates
     {
         private static readonly System.Collections.Generic.HashSet<System.Type> AiEntry = new()
@@ -557,6 +604,12 @@ namespace SeapowerMultiplayer
             typeof(SubmarineStates.GuidingMissiles),
             typeof(SubmarineStates.OpeningToFiringRange),
             typeof(SubmarineStates.ReacquireContact),
+            // Auto counter-launch (Submarine.cs:246). The comment below used to say the
+            // torpedo-evasion patch covered this; it does not - that one matches only
+            // the two TorpedoEvasion types. Same AtAny registration and the same
+            // (DM._subAIAppliesToPlayer || !IsPlayerObject) gate, so it belongs here.
+            // Its escape (:247) is IsFinished, ungated, so blocking entry cannot strand.
+            typeof(SubmarineStates.CounterLaunch),
         };
 
         private static readonly System.Collections.Generic.HashSet<System.Type> MovementCluster = new()
@@ -607,6 +660,97 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>HOST-side PvP: the SURFACE half of the same crew-autonomy layer - the
+    /// ASW sprint-and-drift cycle a towed-array escort runs while keeping station.
+    ///
+    /// Vessel.initStates builds it as a ring: MovingInFormation → FormationSprint →
+    /// FormationDrift → ClearBafflesTurningBack → FormationClearBafflesListening →
+    /// FormationSprint (Vessel.cs:123-130). Only the door at :123 carries the
+    /// ownership gate - <c>(DM._subAIAppliesToPlayer || !IsPlayerObject)</c>, the same
+    /// test the whole of item 22 turns on - and _subAIAppliesToPlayer is off by
+    /// default, so the game never runs any of this for a player's own ship. On the
+    /// host the remote player's escorts are not player objects, so they ran the cycle
+    /// unbidden: the owner's ships sprinting ahead and coasting back, at speeds the
+    /// owner did not set.
+    ///
+    /// AND IT IS THE LAST OF THE TELEGRAPH FLOOD. Each of these three states calls
+    /// setTelegraph on entry, Patch_Vessel_SetTelegraph puts every one on the wire, and
+    /// no existing flag covers them - the origination half of item 10 that survived the
+    /// ReturnToFormation work. Silencing the states silences their telegraphs at
+    /// source, which is better than filtering them afterwards: the ship never picks the
+    /// speed in the first place.
+    ///
+    /// EVERY entry into FormationSprint is blocked, not just the gated door, because
+    /// the ring's own :130 loop-back would otherwise restart it forever. And a ship
+    /// already inside the ring when hosting begins is forced out to MovingInFormation -
+    /// the ring's escapes (:124, :126, :129, :134-136) are speed- and
+    /// FollowingFormation-conditioned rather than ownership-gated, so without this it
+    /// could circle indefinitely on a slow leader.</summary>
+    public static class RemoteTfVesselFormationStates
+    {
+        private static readonly System.Collections.Generic.HashSet<System.Type> Ring = new()
+        {
+            typeof(VesselStates.FormationSprint),
+            typeof(VesselStates.FormationDrift),
+            typeof(VesselStates.ClearBafflesTurningBack),
+            typeof(VesselStates.FormationClearBafflesListening),
+        };
+
+        /// <summary>Each state holds its own <c>private Vessel _vessel</c>, assigned in
+        /// the constructor before initStates registers anything - resolved once here so
+        /// the per-tick predicate carries no reflection.</summary>
+        private static Vessel? OwnerOf(IState? state)
+        {
+            if (state == null) return null;
+            var field = AccessTools.Field(state.GetType(), "_vessel");
+            if (field == null)
+            {
+                Plugin.Log.LogWarning($"[Suppression] {state.GetType().Name}._vessel not found - the remote " +
+                    "player's escorts will keep running the ASW sprint-and-drift cycle on their own");
+                return null;
+            }
+            return field.GetValue(state) as Vessel;
+        }
+
+        internal static void Gate(IState? from, IState? to, ref System.Func<bool> predicate)
+        {
+            if (predicate == null || to == null) return;
+
+            // Door: no remote-owned ship may enter the ring at all.
+            if (to is VesselStates.FormationSprint)
+            {
+                var ship = OwnerOf(to);
+                if (ship == null) return;
+                var inner = predicate;
+                predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(ship);
+                return;
+            }
+
+            // Escape: force the way out for a ship caught inside when hosting starts.
+            if (to is VesselStates.MovingInFormation && from != null && Ring.Contains(from.GetType()))
+            {
+                var ship = OwnerOf(from);
+                if (ship == null) return;
+                var inner = predicate;
+                predicate = () => inner() || Suppression.HostSuppressesRemoteTfAi(ship);
+            }
+        }
+    }
+
+    /// <summary>HOST-side PvP: AI.KeepTowedArrayStreamed, which re-streams a towed array
+    /// the crew thinks should be out.
+    ///
+    /// Self-gated in the engine as <c>(!DM._subAIAppliesToPlayer &amp;&amp;
+    /// IsPlayerObject) → return</c> (AI.cs:3259), so a player's own boat is left to
+    /// manage its own array. The remote player's was not, and the array would re-deploy
+    /// under an owner who had just stowed it.</summary>
+    [HarmonyPatch(typeof(AI), "KeepTowedArrayStreamed")]
+    public static class Patch_V2_RemoteTf_TowedArray_Suppress
+    {
+        static bool Prefix(ObjectBase ____baseObject) =>
+            !Suppression.HostSuppressesRemoteTfAi(____baseObject);
+    }
+
     /// <summary>The AtAny half (Submarine.cs:254-268). Shares addAnyTransition with the
     /// torpedo-evasion patch above; Harmony runs both prefixes and each wraps the
     /// predicate it owns.</summary>
@@ -626,6 +770,7 @@ namespace SeapowerMultiplayer
         {
             RemoteTfSubStates.GateEntry(to, ref predicate);
             RemoteTfSubStates.ForceEscape(from, to, ref predicate);
+            RemoteTfVesselFormationStates.Gate(from, to, ref predicate);
         }
     }
 
@@ -1147,7 +1292,18 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>Canary: any weapon launch on the client outside network authority
-    /// is a suppression leak - block it, kill the object, count it loudly.</summary>
+    /// is a suppression leak - block it, kill the object, count it loudly.
+    ///
+    /// EXCEPT during a session load, which is not a leak and must not be reported as
+    /// one. Restoring a received save runs the game's own
+    /// SceneCreator.LaunchWeapons(), which re-launches everything that was in flight
+    /// when the host saved (SceneCreator.cs:5071-5097, Container_Launch per weapon).
+    /// Blocking is still right - the host simulates those rounds and streams them
+    /// back as replicas, so a local copy would be a duplicate - but it is an expected
+    /// consequence of the load, not a hole in the kill-switches, and an error-level
+    /// "report this" for it costs somebody an investigation. Ask
+    /// SessionManager.SceneLoading, the same exemption Patch_V2_CreateHelicopter_Guard
+    /// already carries.</summary>
     [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.CommonLaunchSettings))]
     public static class Patch_V2_LaunchCanary
     {
@@ -1157,11 +1313,265 @@ namespace SeapowerMultiplayer
             if (Authority.IsAllowed) return true;
             if (CaptureState.WeaponClassOf(__instance) == null) return true; // chaff/noisemaker etc. stay local for now
 
+            // Deactivating is not enough on its own. The object reached Awake, so it is
+            // in UnitRegistry under the id it carried in the save - which is the HOST's
+            // id for that same round, the one the host streams a replica under. FindById
+            // asks UnitRegistry BEFORE ReplicaRegistry (StateSerializer.cs:152-157), so
+            // the corpse would answer for every later state sample, impact and despawn
+            // aimed at the live replica: a missile frozen on the client and a despawn
+            // landing on the wrong object.
+            //
+            // And the id has to go, not just the registration. FindById's last resort is
+            // ScanForId → SceneCreator.FindGlobalObjectById, which is
+            // Resources.FindObjectsOfTypeAll and therefore finds INACTIVE objects too -
+            // so a merely deactivated corpse still answers. That matters most for the
+            // census: HandleCensus skips requesting a spawn replay for any id FindById
+            // can resolve, so the corpse would have told the client it already had the
+            // round and suppressed the very replay WeaponLedgerRebuild exists to send.
+            //
+            // SetUniqueId(0) is the game's own "no id" sentinel and is safe here: it only
+            // advances SceneCreator._UID when the new id is HIGHER (ObjectBase.cs:1641),
+            // so it cannot disturb allocation, and every lookup path already treats 0 as
+            // unresolvable.
+            UnitRegistry.Unregister(__instance);
+            __instance.SetUniqueId(0);
+            __instance.gameObject.SetActive(false);
+
+            if (SessionManager.SceneLoading)
+            {
+                // Refused, not lost. WeaponLedgerRebuild re-ledgers this round on the
+                // host at the session boundary, so the next census advertises it and
+                // this client asks for a spawn replay - which is exactly why the id had
+                // to be surrendered above: FindById would otherwise have answered with
+                // this corpse and suppressed the request. What arrives instead is a
+                // host-driven replica, and two copies of one round is the only outcome
+                // worse than a late one.
+                Telemetry.Count("v2.loadWeaponDeferred");
+                Plugin.Log.LogInfo($"[Session] In-flight weapon from the received save not " +
+                    $"re-launched locally: {__instance.name} — arrives as a replica via the census.");
+                return false;
+            }
+
             Telemetry.Count("v2.canaryBlockedLaunch");
             Plugin.Log.LogError($"[Canary] Blocked un-authorized client weapon launch: " +
                 $"{__instance.name} ({__instance._ap?._ammunitionFileName}) — suppression leak, report this");
-            __instance.gameObject.SetActive(false);
             return false;
+        }
+    }
+
+    /// <summary>HOST-side PvP: the remote player's decks ready up on the PLAYER clock,
+    /// not the AI convenience clock.
+    ///
+    /// PendingLaunchTask's constructor discounts the ready-up for a non-player deck:
+    ///
+    ///   _duration = loadout._readyUpDuration * LaunchCount;
+    ///   if (!_flightDeck._baseObject.IsPlayerObject) {
+    ///       ModifyDurationForAI(...);
+    ///       _duration -= _flightDeck._activeTime * LaunchCount;   // ← the discount
+    ///   }
+    ///
+    /// IsPlayerObject is per-machine, so on the host the OTHER player's airbase takes
+    /// the AI branch. _activeTime grows for as long as the deck has been running, and
+    /// late in a battle it exceeds a bomber's ~30-minute ready-up outright - so the task
+    /// is born with a NEGATIVE duration, instantly complete, the label flashing the
+    /// negative remainder. Playtest 40: "when I recover and then launch bombers - they
+    /// only use the recovery time and then are ready immediately - says -14 mins."
+    ///
+    /// That is a fairness break rather than a cosmetic one: one player's strike aircraft
+    /// are ready the moment they are ordered and the other's are not.
+    ///
+    /// ONLY THE MIDDLE BRANCH IS TOUCHED. The two siblings are left exactly as the
+    /// engine set them: the -1 sentinel means ready-up is switched off or the task asked
+    /// to skip it, and an explicit singleUnitReadyUpTime is a caller stating the figure
+    /// outright - which is how FlightDeck.LoadStateFromFile restores a saved task, so
+    /// recomputing there would rewrite history on every session load.
+    ///
+    /// A genuine AI deck keeps its discount, which is why the test is
+    /// HostSuppressesRemoteTfAi and not merely !IsPlayerObject.
+    ///
+    /// The companion prefix below is why this only has to correct arithmetic:
+    /// ModifyDurationForAI is not a pure calculation, so undoing its result alone would
+    /// leave the rest of what it did standing.</summary>
+    [HarmonyPatch(typeof(PendingLaunchTask), MethodType.Constructor,
+        new[] { typeof(FlightDeck), typeof(VehicleTypeOnBoard), typeof(Loadout), typeof(Squadron),
+                typeof(string), typeof(LaunchTaskParameters), typeof(float), typeof(bool) })]
+    public static class Patch_V2_RemoteTf_ReadyUpParity
+    {
+        static void Postfix(PendingLaunchTask __instance, FlightDeck flightDeck, Loadout loadout,
+                            LaunchTaskParameters ltp, float singleUnitReadyUpTime)
+        {
+            // Reproduce the constructor's own branch test rather than inferring from
+            // _duration: a negative duration is exactly what this fixes, so it cannot
+            // also be the signal for which path produced it.
+            if (!DM_TestTools._allowAircraftReadyUpTime || ltp == null || ltp._skipReadyUp) return;
+            if (!float.IsNaN(singleUnitReadyUpTime)) return;
+
+            var deck = flightDeck?._baseObject;
+            if (deck == null || loadout == null) return;
+            if (deck.IsPlayerObject) return;                        // already on the player clock
+            if (!Suppression.HostSuppressesRemoteTfAi(deck)) return; // real AI keeps the discount
+
+            float player = loadout._readyUpDuration * __instance.LaunchCount;
+            if (System.Math.Abs(__instance._duration - player) < 0.01f) return;
+
+            Plugin.Log.LogInfo($"[Deck] Ready-up parity on {deck.getUIDAndName()}: " +
+                $"{__instance._duration:F0}s -> {player:F0}s (remote player's deck, not AI)");
+            __instance._duration = player;
+        }
+    }
+
+    /// <summary>The other half of ready-up parity, and the reason the postfix above can
+    /// be a simple assignment.
+    ///
+    /// ModifyDurationForAI is not a calculation - it SPENDS the deck's pre-prepared
+    /// aircraft. It sorts _flightDeck._aiPreparationData, decrements the matching
+    /// entries' _launchCount and drops them once exhausted. Correcting _duration
+    /// afterwards therefore fixes the number the player sees while leaving the remote
+    /// player's deck quietly stripped of preparation data it was never meant to draw on,
+    /// and that consumption is not visible anywhere it would be noticed.
+    ///
+    /// So it is refused outright for a deck the other player owns, and the duration
+    /// arithmetic is then the postfix's only job. Genuine AI decks are untouched.</summary>
+    [HarmonyPatch(typeof(PendingLaunchTask), nameof(PendingLaunchTask.ModifyDurationForAI))]
+    public static class Patch_V2_RemoteTf_NoAiPreparationSpend
+    {
+        static bool Prefix(PendingLaunchTask __instance) =>
+            !Suppression.HostSuppressesRemoteTfAi(__instance._flightDeck?._baseObject);
+    }
+
+    /// <summary>HOST-side PvP: give the remote player's aircraft the winchester rules
+    /// THEIR player set, not this machine's.
+    ///
+    /// Every player option inside CheckWinchester is an escape hatch - each one is a
+    /// <c>return false</c> that keeps the aircraft airborne - and all of them sit behind
+    /// <c>IsPlayerObject</c>, which is false for the remote fleet on the machine that
+    /// simulates it. So their aircraft skipped every exit their owner had chosen and
+    /// went home the moment the stock rules said winchester.
+    ///
+    /// A postfix is enough precisely because of that shape: it runs only when the
+    /// engine has already said "winchester", and can only take it back. It can never
+    /// send an aircraft home that the engine was going to keep flying, whatever the
+    /// remote options say or fail to say.
+    ///
+    /// This is the GATE. Patch_V2_RemoteTf_WinchesterStamp is the other half and stays:
+    /// it deals with what happens once the state is legitimately entered (stop
+    /// re-testing, restore the pre-entry weapon status), which is parity of a different
+    /// kind and not in conflict with this.</summary>
+    [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.CheckWinchester))]
+    public static class Patch_V2_RemoteTf_WinchesterParity
+    {
+        static void Postfix(Aircraft __instance, ref bool __result)
+        {
+            if (!__result) return;                       // only ever turns it OFF
+            if (!RemoteGameplayOptions.Known) return;    // pre-handshake: engine stands
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
+
+            if (StaysAirborne(__instance)) __result = false;
+        }
+
+        /// <summary>The exits Aircraft.CheckWinchester would have taken had this been
+        /// the owner's own machine, in the engine's own order and with the engine's own
+        /// conditions - only the option VALUES come from the other player.</summary>
+        private static bool StaysAirborne(Aircraft a)
+        {
+            if (!RemoteGameplayOptions.PlanesWinchester) return true;
+
+            var initial = a._initialLoadoutCapabilities;
+            var current = a._currentLoadoutCapabilities;
+            bool fighter = a.Ap != null
+                        && a.Ap._unitRoles.Contains(ObjectBaseParameters.UnitRoles.Fighter);
+
+            // Strike and ASW share one set of exits; the engine reaches them through
+            // different outer branches but applies the same three tests.
+            if (initial.CanStrike || initial._hasASWTorpedoes)
+            {
+                if (initial._hasASWTorpedoes
+                    && RemoteGameplayOptions.ASWBombersStaysWithSonobuoys
+                    && current._hasSonobuoys) return true;
+
+                if (fighter)
+                {
+                    if (RemoteGameplayOptions.FighterBombersStaysWithAAM && current.HasAAM) return true;
+                    if (RemoteGameplayOptions.SRFightersStaysWithGuns
+                        && !initial.HasMLRAAM && current._hasGun) return true;
+                }
+                else if (RemoteGameplayOptions.BombersStaysWithAAM && current.HasAAM) return true;
+
+                return false;
+            }
+
+            if (initial.HasMLRAAM)
+                return RemoteGameplayOptions.InterceptorsStaysWithAAM && current.HasAAM;
+
+            return false;
+        }
+    }
+
+    /// <summary>The helicopter half. HelicopterStates' CheckWinchester carries exactly
+    /// one player-gated exit - the sonobuoy one - and no _playerPlanesWinchester test at
+    /// all, so this is the whole of it.</summary>
+    [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.CheckWinchester))]
+    public static class Patch_V2_RemoteTf_WinchesterParity_Helo
+    {
+        static void Postfix(Helicopter __instance, ref bool __result)
+        {
+            if (!__result) return;
+            if (!RemoteGameplayOptions.Known) return;
+            if (!RemoteGameplayOptions.ASWBombersStaysWithSonobuoys) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
+
+            if (__instance._initialLoadoutCapabilities._hasASWTorpedoes
+                && __instance._currentLoadoutCapabilities._hasSonobuoys)
+                __result = false;
+        }
+    }
+
+    /// <summary>HOST-side PvP: the other half of the same item - Options → Gameplay's
+    /// PlayerAutoAttackSurface, read once, in AI.GetPossibleTargetsList.
+    ///
+    /// The stock test excludes a surface contact when
+    /// <c>!PlayerAutoAttackSurface &amp;&amp; IsPlayerObject &amp;&amp; !(is LandUnit) &amp;&amp;
+    /// !target.IsAirUnit</c> (AI.cs:3809). IsPlayerObject is false for the remote fleet,
+    /// so with the option OFF a player's own ships hold fire at weapons free while the
+    /// other player's - simulated here - open up regardless.
+    ///
+    /// Same escape-hatch shape as the winchester gate, so the same postfix treatment is
+    /// safe: this only ever REMOVES candidates the engine offered. It cannot make a ship
+    /// engage something the engine had already ruled out.
+    ///
+    /// The method is a private void that fills AI._possibleTargetsWithPriorities, so the
+    /// filtering happens on that dictionary rather than a return value - patched by
+    /// string name for the same reason.</summary>
+    [HarmonyPatch(typeof(AI), "GetPossibleTargetsList")]
+    public static class Patch_V2_RemoteTf_AutoAttackSurfaceParity
+    {
+        private static readonly List<ObjectBase> _drop = new();
+
+        static void Postfix(AI __instance, ObjectBase ____baseObject)
+        {
+            if (!RemoteGameplayOptions.Known) return;
+            if (RemoteGameplayOptions.AutoAttackSurface) return;   // owner allows it
+            if (____baseObject == null || ____baseObject is LandUnit) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(____baseObject)) return;
+
+            var targets = __instance._possibleTargetsWithPriorities;
+            if (targets == null || targets.Count == 0) return;
+
+            _drop.Clear();
+            foreach (var kv in targets)
+            {
+                var t = kv.Key;
+                if (t == null || t.IsAirUnit) continue;
+                // An explicitly designated target is not auto-attack, and this option
+                // does not govern it: the stock test lives inside the candidate loop,
+                // while _objectToDestroy is entered separately and at priority 0.
+                // Dropping it here would silently cancel the owner's own attack order.
+                if (ReferenceEquals(t, __instance._objectToDestroy)) continue;
+                _drop.Add(t);
+            }
+
+            for (int i = 0; i < _drop.Count; i++) targets.Remove(_drop[i]);
+            _drop.Clear();
         }
     }
 

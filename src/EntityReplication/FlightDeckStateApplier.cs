@@ -41,6 +41,7 @@ namespace SeapowerMultiplayer
                 {
                     acc.VehicleNumbers.AddRange(msg.VehicleNumbers);
                     acc.SquadronNumbers.AddRange(msg.SquadronNumbers);
+                    acc.AccountableAmmo.AddRange(msg.AccountableAmmo);
                     acc.Tasks.AddRange(msg.Tasks);
                 }
                 else
@@ -83,6 +84,10 @@ namespace SeapowerMultiplayer
             // were back up and squadrons still read 0 - empty squadron list, null
             // SelectedSquadron - and because the streamer only re-sends on change, the
             // view never healed and that deck could not launch again.
+            // Tracked so UpdateLoadoutsAvailability below runs only when one of its
+            // three inputs actually moved - see there.
+            bool stockChanged = fd._currentAmmo != msg.CurrentAmmo;
+
             fd._currentAmmo = msg.CurrentAmmo;
             for (int i = 0; i < msg.SquadronNumbers.Count; i++)
             {
@@ -98,7 +103,25 @@ namespace SeapowerMultiplayer
                 var vc = msg.VehicleNumbers[i];
                 if (vc.VehicleIdx >= vob.Count || vob[vc.VehicleIdx] == null) continue;
                 if (vob[vc.VehicleIdx].Numbers != vc.Numbers)
+                {
                     vob[vc.VehicleIdx].Numbers = vc.Numbers;
+                    // Availability is computed per VEHICLE with stock > 0, so a count
+                    // crossing zero changes which loadouts get a number at all.
+                    stockChanged = true;
+                }
+            }
+
+            // The named category pools. Mirrored wholesale - the client never spends
+            // them itself (its deck pipeline is suppressed), so its copy is whatever
+            // mission load left there and only the host's is real.
+            var pools = fd._accountableAmmunition;
+            for (int i = 0; i < msg.AccountableAmmo.Count; i++)
+            {
+                var a = msg.AccountableAmmo[i];
+                if (a.Name == null) continue;
+                if (pools.TryGetValue(a.Name, out var have) && have == a.Count) continue;
+                pools[a.Name] = a.Count;
+                stockChanged = true;
             }
 
             // Reconcile the task queue by Guid - the host is authoritative for every
@@ -165,6 +188,25 @@ namespace SeapowerMultiplayer
                 if (j != insert) tasks.Move(j, insert);
                 insert++;
             }
+
+            // The number the deck window actually prints per loadout is
+            // Loadout.Available, and NOTHING above writes it. Only
+            // FlightDeck.UpdateLoadoutsAvailability does, and on a client none of its
+            // callers ever run: launches are relayed, recoveries arrive as despawns,
+            // and the rearm sweep is deck-pipeline work that is suppressed here. So
+            // every loadout kept whatever was computed once at mission load, for the
+            // rest of the battle - a recovered airframe's ammo never came back and the
+            // window offered 0 of everything.
+            //
+            // Guarded on a real change to one of its three inputs (generic ammo,
+            // vehicle stock, category pools), not run per snapshot. Available is a
+            // ReactiveProperty and line 1463 assigns 999 to EVERY loadout of EVERY
+            // vehicle on entry, so an unguarded call would fire a notification storm
+            // once a second for as long as any deck task ticks - the exact cascade
+            // documented on the counts above, which ends in UpdateAvailableAircraft()
+            // forcing Assigned back to 1 and made it impossible to ready more than one
+            // aircraft.
+            if (stockChanged) fd.UpdateLoadoutsAvailability();
         }
 
         /// <summary>The task row's LAUNCH command is normally added by

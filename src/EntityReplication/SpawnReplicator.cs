@@ -97,6 +97,25 @@ namespace SeapowerMultiplayer
                     UnitIdentityApplier.Apply(existing, msg);
                     return;
                 }
+
+                // Still flagged deck-phase, and now naming a leader: the host's
+                // formation capture re-sending the launch's flight the moment
+                // launchVehicle forms it up. Everything about the puppet stays as it
+                // is - this only carries identity - so it must not reach the flip
+                // above, which is why it is tested after it and not folded in.
+                //
+                // Safe on a parented puppet: joining a formation only matters to an
+                // aircraft once InAirFormation() says so, and that returns false while
+                // _hasControl is false, which is exactly the deck phase. The station
+                // keeper switches on with the airborne flip, by which time
+                // Patch_FormationFlightPhysics_OnFixedUpdate governs it.
+                if (msg.Kind == SpawnKind.Unit && msg.FormationLeaderId != 0)
+                {
+                    UnitIdentityApplier.Apply(existing, msg);
+                    Telemetry.Count("v2.spawnDeckFormation");
+                    return;
+                }
+
                 Telemetry.Count("v2.spawnDuplicate");
                 return;
             }
@@ -143,7 +162,7 @@ namespace SeapowerMultiplayer
         private static void SpawnUnitReplica(EntitySpawnMessage msg)
         {
             var homeBase = StateSerializer.FindById(msg.HomeBaseId);
-            Taskforce? tf = homeBase?._taskforce ?? FindTaskforceBySide((Taskforce.TfType)msg.TaskforceSide);
+            Taskforce? tf = homeBase?._taskforce ?? ResolveTaskforce(msg.TaskforceSide);
             if (tf == null)
             {
                 Telemetry.Count("v2.unitSpawnNoTaskforce");
@@ -321,7 +340,106 @@ namespace SeapowerMultiplayer
             return fallback;
         }
 
-        private static Taskforce? FindTaskforceBySide(Taskforce.TfType side)
+        /// <summary>Take the round that just launched off its rail.
+        ///
+        /// THE ASYMMETRY THIS EXISTS FOR: on the host, the object sitting on the rail IS
+        /// the missile - the launch flies the very object spawnWeapons() put there, so
+        /// the rail empties by itself. On a client the missile arrives as a separate
+        /// replica, so a rail loaded by WeaponHatchHandler would still be holding its
+        /// round while the replica flies away. Two missiles, one shot.
+        ///
+        /// There is no host event to key off: WeaponContainer.unload appears only in
+        /// destroyWeapons() and RefillAmmo, never on the launch path. So the pairing is
+        /// inferred from the spawn itself - the round is leaving a launcher on this
+        /// shooter that is holding this ammunition, and ONE container is emptied, the
+        /// first that matches.
+        ///
+        /// Conservative on purpose. A launcher that has no matching loaded round is left
+        /// alone, so a VLS or any other system this does not model cannot be disturbed:
+        /// the failure mode is a rail that stays full for a moment longer, not one that
+        /// empties when it should not.</summary>
+        private static void ClearRailFor(ObjectBase shooter, string ammoName)
+        {
+            var systems = shooter._obp?._weaponSystems;
+            if (systems == null || string.IsNullOrEmpty(ammoName)) return;
+
+            for (int s = 0; s < systems.Count; s++)
+            {
+                if (!(systems[s] is WeaponSystemLauncher launcher)) continue;
+                var containers = launcher._containers;
+                if (containers == null) continue;
+
+                for (int c = 0; c < containers.Count; c++)
+                {
+                    var container = containers[c];
+                    if (container?._loadedAmmunition?._ap?._ammunitionFileName != ammoName) continue;
+
+                    container.unload(returnAmmo: false);
+                    return; // one round, one rail
+                }
+            }
+        }
+
+        /// <summary>Which local taskforce a replicated spawn belongs to, given the side
+        /// byte the HOST stamped on it.
+        ///
+        /// TWO BUGS LIVED IN THE OLD ONE-LINE VERSION, which matched the enum by name
+        /// against TaskforceManager's list.
+        ///
+        /// (1) The byte is the side as the HOST sees it, and PvP hands the guest a save
+        /// with PlayerTaskforce and EnemyTaskforce swapped
+        /// (SessionManager.SwapTaskforceSides). Matching Player to Player therefore gave
+        /// a host-owned aircraft to the guest's OWN taskforce: it rendered friendly,
+        /// could not be controlled (it is still a replica), and every missile it fired
+        /// inherited the same wrong side, because SpawnWeaponReplica copies
+        /// objectBase._taskforce straight across. Playtest 28 reported both halves. The
+        /// fallback is reached whenever HomeBaseId is 0 or its object has no local
+        /// replica yet, so it is not a rare path.
+        ///
+        /// (2) TaskforceManager reparents itself to Globals._missionSingletonsParent in
+        /// Awake exactly as ObjectsManager does, but MissionManager's unload hand-destroys
+        /// only ObjectsManager - so Singleton's static _instance survives the mission,
+        /// _taskForces has no Clear anywhere in the assembly, and SceneCreator APPENDS
+        /// the next mission's taskforces to it. The first match for a side, after a
+        /// second battle in one lobby, is a DEAD taskforce from the first one.
+        ///
+        /// Resolving against Globals closes both: those three fields are rebuilt per
+        /// mission, so they cannot be stale, and the PvP inversion is applied explicitly
+        /// instead of being implied by a name. Done here rather than by sending
+        /// "mine/theirs" on the wire because the receiver is the only side that knows
+        /// whether its own save was swapped - and it costs no protocol change.</summary>
+        private static Taskforce? ResolveTaskforce(byte hostSide)
+        {
+            var side = (Taskforce.TfType)hostSide;
+
+            // Only the guest's save is rewritten, and only in PvP. The host's own view
+            // is never swapped, so its side byte means exactly what it says there.
+            bool swapped = Plugin.Instance.CfgPvP.Value && !Plugin.Instance.CfgIsHost.Value;
+
+            switch (side)
+            {
+                case Taskforce.TfType.Player:
+                    return swapped ? Globals._enemyTaskforce : Globals._playerTaskforce;
+
+                case Taskforce.TfType.Enemy:
+                    return swapped ? Globals._playerTaskforce : Globals._enemyTaskforce;
+
+                case Taskforce.TfType.Neutral:
+                    return Globals._neutralTaskforce;
+
+                default:
+                    // Ally (and None) have no Globals anchor, so these still take the
+                    // scan and still carry bug (2)'s stale risk. Left rather than
+                    // guessed at: a mission with a separate Ally taskforce spawning
+                    // replicated units through this fallback is the only way to reach
+                    // it, and inventing an anchor for it would be worse than the scan.
+                    return ScanTaskforcesForSide(side);
+            }
+        }
+
+        /// <summary>Last resort - see ResolveTaskforce's default branch for why this is
+        /// still here and what it can get wrong.</summary>
+        private static Taskforce? ScanTaskforcesForSide(Taskforce.TfType side)
         {
             if (!Singleton<TaskforceManager>.InstanceExists(false)) return null;
             foreach (var tf in Singleton<TaskforceManager>.Instance._taskForces)
@@ -361,6 +479,7 @@ namespace SeapowerMultiplayer
             {
                 wb.setNation(shooter.Nation.Value);
                 wb._taskforce = shooter._taskforce;
+                ClearRailFor(shooter, ap._ammunitionFileName);
             }
 
             // Place at the streamed spawn point before launch settings run
@@ -673,23 +792,56 @@ namespace SeapowerMultiplayer
             if (formations == null) return;
 
             for (int f = formations.Count - 1; f >= 0; f--)
+                EvictCorpses(formations[f]);
+        }
+
+        /// <summary>The per-formation half of the scan above.</summary>
+        internal static void EvictCorpses(UnitFormation? formation)
+        {
+            var stations = formation?.Stations;
+            if (stations == null) return;
+
+            for (int s = stations.Count - 1; s >= 0; s--)
             {
-                var stations = formations[f]?.Stations;
-                if (stations == null) continue;
+                var station = stations[s];
+                // Unity's operator, so a DESTROYED object reads as null here and is
+                // already screened out by the binding - the one that gets through is
+                // a live pooled object recycled out from under the station.
+                if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
 
-                for (int s = stations.Count - 1; s >= 0; s--)
-                {
-                    var station = stations[s];
-                    // Unity's operator, so a DESTROYED object reads as null here and is
-                    // already screened out by the binding - the one that gets through is
-                    // a live pooled object recycled out from under the station.
-                    if (station?.UnitObject == null || station.UnitObject._obp != null) continue;
-
-                    Plugin.Log.LogWarning($"[V2] Formation '{formations[f].Name}' was seating a " +
-                        "recycled object with no parameters - emptying the station.");
-                    station.UnitObject = null;
-                }
+                Plugin.Log.LogWarning($"[V2] Formation '{formation!.Name}' was seating a " +
+                    "recycled object with no parameters - emptying the station.");
+                station.UnitObject = null;
             }
+        }
+
+        /// <summary>Clear a formation's corpses and report whether it can safely take an
+        /// AddUnit right now. Call before every replicated join.
+        ///
+        /// AddUnit mutates Stations, and TrulyObservableCollection answers that with
+        /// Stations_CollectionChanged, which re-reads InFormationSummary through Noesis
+        /// AND calls CalculateAirUnitNames. Both walk the station list dereferencing
+        /// <c>UnitObject._obp</c> with no guard of their own (UnitFormation.cs:169
+        /// and :311), so one recycled corpse still seated anywhere in the formation
+        /// takes the join down - and with it the rest of whatever order or spawn was
+        /// being applied. That is the second of playtest 28's two client NRE stacks,
+        /// reported from both the order path and the spawn path, ~12 a battle.
+        ///
+        /// The leader test is the reason this returns a bool rather than just sweeping.
+        /// Emptying a corpse's seat can leave the LEADER's seat empty, and
+        /// CalculateAirUnitNames opens by dereferencing
+        /// <c>LeaderStation.UnitObject._obp._objectName</c> - so joining straight after
+        /// a sweep that unseated the leader trades one NRE for another. The formation
+        /// hands the lead over itself on its next update (UnitOnStationNotValid →
+        /// AssignNewLeaderFromAvailableUnits); waiting a frame is free, because both
+        /// callers already retry.</summary>
+        internal static bool PrepareForJoin(UnitFormation? formation)
+        {
+            if (formation == null) return false;
+            EvictCorpses(formation);
+
+            var leader = formation.LeaderStation?.UnitObject;
+            return leader != null && leader._obp != null;
         }
 
         public static void HandleDestroyEvent(DestroyEventMessage msg)

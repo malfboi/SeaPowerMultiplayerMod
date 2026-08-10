@@ -33,6 +33,15 @@ namespace SeapowerMultiplayer
             public float   TargetYawDeg;
             public bool    HasSample;
             public float   EnterRealtime;
+
+            // Launch-phase spool-up (see ParkAirframe / TickSpool). Only a puppet
+            // that arrived as a deck SPAWN is parked and spooled; one that entered
+            // deck mode by touching down is already running and stays that way.
+            public bool    Parked;
+            public Vector3 ParkedAtLocal;
+            public bool    Spooling;
+            public float   SpoolStartTime;
+            public bool    RotorsEngaged;
         }
 
         private const float LerpFactor = 0.25f;
@@ -47,9 +56,126 @@ namespace SeapowerMultiplayer
 
         public static bool IsDeckPuppet(int unitId) => _puppets.ContainsKey(unitId);
 
+        // How far the host's deck sim has to move a puppet from where it first
+        // appeared before we call it "being taxied out" and start the spool. Deck
+        // samples are quantised and a parked airframe does not wander, so a couple of
+        // metres is comfortably above the noise and well below an elevator ride.
+        private const float TaxiTriggerMetres = 2f;
+
         /// <summary>Deck-phase spawn from SpawnReplicator (EntitySpawn with the deck flag).</summary>
         public static void RegisterDeckSpawn(ObjectBase unit, ObjectBase carrier)
-            => EnterDeckMode(unit, carrier);
+        {
+            EnterDeckMode(unit, carrier);
+            ParkAirframe(unit);
+        }
+
+        /// <summary>Put a freshly replicated deck launch into the state the HOST's copy
+        /// is in at the same moment, which is parked and cold.
+        ///
+        /// The client builds every replica through ObjectsManager.createHelicopter with
+        /// parent null, and that creator's `homeBase != null &amp;&amp; parent != null`
+        /// test therefore fails even for a deck launch - so it takes the airborne else
+        /// branch and calls setImmediateFlightConditions + setAnimsForFlight +
+        /// GiveControl(0). setImmediateFlightConditions writes full rotor RPM straight
+        /// into _rotorCurrentRPM, so the helicopter was at flight RPM from the frame it
+        /// replicated, including while still sitting in the hangar - playtest 40's
+        /// "helicopters came out of the hangar with rotors already spinning".
+        ///
+        /// The host's own path does the opposite two lines after creating it:
+        /// FlightDeck.getObjectToLaunch calls setAnimsForTakeoff() and clears
+        /// _isInFlight. Mirroring those exact calls is the fix - not a replayed
+        /// animation, the same call on the same object at the same point in its life.
+        ///
+        /// Helicopters only. A fixed-wing replica comes out of the same else branch
+        /// with setAnimsForFlight, which is the state it wants for its whole visible
+        /// deck run anyway; its below-decks Wings_Extend happens before the replica
+        /// exists and there is nothing on this side to undo.</summary>
+        private static void ParkAirframe(ObjectBase unit)
+        {
+            if (!(unit is Helicopter h)) return;
+
+            h._helicopterAnimation?.setAnimsForTakeoff();
+            // engageRotors(false), not stopRotors(): the latter starts a spin-DOWN,
+            // which is a fair description of a helo shutting down and a poor one for
+            // a machine that was never running.
+            h._hfcs?.engageRotors(false);
+
+            // The RPM NUMBER, not just the switch. engageRotors(false) only stops it
+            // CLIMBING; setImmediateFlightConditions already stamped _rotorCurrentRPM
+            // to full at creation and the stock decay is 2.5% of max per second, so it
+            // still reads as spinning for the better part of a minute. Two things
+            // sample it, and they disagreed: the blade animation cuts out below 1%
+            // (HelicopterFlightControlSystem.cs:167), which is why the rotors LOOKED
+            // stopped, while _hoverWavesOverlay recomputes the downwash water disc from
+            // GetRelativeRPM every frame and only switches off below 0.1
+            // (Helicopter.cs:345). Hence a parked helo with still blades churning the
+            // sea under itself.
+            if (_rotorCurrentRpmField?.GetValue(h._hfcs) is float[] rpm)
+                for (int i = 0; i < rpm.Length; i++) rpm[i] = 0f;
+
+            // Audio does not read RPM at all: GiveControl latches _rotorsFlightStarted
+            // (Helicopter.cs:1263) and the creator called it on the way past, so the
+            // flight loop was playing on a cold airframe. Stopping the sources alone
+            // will not do - the latch is still up and OnUpdate re-plays the loop on the
+            // next frame - so it has to be cleared first.
+            _rotorsFlightStartedField?.SetValue(h, false);
+            StopRotorAudio(h);
+
+            if (_puppets.TryGetValue(unit.UniqueID, out var p)) p.Parked = true;
+        }
+
+        // Both private on their own class, and both are state the CREATOR set that has
+        // no public undo. Resolved once and allowed to degrade: on a build that renames
+        // either, the launch still replicates and only the cosmetic park is lost - the
+        // same trade FlightDeckStreamer makes for CrewSkill.
+        private static readonly System.Reflection.FieldInfo? _rotorCurrentRpmField =
+            HarmonyLib.AccessTools.Field(typeof(HelicopterFlightControlSystem), "_rotorCurrentRPM");
+        private static readonly System.Reflection.FieldInfo? _rotorsFlightStartedField =
+            HarmonyLib.AccessTools.Field(typeof(Helicopter), "_rotorsFlightStarted");
+
+        /// <summary>Silence a parked airframe. Unity's null operator throughout - these
+        /// are scene objects, and `?.` would happily call Stop on a destroyed one.</summary>
+        private static void StopRotorAudio(Helicopter h)
+        {
+            var hp = h._hp;
+            if (hp == null) return;
+
+            if (hp._enginePowerUpAudioSource   != null) hp._enginePowerUpAudioSource.Stop();
+            if (hp._engineLoopAudioSource      != null) hp._engineLoopAudioSource.Stop();
+            if (hp._rotorsIdleLoopAudioSource  != null) hp._rotorsIdleLoopAudioSource.Stop();
+            if (hp._rotorsFlightLoopAudioSource != null) hp._rotorsFlightLoopAudioSource.Stop();
+        }
+
+        /// <summary>Stock spool, replayed on the puppet: HelicopterTakeOff.onEnter runs
+        /// powerUpEngines, and its onUpdate engages the rotors once _engineWarmUpTime
+        /// has passed. FlipToAirborne's setImmediateFlightConditions still lands exactly
+        /// as before - this only fills in the middle the client never had.
+        ///
+        /// Triggered by the host MOVING the aircraft, not by deck-mode entry. A puppet
+        /// enters deck mode the moment it replicates anywhere on the ship, hangar
+        /// included, so an entry-based timer spins up idle rotors on a helo that is
+        /// still parked below decks (playtest 40b caught exactly that).</summary>
+        private static void TickSpool(Puppet p)
+        {
+            if (!p.Parked || !(p.Unit is Helicopter h)) return;
+
+            if (!p.Spooling)
+            {
+                if ((p.TargetLocal - p.ParkedAtLocal).sqrMagnitude
+                    < TaxiTriggerMetres * TaxiTriggerMetres) return;
+
+                p.Spooling = true;
+                p.SpoolStartTime = GameTime.time;
+                h.powerUpEngines();
+                return;
+            }
+
+            if (p.RotorsEngaged) return;
+            if (GameTime.time - p.SpoolStartTime < (h._hp?._engineWarmUpTime ?? 30f)) return;
+
+            p.RotorsEngaged = true;
+            h.engageRotors();
+        }
 
         private static void EnterDeckMode(ObjectBase unit, ObjectBase carrier)
         {
@@ -95,6 +221,9 @@ namespace SeapowerMultiplayer
                 tr.localPosition = p.TargetLocal;
                 var e = tr.localEulerAngles;
                 tr.localEulerAngles = new Vector3(e.x, p.TargetYawDeg, e.z);
+                // Where "parked" is, for the taxi test - the spawn's own position is
+                // approximate, so the first real sample is the reference.
+                p.ParkedAtLocal = p.TargetLocal;
             }
         }
 
@@ -169,6 +298,8 @@ namespace SeapowerMultiplayer
                     continue;
                 }
                 if (!p.HasSample) continue;
+
+                TickSpool(p);
 
                 var tr = p.Unit.transform;
                 Vector3 preLocal = tr.localPosition;

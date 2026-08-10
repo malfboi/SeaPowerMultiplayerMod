@@ -582,11 +582,30 @@ namespace SeapowerMultiplayer
             Order = OrderType.RemoveWaypoints,
         };
 
+        // Formation station keeping opens with a RemoveWaypoints and then re-adds the
+        // station task through an unpatched call, so relaying the clear on its own left
+        // the far side waypointless and re-armed its own station-keeping watchdog - the
+        // flood documented on Patch_UnitFormation_ReturnToFormation. Executed locally,
+        // not sent. Both sides run the same sweep off the same membership.
+        //
+        // Re-stationing (FormationRestation) is the same shape and is silenced the same
+        // way - and there it is not merely wasteful: the station op that would have
+        // carried the re-add is filtered out for aircraft formations, so the clear
+        // travelled alone and emptied every wingman's waypoint list on the far machine.
+        //
+        // Gated here rather than by wrapping the caller, so the flag stays read-only at
+        // its use sites and nothing has to be released on a paired path.
         static bool Prefix(ObjectBase __instance) =>
-            OrderSyncHelper.Prefix(__instance, Msg(__instance));
+            DerivedWaypointChurn || OrderSyncHelper.Prefix(__instance, Msg(__instance));
 
-        static void Postfix(ObjectBase __instance) =>
+        static void Postfix(ObjectBase __instance)
+        {
+            if (DerivedWaypointChurn) return;
             OrderSyncHelper.Postfix(__instance, Msg(__instance));
+        }
+
+        static bool DerivedWaypointChurn =>
+            FormationUpdate.Active || FormationRestation.Active;
     }
 
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DeleteSelectedWaypoint))]
@@ -1630,13 +1649,60 @@ namespace SeapowerMultiplayer
                 Heading        = group,
             };
 
-        internal static PlayerOrderMessage MastMsg(ObjectBase u, int mastId) =>
+        /// <summary>A mast order carries the DESIRED state, not "flip".
+        ///
+        /// It used to name which mast and nothing else, and the receiver answered by
+        /// calling the same toggle - a flip of whatever that machine currently held.
+        /// A flip is not idempotent, and the two machines routinely disagree for the
+        /// length of a round trip (SensorStateManager's reassert re-imposes the host's
+        /// mask every half second on top). So a second press could flip the host's copy
+        /// BACK rather than forward: playtest 41/42's "the radar mast flickered and
+        /// needed to go up twice before stabilizing". Delivery was never the problem -
+        /// SubmarineMast is on ShouldSend's always-send list - the message just could
+        /// not converge.
+        ///
+        /// Speed carries raise/lower, the same convention SensorToggle already uses.</summary>
+        internal static PlayerOrderMessage MastMsg(ObjectBase u, int mastId, bool up) =>
             new PlayerOrderMessage
             {
                 SourceEntityId = u.UniqueID,
                 Order          = OrderType.SubmarineMast,
                 Heading        = mastId,
+                Speed          = up ? 1f : 0f,
             };
+
+        /// <summary>The sensors a given mast id raises, by the same tests the game's own
+        /// toggle*Mast methods use (Submarine.cs:2119-2185). Snorkel is not here: it is
+        /// SP._snorkelMast, its own system rather than an entry in _sensorSystems.</summary>
+        internal static bool MastSensorMatches(SensorSystem s, int mastId)
+        {
+            if (s == null) return false;
+            switch (mastId)
+            {
+                case 1: return s._systemType == BaseSystem.SystemType.SensorPeriscope;
+                case 2: return s._isSubmarineMast && s.GetType() == typeof(SensorSystemRadar);
+                case 3: return s.GetType() == typeof(SensorSystemESM);
+                default: return false;
+            }
+        }
+
+        /// <summary>Is this mast currently up? Read on both sides - the sender uses it to
+        /// say what the click intends, the receiver to decide whether it has anything to
+        /// do.</summary>
+        internal static bool MastIsUp(Submarine sub, int mastId)
+        {
+            if (mastId == 0) return sub.SP?._snorkelMast?.IsOn?.Value ?? false;
+
+            var sensors = sub.SP?._sensorSystems;
+            if (sensors == null) return false;
+
+            // Several sensors can share one mast id; the game raises them together, so
+            // any one of them up means the mast is up.
+            for (int i = 0; i < sensors.Count; i++)
+                if (MastSensorMatches(sensors[i], mastId) && sensors[i].IsOn.Value) return true;
+
+            return false;
+        }
 
         /// <summary>
         /// Returns the sensor group for a SensorSystem, or -1 if not a synced type.
@@ -1809,6 +1875,7 @@ namespace SeapowerMultiplayer
         internal static void Clear()
         {
             OrderSyncHelper.ClearRefusalLogThrottle();
+            OrderHandler.ClearRejectThrottle();
             _cache.Clear();
             _lastSendTime.Clear();
         }
@@ -1938,7 +2005,12 @@ namespace SeapowerMultiplayer
             var msg = OrderSyncHelper.SensorEnableMsg(__instance, unit, true);
             if (msg == null) return true;
 
-            return OrderSyncHelper.Prefix(unit, msg);
+            bool allowed = OrderSyncHelper.Prefix(unit, msg);
+            // Hold this sensor out of the reassert until the host answers - otherwise
+            // the switch is dragged back for the round trip. Only when the order is
+            // actually going, and only on the client (NoteLocalToggle no-ops on host).
+            if (allowed) SensorStateManager.NoteLocalToggle(unit, __instance);
+            return allowed;
         }
 
         static void Postfix(SensorSystem __instance)
@@ -1972,7 +2044,9 @@ namespace SeapowerMultiplayer
             var msg = OrderSyncHelper.SensorEnableMsg(__instance, unit, false);
             if (msg == null) return true;
 
-            return OrderSyncHelper.Prefix(unit, msg);
+            bool allowed = OrderSyncHelper.Prefix(unit, msg);
+            if (allowed) SensorStateManager.NoteLocalToggle(unit, __instance); // see Enable
+            return allowed;
         }
 
         static void Postfix(SensorSystem __instance)
@@ -2045,65 +2119,60 @@ namespace SeapowerMultiplayer
     // Mast toggles internally call SensorSystem.Enable/Disable.
     // SuppressSensorPatch prevents the SensorSystem patches from
     // double-sending - the mast patch handles the sync.
+    //
+    // All four share MastRelay: the toggles differ only in which mast they name, and
+    // the state read/write around them is identical. The DESIRED state is what
+    // travels - see OrderSyncHelper.MastMsg. The prefix runs before the local flip,
+    // so what this click wants is the opposite of what is there now; the postfix runs
+    // after it, so what happened is simply what is there now.
+    internal static class MastRelay
+    {
+        internal static bool Prefix(Submarine sub, int mastId)
+        {
+            OrderSyncHelper.SuppressSensorPatch = true;
+
+            bool want = !OrderSyncHelper.MastIsUp(sub, mastId);
+            bool allowed = OrderSyncHelper.Prefix(sub, OrderSyncHelper.MastMsg(sub, mastId, want));
+
+            // Only a toggle that is actually going to happen is worth latching, and
+            // only the client latches - see SensorStateManager.NoteLocalMastToggle.
+            if (allowed) SensorStateManager.NoteLocalMastToggle(sub, mastId);
+            return allowed;
+        }
+
+        internal static void Postfix(Submarine sub, int mastId)
+        {
+            OrderSyncHelper.Postfix(sub, OrderSyncHelper.MastMsg(sub, mastId, OrderSyncHelper.MastIsUp(sub, mastId)));
+            OrderSyncHelper.SuppressSensorPatch = false;
+        }
+    }
 
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.toggleSnorkelMast))]
     public static class Patch_ToggleSnorkelMast
     {
-        static bool Prefix(Submarine __instance)
-        {
-            OrderSyncHelper.SuppressSensorPatch = true;
-            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 0));
-        }
-        static void Postfix(Submarine __instance)
-        {
-            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 0));
-            OrderSyncHelper.SuppressSensorPatch = false;
-        }
+        static bool Prefix(Submarine __instance)  => MastRelay.Prefix(__instance, 0);
+        static void Postfix(Submarine __instance) => MastRelay.Postfix(__instance, 0);
     }
 
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.togglePeriscopeMast))]
     public static class Patch_TogglePeriscopeMast
     {
-        static bool Prefix(Submarine __instance)
-        {
-            OrderSyncHelper.SuppressSensorPatch = true;
-            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 1));
-        }
-        static void Postfix(Submarine __instance)
-        {
-            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 1));
-            OrderSyncHelper.SuppressSensorPatch = false;
-        }
+        static bool Prefix(Submarine __instance)  => MastRelay.Prefix(__instance, 1);
+        static void Postfix(Submarine __instance) => MastRelay.Postfix(__instance, 1);
     }
 
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.toggleRadarMast))]
     public static class Patch_ToggleRadarMast
     {
-        static bool Prefix(Submarine __instance)
-        {
-            OrderSyncHelper.SuppressSensorPatch = true;
-            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 2));
-        }
-        static void Postfix(Submarine __instance)
-        {
-            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 2));
-            OrderSyncHelper.SuppressSensorPatch = false;
-        }
+        static bool Prefix(Submarine __instance)  => MastRelay.Prefix(__instance, 2);
+        static void Postfix(Submarine __instance) => MastRelay.Postfix(__instance, 2);
     }
 
     [HarmonyPatch(typeof(Submarine), nameof(Submarine.toggleESMMast))]
     public static class Patch_ToggleESMMast
     {
-        static bool Prefix(Submarine __instance)
-        {
-            OrderSyncHelper.SuppressSensorPatch = true;
-            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 3));
-        }
-        static void Postfix(Submarine __instance)
-        {
-            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 3));
-            OrderSyncHelper.SuppressSensorPatch = false;
-        }
+        static bool Prefix(Submarine __instance)  => MastRelay.Prefix(__instance, 3);
+        static void Postfix(Submarine __instance) => MastRelay.Postfix(__instance, 3);
     }
 
 

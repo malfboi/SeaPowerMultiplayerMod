@@ -79,21 +79,87 @@ namespace SeapowerMultiplayer
     /// Deliberately NOT wired to <see cref="FormationInternal"/> wholesale: OnUpdate also
     /// reaches the AI radar sweep (CheckAutomation → CheckForRadarScan) and unit launch
     /// (CheckAI → CheckForUnitLaunch), which are host decisions the client does have to
-    /// be told about.</summary>
+    /// be told about.
+    ///
+    /// FRAME-SCOPED, not just depth-counted, and that is the point. This gates order
+    /// SENDS, so a counter left standing does not degrade anything gracefully - it
+    /// silences every order this machine would have sent and every order a host would
+    /// have broadcast, on a flag nothing ever brings back down. Expiring it with the
+    /// frame means the worst a missed Exit can cost is the rest of one frame. Cheap
+    /// enough to be worth it: two int compares on a path that already walks every
+    /// station of every formation.</summary>
     internal static class FormationUpdate
     {
         private static int _depth;
+        private static int _frame = -1;
 
-        internal static bool Active => _depth > 0;
-        internal static void Enter() => _depth++;
-        internal static void Exit()  { if (_depth > 0) _depth--; }
+        internal static bool Active => _depth > 0 && _frame == Time.frameCount;
+
+        internal static void Enter()
+        {
+            if (_frame != Time.frameCount) { _frame = Time.frameCount; _depth = 0; }
+            _depth++;
+        }
+
+        internal static void Exit() { if (_depth > 0) _depth--; }
     }
 
+    /// <summary>Raised for the duration of <see cref="UnitFormation.ChangeStationPosition"/>,
+    /// so the RemoveWaypoints it opens with can be told apart from a player clearing a
+    /// route. Frame-scoped for the same reason <see cref="FormationUpdate"/> is - see
+    /// there for the rationale; a missed Exit expires with the frame.
+    ///
+    /// WHY THIS EXISTS. ChangeStationPosition is RemoveWaypoints followed by
+    /// SetRelativeWaypointTask, and only the first of those is a patched call. The
+    /// station change itself is relayed by Patch_UnitFormation_ChangeStationPosition -
+    /// but only when setStationHeight is FALSE, to keep the deck-recovery and
+    /// holding-pattern callers from flooding the wire. UnitFormation.cs:231 sets
+    /// SetHeight from `_leaderObject._type == Aircraft`, so EVERY aircraft formation
+    /// passes true, and Reform passes SetHeight straight through
+    /// (UnitFormation.cs:631). The result was an aircraft-only version of the bug this
+    /// file already documents twice: the clear travelled, the re-add did not, and the
+    /// station op that would have carried both was filtered out - so every wingman of
+    /// every air formation was left with an empty waypoint list on the OTHER machine.
+    ///
+    /// It fired on every launch. PlaneTakeOff.onExit (and the STOL twin) calls
+    /// SwapLeader - itself a Reform - and then Reform again, so each aircraft leaving a
+    /// deck or runway stripped the waypoints of every aircraft already up. A wingman
+    /// with no waypoints is not merely off station: AircraftStates.MovingInFormation
+    /// falls through to base.onFixedUpdate() when it is more than a mile out, which
+    /// flies the waypoint list it no longer has - straight ahead, deaf to the station
+    /// task and to anything ordered afterwards that the far side re-derives.
+    ///
+    /// Both machines hold the same membership, pattern and spacing and re-station from
+    /// them identically, so nothing needs to travel: the receiver reforms off the
+    /// FormationCommand op it is already sent, and UnitFormation.OnUpdate's own sweep
+    /// re-issues a station task to any follower that ends up without one.</summary>
+    internal static class FormationRestation
+    {
+        private static int _depth;
+        private static int _frame = -1;
+
+        internal static bool Active => _depth > 0 && _frame == Time.frameCount;
+
+        internal static void Enter()
+        {
+            if (_frame != Time.frameCount) { _frame = Time.frameCount; _depth = 0; }
+            _depth++;
+        }
+
+        internal static void Exit() { if (_depth > 0) _depth--; }
+    }
+
+    /// <summary>Prefix/Postfix rather than Prefix/Finalizer: a Harmony finalizer that
+    /// returns void SWALLOWS an exception thrown by the method it wraps, and this wraps
+    /// the formation's whole per-frame update - quietly eating engine faults there
+    /// changes behaviour well beyond anything this flag is for. The frame scope above
+    /// already makes a missed Exit self-correcting, which is what the finalizer was
+    /// bought for.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.OnUpdate))]
     public static class Patch_UnitFormation_OnUpdate
     {
-        static void Prefix()    => FormationUpdate.Enter();
-        static void Finalizer() => FormationUpdate.Exit();
+        static void Prefix()  => FormationUpdate.Enter();
+        static void Postfix() => FormationUpdate.Exit();
     }
 
     /// <summary>Create (isLeader) and join. The constructor reaches a new formation's
@@ -213,35 +279,29 @@ namespace SeapowerMultiplayer
     /// reliable-ordered, with an unthrottled log line and a RemoveWaypoints + re-add per
     /// message at the far end, and both players at ~1 FPS.
     ///
-    /// So the OnUpdate-driven call is executed and sent NOTHING, in either direction -
-    /// FormationInternal covers the whole call, silencing its RemoveWaypoints too, not
-    /// just the ReturnUnit below. Every other caller is a discrete one-shot (the station
-    /// context menu, a route that finished, a formation cease-fire-and-recall) and still
-    /// travels.</summary>
+    /// So the OnUpdate-driven call is executed and sent NOTHING, in either direction.
+    /// Its RemoveWaypoints half is silenced at that patch, on the same flag - NOT by
+    /// wrapping this call in FormationInternal, which is what the first version of this
+    /// fix did and had to be withdrawn: it raised a GLOBAL send-suppression counter from
+    /// a Harmony prefix, carried the paired release across a Postfix and a Finalizer via
+    /// __state, and did it once per follower per frame. Any single unbalanced pass left
+    /// that counter up for good, and once it was up no order was sent by either machine
+    /// and no order was broadcast by the host - which reads, on both screens, as aircraft
+    /// that never join their formation and fly on ignoring orders.
+    ///
+    /// Every other caller is a discrete one-shot (the station context menu, a route that
+    /// finished, a formation cease-fire-and-recall) and still travels.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.ReturnToFormation))]
     public static class Patch_UnitFormation_ReturnToFormation
     {
-        static void Prefix(ref bool __state)
+        static void Postfix(UnitFormation __instance, ObjectBase obj)
         {
-            __state = FormationUpdate.Active;
-            if (__state) FormationInternal.Enter();
-        }
-
-        static void Postfix(UnitFormation __instance, ObjectBase obj, bool __state)
-        {
-            if (__state) return; // station keeping - derived, see above
+            if (FormationUpdate.Active) return; // station keeping - derived, see above
             if (obj == null) return;
             if (__instance.LeaderStation?.UnitObject == null) return;
             if (__instance.GetStationForUnit(obj) == null) return;
 
             FormationSync.Send(obj, FormationSync.Msg(obj, FormationOp.ReturnUnit));
-        }
-
-        // Finalizer, not the Postfix, so a throw inside the game method cannot strand
-        // FormationInternal up and silence every order after it.
-        static void Finalizer(bool __state)
-        {
-            if (__state) FormationInternal.Exit();
         }
     }
 
@@ -264,14 +324,26 @@ namespace SeapowerMultiplayer
     /// the only caller that leaves it false. The station-keeping callers that would
     /// otherwise flood this (FlightDeck recovery slots, HoldingPattern) all pass true,
     /// and the drift/sprint states do not come through here at all - they use
-    /// OffsetStationPosition, which writes a relative waypoint instead.</summary>
+    /// OffsetStationPosition, which writes a relative waypoint instead.
+    ///
+    /// The filter decides only whether the STATION CHANGE is relayed. The waypoint
+    /// churn inside the call must not travel either way, filtered or not, which is what
+    /// <see cref="FormationRestation"/> is raised for - see there. On the unfiltered
+    /// path it was redundant (the receiver's own ChangeStationPosition clears and
+    /// re-adds); on the filtered path it was an unpaired clear, and that is the
+    /// aircraft-wingman bug.</summary>
     [HarmonyPatch(typeof(UnitFormation), nameof(UnitFormation.ChangeStationPosition),
         new[] { typeof(Station), typeof(Vector3), typeof(bool) })]
     public static class Patch_UnitFormation_ChangeStationPosition
     {
+        static void Prefix() => FormationRestation.Enter();
+
         static void Postfix(UnitFormation __instance, Station station,
                             Vector3 newStationPosition, bool setStationHeight)
         {
+            // Lowered first: the station op below is a real order and has to travel.
+            FormationRestation.Exit();
+
             if (setStationHeight || station == null) return;
 
             var leader = FormationSync.Leader(__instance);

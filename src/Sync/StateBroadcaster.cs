@@ -22,6 +22,35 @@ namespace SeapowerMultiplayer
             StartCoroutine(WeaponStatusLoop());
         }
 
+        /// <summary>The client's status line is imposed here, and only here.
+        ///
+        /// Not a coroutine like everything else in this class, because this one is
+        /// about ORDERING rather than cadence: Unity runs LateUpdate after every
+        /// MonoBehaviour Update and before the frame draws, which is what makes the
+        /// host's line the last word of the frame over the guest's own state machines.
+        /// A timed loop, at any rate, could only change which writer happened to win -
+        /// see UnitStatusManager.ClientLateAssertText.</summary>
+        private void LateUpdate()
+        {
+            if (Plugin.Instance == null || Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsEstablished) return;
+            if (SimSyncManager.CurrentState != SimState.Synchronized) return;
+            if (SessionManager.SceneLoading) return;
+
+            try
+            {
+                UnitStatusManager.ClientLateAssertText();
+                // Also per-frame, and for the same reason - a mount slews at so many
+                // degrees per second, so it wants driving every frame rather than on a
+                // timer that would make it step.
+                UnitStatusManager.ClientLateAimMounts();
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning($"[UnitStatus] Late status assert failed: {ex.Message}");
+            }
+        }
+
         // ── Weapon status / doctrine (both machines, own fleet) ─────────────
         //
         // The group-level doctrine paths write _weaponStatus directly instead of

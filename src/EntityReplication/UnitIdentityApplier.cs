@@ -99,6 +99,11 @@ namespace SeapowerMultiplayer
                 if (leader.Formation == null) return false;
             }
 
+            // Returning false parks this join in _pendingFormation, which DrainPending
+            // retries once a frame - so a formation that is momentarily unfit (a corpse
+            // just unseated from the leader's station) costs a frame, not the join.
+            if (!SpawnReplicator.PrepareForJoin(leader.Formation)) return false;
+
             leader.Formation.AddUnit(unit);
             return true;
         }

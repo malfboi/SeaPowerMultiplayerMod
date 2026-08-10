@@ -32,6 +32,22 @@ namespace SeapowerMultiplayer.Messages
         /// external ones don't". ContainerId is unused when this is set.</summary>
         public bool IsSystem;
 
+        /// <summary>Non-empty makes this a RAIL LOAD rather than a hatch event: the
+        /// launcher is putting this ammunition onto its rails, and every other field
+        /// except UnitId/MountIndex is ignored.
+        ///
+        /// A rail-loading launcher (Mk26, Mk13 - a Tico's air-defence arms) puts the
+        /// round on the arm and then trains it. The client did the second half only,
+        /// because loading is the launcher's own Idle → LoadAmmunition →
+        /// WaitForLoadAnimation state machine, driven by _executingEngageTask and
+        /// _ammoForEngage - and a client has neither, so the launcher never leaves Idle.
+        /// It pointed at the target with bare rails and the missile appeared already
+        /// flying.</summary>
+        public string LoadAmmo = "";
+
+        /// <summary>Clear the rails - the unload half of the same state machine.</summary>
+        public bool Unload;
+
         public MessageType Type => MessageType.WeaponHatchEvent;
 
         public void Serialize(NetDataWriter writer)
@@ -42,6 +58,8 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(Open);
             writer.Put(DelaySec);
             writer.Put(IsSystem);
+            writer.Put(LoadAmmo ?? "");
+            writer.Put(Unload);
         }
 
         public static WeaponHatchEventMessage Deserialize(NetDataReader reader) => new()
@@ -52,6 +70,8 @@ namespace SeapowerMultiplayer.Messages
             Open        = reader.GetBool(),
             DelaySec    = reader.GetFloat(),
             IsSystem    = reader.GetBool(),
+            LoadAmmo    = reader.GetString(),
+            Unload      = reader.GetBool(),
         };
     }
 }

@@ -111,6 +111,13 @@ namespace SeapowerMultiplayer
                 cur.SquadronNumbers.Add(full.SquadronNumbers[i]);
                 size += 4;
             }
+            for (int i = 0; i < full.AccountableAmmo.Count; i++)
+            {
+                int ab = StrBytes(full.AccountableAmmo[i].Name) + 4;
+                CutIfNeeded(ab);
+                cur.AccountableAmmo.Add(full.AccountableAmmo[i]);
+                size += ab;
+            }
             for (int i = 0; i < full.Tasks.Count; i++)
             {
                 int rb = RowBytes(full.Tasks[i]);
@@ -166,6 +173,17 @@ namespace SeapowerMultiplayer
                     msg.SquadronNumbers.Add(new FlightDeckStateMessage.SquadronCount
                     { VehicleIdx = (byte)v, SquadronIdx = (byte)s, Numbers = (short)squads[s].Numbers });
                 }
+            }
+
+            // Named category pools, for the client's UpdateLoadoutsAvailability.
+            // Sent whole rather than as a delta: it is a handful of entries and the
+            // client's own copy drifts (its deck pipeline, which is what spends them,
+            // is suppressed), so there is nothing on that side to apply a delta to.
+            foreach (var kv in fd._accountableAmmunition)
+            {
+                if (msg.AccountableAmmo.Count >= 255) break;
+                msg.AccountableAmmo.Add(new FlightDeckStateMessage.AmmoCategory
+                { Name = kv.Key, Count = kv.Value });
             }
 
             var tasks = fd.FlightDeckTasks;
@@ -227,6 +245,10 @@ namespace SeapowerMultiplayer
                 _sb.Append(sn.VehicleIdx).Append(',').Append(sn.SquadronIdx).Append(',')
                    .Append(sn.Numbers).Append(';');
             }
+            _sb.Append('|');
+            for (int i = 0; i < m.AccountableAmmo.Count; i++)
+                _sb.Append(m.AccountableAmmo[i].Name).Append(':')
+                   .Append(m.AccountableAmmo[i].Count).Append(';');
             _sb.Append('#');
             for (int i = 0; i < m.Tasks.Count; i++)
             {

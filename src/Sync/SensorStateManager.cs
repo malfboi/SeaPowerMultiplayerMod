@@ -231,6 +231,13 @@ namespace SeapowerMultiplayer
             {
                 var e = msg.Entries[i];
                 _desired[e.UniqueId] = (e.OnMask, e.EmitMask, e.GuideMask);
+
+                // The host has now spoken for this unit, so the optimistic hold is
+                // over - whatever it says next IS the answer, including a refusal.
+                // Dropped before the apply so this update is free to overrule the
+                // local switch, which is the whole point of ending the hold.
+                ClearLocalEcho(e.UniqueId);
+
                 ApplyToUnit(e.UniqueId, e.OnMask, e.EmitMask, e.GuideMask, fromNetwork: true);
             }
 
@@ -302,6 +309,75 @@ namespace SeapowerMultiplayer
                 $"{missing} not found. {(detail.Count == 0 ? "" : string.Join("  |  ", detail))}");
         }
 
+        // ── Optimistic local echo ───────────────────────────────────────────────
+        //
+        // A switch the player has just thrown on THIS machine, held out of the
+        // reassert until the host's own state answers for it.
+        //
+        // The reassert re-imposes the host's last known mask every pump, and the host
+        // cannot know about a click until it has made the round trip. So for those few
+        // hundred milliseconds the reassert was dragging the switch back to a value
+        // the player had already changed, twice a second: playtest 28's "can't turn my
+        // radar on on my E-3 - flickers for a bit before finally turning on", with the
+        // guest's own log showing `switch did not go OFF yet` / `radiating → ON` /
+        // `switch did not go ON yet` on one sensor.
+        //
+        // Keyed per (unit, sensor index) so holding one switch never blinds the
+        // reassert to the rest of the unit, and capped in time so a click the host
+        // never acknowledges - refused, or lost with the packet - cannot hold a sensor
+        // out of correction for the rest of the battle.
+        private static readonly Dictionary<(int unitId, int index), float> _localEcho = new();
+        private const float LocalEchoHoldSec = 6f;
+
+        /// <summary>Client: the player just threw this switch locally.</summary>
+        internal static void NoteLocalToggle(ObjectBase unit, SensorSystem sensor)
+        {
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (unit == null || sensor == null) return;
+
+            var sensors = unit._obp?._sensorSystems;
+            if (sensors == null) return;
+
+            for (int i = 0; i < sensors.Count && i < MaxSensorsPerUnit; i++)
+            {
+                if (!ReferenceEquals(sensors[i], sensor)) continue;
+                _localEcho[(unit.UniqueID, i)] = Time.unscaledTime + LocalEchoHoldSec;
+                return;
+            }
+        }
+
+        /// <summary>Client: the player just moved a submarine mast. Masts raise their
+        /// sensors through Enable/Disable under SuppressSensorPatch, so the per-sensor
+        /// hook above never sees them - latch everything the mast owns instead.</summary>
+        internal static void NoteLocalMastToggle(Submarine sub, int mastId)
+        {
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (sub == null) return;
+
+            var sensors = sub._obp?._sensorSystems;
+            if (sensors == null) return;
+
+            float until = Time.unscaledTime + LocalEchoHoldSec;
+            for (int i = 0; i < sensors.Count && i < MaxSensorsPerUnit; i++)
+                if (OrderSyncHelper.MastSensorMatches(sensors[i], mastId))
+                    _localEcho[(sub.UniqueID, i)] = until;
+        }
+
+        /// <summary>Drop every hold on a unit - the host has spoken for it.</summary>
+        private static void ClearLocalEcho(int unitId)
+        {
+            if (_localEcho.Count == 0) return;
+            for (int i = 0; i < MaxSensorsPerUnit; i++) _localEcho.Remove((unitId, i));
+        }
+
+        private static bool HeldLocally(int unitId, int index)
+        {
+            if (!_localEcho.TryGetValue((unitId, index), out float until)) return false;
+            if (Time.unscaledTime < until) return true;
+            _localEcho.Remove((unitId, index));
+            return false;
+        }
+
         /// <summary>Client: re-impose the held picture. Cheap - every sensor already
         /// in the right state is a bool compare and nothing else.</summary>
         public static void ClientReassert()
@@ -370,6 +446,12 @@ namespace SeapowerMultiplayer
                 bool want = ((mask >> b) & 1UL) != 0UL;
                 if (s.IsOn.Value == want) continue;
 
+                // The switch half only. Radiating state above is untouched by this:
+                // nothing local ever sets it (target assignment is host-side AI the
+                // client does not run), so there is no local value to protect and
+                // holding it would only make an emitter lie for six seconds.
+                if (!fromNetwork && HeldLocally(uniqueId, b)) continue;
+
                 // ApplyingFromNetwork keeps the SensorSystem.Enable/Disable patches
                 // from treating this as a local player toggle and echoing it back
                 // upstream.
@@ -420,6 +502,7 @@ namespace SeapowerMultiplayer
             _seen.Clear();
             _desired.Clear();
             DesiredEmit.Clear();
+            _localEcho.Clear();
             _warnedRefusals.Clear();
             _nextFullSweep = 0f;
             _sweepPacketsSent = 0;

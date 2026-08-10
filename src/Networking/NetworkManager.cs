@@ -325,7 +325,11 @@ namespace SeapowerMultiplayer
                         PluginVersion   = PluginInfo.PLUGIN_VERSION,
                         IsPvP           = Plugin.Instance.CfgPvP.Value,
                         GameVersion     = ProtocolInfo.GameVersion,
+                        GameplayOptions = RemoteGameplayOptions.PackLocal(),
+                        ModFingerprint  = ModSetCheck.LocalFingerprint(),
+                        ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
                     };
+                    ModSetCheck.LogLocal("client");
                     _handshake = HandshakeState.AwaitingWelcome;
                     _handshakeDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
                     SendToServer(hello);
@@ -354,6 +358,7 @@ namespace SeapowerMultiplayer
                 WeaponHatchHandler.Reset();
                 FlightDeckStreamer.Reset();
                 FlightDeckStateApplier.Reset();
+                RemoteGameplayOptions.Reset();
                 ViewportHintSender.Reset();
                 HostEntityStreamer.ClearViewportHint();
                 SpawnReplicator.Reset();
@@ -706,13 +711,35 @@ namespace SeapowerMultiplayer
             _handshake = HandshakeState.Established;
             _handshakeDeadline = -1f;
             VersionMismatchNotice = null;
+
+            // Only after the refusal checks above: a client that is going to be turned
+            // away has no options worth adopting, and its byte may not even mean what
+            // this build thinks it does.
+            RemoteGameplayOptions.Apply(msg.GameplayOptions);
+
             BroadcastToClients(new WelcomeMessage
             {
-                Accepted      = true,
-                IsPvP         = Plugin.Instance.CfgPvP.Value,
-                ClientUidBase = ProtocolInfo.ClientUidBase,
-                StateRateHz   = 10,
+                Accepted        = true,
+                IsPvP           = Plugin.Instance.CfgPvP.Value,
+                ClientUidBase   = ProtocolInfo.ClientUidBase,
+                StateRateHz     = 10,
+                GameplayOptions = RemoteGameplayOptions.PackLocal(),
+                ModFingerprint  = ModSetCheck.LocalFingerprint(),
+                ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
             });
+
+            // After the clear above, not before: acceptance resets the notice, and this
+            // is a warning that has to survive it. A mod mismatch does not refuse - it
+            // is allowed to be a cosmetic pack - but it is the likeliest explanation for
+            // the desyncs that follow, so both players are told.
+            ModSetCheck.LogLocal("host");
+            var modWarning = ModSetCheck.Compare(msg.ModFingerprint, msg.ModCount);
+            if (modWarning != null)
+            {
+                Telemetry.Count("handshake.modMismatch");
+                Log.LogWarning($"[Mods] {modWarning}");
+                VersionMismatchNotice = modWarning;
+            }
             Log.LogInfo($"[Handshake] Client accepted (plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}, game {ProtocolInfo.GameVersion}). Established.");
             ReconnectManager.OnPeerEstablished();
         }
@@ -739,6 +766,17 @@ namespace SeapowerMultiplayer
             SessionParams = msg;
             _handshake = HandshakeState.Established;
             VersionMismatchNotice = null;
+            RemoteGameplayOptions.Apply(msg.GameplayOptions);
+
+            // See the host half in HandleHello - both ends warn, so whichever player is
+            // looking at their own screen when things go strange has the explanation.
+            var modWarning = ModSetCheck.Compare(msg.ModFingerprint, msg.ModCount);
+            if (modWarning != null)
+            {
+                Telemetry.Count("handshake.modMismatch");
+                Log.LogWarning($"[Mods] {modWarning}");
+                VersionMismatchNotice = modWarning;
+            }
             // Before the session load starts, which is the point - the guest allocates
             // ids all the way through a load, so a floor armed afterwards is too late.
             GuestIdFloor.Arm(msg.ClientUidBase);

@@ -411,6 +411,26 @@ namespace SeapowerMultiplayer
             return Globals._playerTaskforce.PlottingTable?.VehicleForObject(unit);
         }
 
+        /// <summary>Throttled per (unit, order, reason) like the refusal log on the send
+        /// side. A misresolved id repeats for as long as whatever produced it lives, so
+        /// this must never be a per-message write.</summary>
+        private static readonly Dictionary<(int, Messages.OrderType, string), float> _rejectThrottle = new();
+
+        /// <summary>Cleared with the rest of the order bookkeeping at a session
+        /// boundary - the keys are entity ids, and those are only meaningful within
+        /// one battle.</summary>
+        internal static void ClearRejectThrottle() => _rejectThrottle.Clear();
+
+        private static void LogRejectedOrder(PlayerOrderMessage msg, ObjectBase unit, string reason)
+        {
+            var key = (msg.SourceEntityId, msg.Order, reason);
+            if (_rejectThrottle.TryGetValue(key, out var next) && Time.unscaledTime < next) return;
+            _rejectThrottle[key] = Time.unscaledTime + 5f;
+
+            Plugin.Log.LogWarning($"[Order] entity={msg.SourceEntityId} order={msg.Order} dropped — " +
+                                  $"{reason} (unit={unit.name})");
+        }
+
         public static void Apply(PlayerOrderMessage msg)
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
@@ -425,6 +445,38 @@ namespace SeapowerMultiplayer
                     _orderNotFoundCount = 0;
                     _lastOrderNotFoundLogTime = Time.unscaledTime;
                 }
+                return;
+            }
+
+            // Id-space collision defence, and the reason it is defence in DEPTH: the
+            // precondition was removed when the guest's allocator got its id floor, so
+            // nothing should reach here misresolved. FindById still answers from
+            // whichever registry hits first with no notion of which id space the caller
+            // holds, so a stale pre-floor id or a future regression lands a unit order
+            // on a pooled decoy and it silently takes it - playtest 28's id 2446, which
+            // spawned as an aircraft and then answered as usn_rr144_chaff for every
+            // order aimed at it. UnitReplicaDriver.Apply has had this check all along;
+            // the order path did not.
+            //
+            // A weapon is never a legitimate target for a player order in either
+            // direction - OrderSyncHelper refuses to ORIGINATE one for a WeaponBase at
+            // both ends, so anything arriving for one is misresolved by definition.
+            if (unit is WeaponBase)
+            {
+                LogRejectedOrder(msg, unit, "resolved onto a weapon");
+                return;
+            }
+
+            // A pooled object handed back with its parameters stripped. Nothing
+            // downstream expects one: Order.setOrder → SearchForHomeBase →
+            // CanAcceptAircraft dereferences vehicle._obp._objectIniName inside a
+            // FindIndex predicate (ObjectBase.cs:8479) with no guard, though the same
+            // method does guard its OWN _obp eleven lines earlier. That throw is the
+            // first of playtest 28's two client NRE stacks, 18 a battle, and every one
+            // abandoned the rest of that order's application.
+            if (unit._obp == null)
+            {
+                LogRejectedOrder(msg, unit, "recycled object with no parameters");
                 return;
             }
 
@@ -717,12 +769,25 @@ namespace SeapowerMultiplayer
                     {
                         if (unit is Submarine mastSub)
                         {
-                            switch ((int)msg.Heading)
+                            int  mastId = (int)msg.Heading;
+                            bool want   = msg.Speed > 0.5f;
+
+                            // SET, not flip. The order carries the state the sender's
+                            // player asked for, so a machine already holding it has
+                            // nothing to do - which is what makes the order idempotent
+                            // and lets it survive arriving late, twice, or while the
+                            // sensor reassert is mid-argument about the same mast.
+                            // Still executed through the game's own toggle so the
+                            // Enable/Disable side effects stay the game's.
+                            if (OrderSyncHelper.MastIsUp(mastSub, mastId) != want)
                             {
-                                case 0: mastSub.toggleSnorkelMast(); break;
-                                case 1: mastSub.togglePeriscopeMast(); break;
-                                case 2: mastSub.toggleRadarMast(); break;
-                                case 3: mastSub.toggleESMMast(); break;
+                                switch (mastId)
+                                {
+                                    case 0: mastSub.toggleSnorkelMast(); break;
+                                    case 1: mastSub.togglePeriscopeMast(); break;
+                                    case 2: mastSub.toggleRadarMast(); break;
+                                    case 3: mastSub.toggleESMMast(); break;
+                                }
                             }
                         }
                         break;
@@ -970,11 +1035,104 @@ namespace SeapowerMultiplayer
                         Plugin.Log.LogWarning($"[Order] unhandled: {msg.Order}");
                         break;
                 }
+
+                // The side effects a relayed order never inherited. Both run inside the
+                // ApplyingFromNetwork scope, so nothing they touch echoes back out.
+                ApplySingleplayerSideEffects(unit, msg.Order);
             }
             finally
             {
                 ApplyingFromNetwork = false;
             }
+        }
+
+        /// <summary>What the single-player path would have done around the order, and
+        /// this one did not.
+        ///
+        /// Every case above rebuilds the ORDER and nothing else. In the game, a player
+        /// giving that same order goes through a UI state that does two further things
+        /// on the way past, and a relayed order reaching the unit directly skips both -
+        /// so the unit obeys while the rest of the world still believes what it did
+        /// before the click.</summary>
+        private static void ApplySingleplayerSideEffects(ObjectBase unit, Messages.OrderType order)
+        {
+            if (GrantsFormationIndependence(order)) GrantIndependence(unit);
+            if (ClearsStandingRtb(order))           ClearStandingRtb(unit);
+        }
+
+        /// <summary>Orders whose single-player path calls
+        /// <c>Formation.MakeUnitActIndependently</c> - UnitSelectedState (move/waypoint),
+        /// AttackingState (attack), SonobuoyLineState / DipSonarPlacementState, and
+        /// InitScoutOrder - each granting it as the player commits the order.
+        ///
+        /// NOT speed, heading, depth or EMCON: those are things a unit does while
+        /// holding station, and granting independence for them would break every
+        /// formation the moment somebody changed speed.
+        ///
+        /// NOT AttackTarget either, and the distinction matters. Its single-player path
+        /// (UnitSelectedState.AircraftAttackByClick) writes _objectToDestroy and nothing
+        /// else, so a designated wingman keeps its station and engages when the target
+        /// comes into range. Granting independence there splits the pair - the host's
+        /// copy detaches while the owner's does not, and the "Return to Formation" menu
+        /// item is enabled off ObjectBase.ActsIndependentlyInFormation, read from the
+        /// LOCAL station - so the owner would be unable to recall a plane the host had
+        /// let wander.</summary>
+        private static bool GrantsFormationIndependence(Messages.OrderType order) =>
+            order == Messages.OrderType.MoveTo
+            || order == Messages.OrderType.FireWeapon
+            || order == Messages.OrderType.DropSonobuoy
+            || order == Messages.OrderType.AttackAtWaypoint;
+
+        /// <summary>Orders whose single-player path ends in
+        /// <c>setOrder(Order.Type.None, ...)</c> - OrderSetCourse and ObjectBase.CeaseFire
+        /// both do, which is how a player's own click releases an aircraft from RTB.
+        ///
+        /// RemoveWaypoints is deliberately NOT here. SPMM captures
+        /// ObjectBase.RemoveWaypoints directly, and the deck-side ReturnToBase.onEnter
+        /// calls it while INITIALISING an RTB - so that byte on the wire means "the RTB
+        /// is setting itself up" as often as "the player wants out of it", and clearing
+        /// on it would cancel the RTB the host had just begun.</summary>
+        private static bool ClearsStandingRtb(Messages.OrderType order) =>
+            order == Messages.OrderType.MoveTo
+            || order == Messages.OrderType.Stop
+            || order == Messages.OrderType.ClearOrders
+            || order == Messages.OrderType.AttackAtWaypoint;
+
+        /// <summary>UnitFormation.OnUpdate drags any non-leader station back to formation
+        /// unless UnitActsIndependently is set (UnitFormation.cs:1282), and the only
+        /// writers are the local input paths. A relayed order rebuilt the task without
+        /// going near them, so the station still believed it was keeping formation and
+        /// the unit was pulled back on the next pass while its new order tried to run -
+        /// playtest 34's "flickering between engaging track and returning to formation",
+        /// with the host's log showing one relayed task re-inserted four times against a
+        /// single target.
+        ///
+        /// An engage task is not a waypoint, so OnUpdate's !HasWaypoints() guard does not
+        /// stop it either. MakeUnitActIndependently no-ops for a leader and for a unit
+        /// with no station, so it needs no guard of its own.</summary>
+        private static void GrantIndependence(ObjectBase unit)
+            => unit.Formation?.MakeUnitActIndependently(unit);
+
+        /// <summary>The aircraft state machine leaves the RTB family on one condition -
+        /// CurrentOrder.Value.OrderType != ReturnToBase - and nothing in the relayed
+        /// path was writing CurrentOrder at all. A rebuilt MoveTo is a bare
+        /// setWaypointTask, so on the host the other player's aircraft flew the new
+        /// order (a waypoint task runs whatever state it is in) while ReturnToBase /
+        /// Winchester stood for the rest of the battle: playtest 37's "it follows it but
+        /// status still shows RTB winchester".
+        ///
+        /// displayOrderText false - the machine whose player clicked has already put the
+        /// line in its own order log, and this is the other one.</summary>
+        private static void ClearStandingRtb(ObjectBase unit)
+        {
+            var order = unit.CurrentOrder?.Value;
+            if (order == null || order.OrderType != Order.Type.ReturnToBase) return;
+
+            // Cast disambiguates the ObjectBase overload from the GeoPosition one, and
+            // picks the same one the game's own clear uses (ObjectBase.cs:2850).
+            unit.setOrder(Order.Type.None, (ObjectBase)null!, displayOrderText: false);
+            Plugin.Log.LogInfo($"[Order] cleared standing ReturnToBase on {unit.name} " +
+                               "- superseded by a relayed order");
         }
 
         /// <summary>Formation membership, shape and formation-wide orders. Runs inside
@@ -1005,6 +1163,17 @@ namespace SeapowerMultiplayer
                 {
                     var target = StateSerializer.FindById(msg.TargetEntityId)?.Formation;
                     if (target == null || target == formation) break;
+                    // See SpawnReplicator.PrepareForJoin - a corpse still seated in the
+                    // target takes AddUnit down through the collection-changed handlers,
+                    // and with it the rest of this order. Unlike the spawn path there is
+                    // no retry here; the membership re-establishes from the next spawn
+                    // or census replay, which is cheaper than an exception mid-drain.
+                    if (!SpawnReplicator.PrepareForJoin(target))
+                    {
+                        Plugin.Log.LogWarning($"[Formation] Join deferred: target formation of " +
+                                              $"{msg.TargetEntityId} is not fit to seat {unit.UniqueID}");
+                        break;
+                    }
                     formation?.DetachUnit(unit);
                     target.AddUnit(unit);
                     break;

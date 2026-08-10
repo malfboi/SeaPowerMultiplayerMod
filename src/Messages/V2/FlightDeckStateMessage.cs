@@ -32,6 +32,7 @@ namespace SeapowerMultiplayer.Messages
         // Authoritative availability the UI shows for "aircraft to prepare".
         public readonly List<VehicleCount>  VehicleNumbers  = new();
         public readonly List<SquadronCount> SquadronNumbers = new();
+        public readonly List<AmmoCategory> AccountableAmmo = new();
 
         // The full task queue, in the host's display order. Pending rows carry the
         // indices to rebuild an interactive PendingLaunchTask client-side; all other
@@ -40,6 +41,7 @@ namespace SeapowerMultiplayer.Messages
 
         public struct VehicleCount  { public byte VehicleIdx; public short Numbers; }
         public struct SquadronCount { public byte VehicleIdx; public byte SquadronIdx; public short Numbers; }
+        public struct AmmoCategory  { public string Name; public int Count; }
 
         public struct TaskRow
         {
@@ -92,6 +94,13 @@ namespace SeapowerMultiplayer.Messages
                 writer.Put(SquadronNumbers[i].VehicleIdx);
                 writer.Put(SquadronNumbers[i].SquadronIdx);
                 writer.Put(SquadronNumbers[i].Numbers);
+            }
+
+            writer.Put((byte)AccountableAmmo.Count);
+            for (int i = 0; i < AccountableAmmo.Count; i++)
+            {
+                writer.Put(AccountableAmmo[i].Name ?? "");
+                writer.Put(AccountableAmmo[i].Count);
             }
 
             writer.Put((byte)Tasks.Count);
@@ -149,6 +158,14 @@ namespace SeapowerMultiplayer.Messages
                     VehicleIdx  = reader.GetByte(),
                     SquadronIdx = reader.GetByte(),
                     Numbers     = reader.GetShort(),
+                });
+
+            int aCount = reader.GetByte();
+            for (int i = 0; i < aCount; i++)
+                msg.AccountableAmmo.Add(new AmmoCategory
+                {
+                    Name  = reader.GetString(),
+                    Count = reader.GetInt(),
                 });
 
             int tCount = reader.GetByte();

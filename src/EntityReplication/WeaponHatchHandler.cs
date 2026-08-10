@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using HarmonyLib;
 using SeaPower;
 using SeapowerMultiplayer.Messages;
 using UnityEngine;
@@ -26,6 +27,14 @@ namespace SeapowerMultiplayer
     /// </summary>
     public static class WeaponHatchHandler
     {
+        /// <summary>The launcher's staged round. Private on WeaponSystemLauncher, and
+        /// needed on both ends: the host reads it to say WHAT is being loaded, the
+        /// client writes it so spawnWeapons() has something to put on the rails. One
+        /// lookup, shared - if a future build renames it the rail replication degrades
+        /// to nothing rather than throwing.</summary>
+        internal static readonly AccessTools.FieldRef<WeaponSystemLauncher, Ammunition>? SpawnedAmmoRef =
+            AccessTools.FieldRefAccess<WeaponSystemLauncher, Ammunition>("_spawnedAmmunition");
+
         /// <summary>Containers with an animation in flight, pumped every frame.</summary>
         private static readonly List<WeaponContainer> _playing = new();
 
@@ -46,6 +55,12 @@ namespace SeapowerMultiplayer
             var systems = unit._obp?._weaponSystems;
             if (systems == null || msg.MountIndex < 0 || msg.MountIndex >= systems.Count) return;
             if (!(systems[msg.MountIndex] is WeaponSystemLauncher launcher)) return;
+
+            // Rail load / unload is launcher-level and must be tested before the
+            // container bound below - it carries no container index of its own.
+            if (msg.Unload) { UnloadRails(launcher); return; }
+            if (!string.IsNullOrEmpty(msg.LoadAmmo)) { LoadRails(unit, launcher, msg.LoadAmmo); return; }
+
             if (msg.ContainerId >= launcher._containers.Count) return;
 
             if (msg.IsSystem)
@@ -82,6 +97,47 @@ namespace SeapowerMultiplayer
 
             container.closeHatches();
             Track(container);
+        }
+
+        /// <summary>Put the host's round on this launcher's rails.
+        ///
+        /// Driven through the launcher's OWN playLoadAnimation(spawnWeapons) - the exact
+        /// pair its state machine uses (WeaponSystemLauncher.cs:1463) - rather than
+        /// calling WeaponContainer.load per container. That method handles the case with
+        /// no load animation (spawn immediately, mark LoadingDone), refuses to start on
+        /// top of an open/close/unload clip already playing, and hands the spawned
+        /// objects to the animation so they move with it. Reproducing any of that by
+        /// hand would be guessing at it.
+        ///
+        /// The Ammunition instance comes from the unit's own dictionary: both machines
+        /// build it from the same ini, so the host's ammunition file name resolves to
+        /// the twin instance here.</summary>
+        private static void LoadRails(ObjectBase unit, WeaponSystemLauncher launcher, string ammoName)
+        {
+            if (SpawnedAmmoRef == null) return;
+
+            var dict = unit.AmmunitionNameToAmmunitionDictionary;
+            if (dict == null || !dict.TryGetValue(ammoName, out var ammo) || ammo == null)
+            {
+                Plugin.Log.LogWarning($"[Hatch] {unit.name} mount has no ammunition '{ammoName}' " +
+                                      "locally - rails left empty.");
+                return;
+            }
+
+            SpawnedAmmoRef(launcher) = ammo;
+            launcher.playLoadAnimation(launcher.spawnWeapons);
+        }
+
+        /// <summary>Take everything back off the rails. returnAmmo:false because the
+        /// client's magazine counts are replicated from the host by WeaponStatusSync -
+        /// crediting a round back here would fight that with a number nobody asked
+        /// for.</summary>
+        internal static void UnloadRails(WeaponSystemLauncher launcher)
+        {
+            var containers = launcher._containers;
+            if (containers == null) return;
+            for (int i = 0; i < containers.Count; i++)
+                containers[i]?.unload(returnAmmo: false);
         }
 
         /// <summary>The launcher's own outer door. Same shape as a container hatch but

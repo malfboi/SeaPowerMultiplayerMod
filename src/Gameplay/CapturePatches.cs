@@ -94,37 +94,125 @@ namespace SeapowerMultiplayer
             if (!CaptureState.HostCaptureActive) return;
             if (__instance._ap == null) return;
 
-            var weaponClass = CaptureState.WeaponClassOf(__instance);
-            bool isDecoy = __instance is ChaffCloud || __instance is Noisemaker;
-            if (weaponClass == null && !isDecoy) return; // gun shells etc. - cosmetic events handle those
+            var msg = Build(__instance, targetObject, isSubmunition);
+            if (msg == null) return; // gun shells etc. - cosmetic events handle those
+
+            NetworkManager.Instance.BroadcastToClients(msg);
+            CaptureState.RecordSpawn(msg);
+            Telemetry.Count(msg.Kind == SpawnKind.Decoy ? "v2.capturedDecoy" : "v2.capturedSpawn");
+        }
+
+        /// <summary>The spawn message for a weapon, from the weapon's CURRENT state.
+        /// Shared with <see cref="WeaponLedgerRebuild"/> so a re-ledgered round and a
+        /// freshly launched one cannot describe themselves differently. Returns null
+        /// for classes that are not replicated.</summary>
+        internal static EntitySpawnMessage? Build(WeaponBase wb, ObjectBase? targetObject,
+                                                  bool isSubmunition)
+        {
+            if (wb._ap == null) return null;
+
+            var weaponClass = CaptureState.WeaponClassOf(wb);
+            bool isDecoy = wb is ChaffCloud || wb is Noisemaker;
+            if (weaponClass == null && !isDecoy) return null;
 
             var geo = Utils.worldPositionFromUnityToLongLat(
-                __instance.transform.position, Globals._currentCenterTile);
-            var aim = __instance.AimPointGeoPosition;
-            var shooter = StateSerializer.GetLaunchPlatform(__instance);
+                wb.transform.position, Globals._currentCenterTile);
+            var aim = wb.AimPointGeoPosition;
+            var shooter = StateSerializer.GetLaunchPlatform(wb);
 
-            var msg = new EntitySpawnMessage
+            return new EntitySpawnMessage
             {
                 Kind        = isDecoy ? SpawnKind.Decoy : SpawnKind.Weapon,
-                EntityId    = __instance.UniqueID,
+                EntityId    = wb.UniqueID,
                 WeaponClass = weaponClass ?? 0,
-                AmmoName    = __instance._ap._ammunitionFileName,
+                AmmoName    = wb._ap._ammunitionFileName,
                 ShooterId   = shooter != null ? shooter.UniqueID : 0,
                 TargetId    = targetObject != null ? targetObject.UniqueID : 0,
                 LonDeg      = geo._longitude,
                 LatDeg      = geo._latitude,
                 HeightM     = (float)geo._height,
-                HeadingQ    = GeoCodec.PackHeading(__instance.transform.eulerAngles.y),
-                PitchQ      = GeoCodec.PackAngleCdeg(__instance.transform.eulerAngles.x),
-                SpeedQ      = GeoCodec.PackSpeedKts(__instance._velocityInKnots),
+                HeadingQ    = GeoCodec.PackHeading(wb.transform.eulerAngles.y),
+                PitchQ      = GeoCodec.PackAngleCdeg(wb.transform.eulerAngles.x),
+                SpeedQ      = GeoCodec.PackSpeedKts(wb._velocityInKnots),
                 AimLonDeg   = aim._longitude,
                 AimLatDeg   = aim._latitude,
                 AimHeightM  = (float)aim._height,
                 Flags       = isSubmunition ? EntitySpawnMessage.FlagSubmunition : (byte)0,
             };
-            NetworkManager.Instance.BroadcastToClients(msg);
-            CaptureState.RecordSpawn(msg);
-            Telemetry.Count(isDecoy ? "v2.capturedDecoy" : "v2.capturedSpawn");
+        }
+    }
+
+    /// <summary>Put every round still in the air back in the ledger, at the session
+    /// boundary, after <c>CaptureState.Clear()</c> has emptied it.
+    ///
+    /// The clear is right and stays: it is what closed the ghosts of item 44, where
+    /// the PREVIOUS mission's ledger entries were replayed into the next battle. But
+    /// it also threw away the entries for rounds that are in the air RIGHT NOW, and
+    /// the ledger is the only record either self-heal path has - EntityCensusManager
+    /// builds its manifest from UnitRegistry plus the ledger, and HandleDiffRequest
+    /// can only replay from the ledger. So after a mid-battle resync every missile,
+    /// torpedo and bomb already in flight was invisible on the client: never spawned,
+    /// never asked for, and its eventual impact addressed to an id the client had
+    /// never heard of. The save the client loads DOES contain those rounds, and the
+    /// game's own SceneCreator.LaunchWeapons re-launches them - which the launch
+    /// canary then blocks, correctly, because a locally simulated round under host
+    /// authority is a worse answer than none.
+    ///
+    /// Rebuilt from live objects rather than by preserving the old entries, which is
+    /// what keeps item 44 closed: nothing from a previous mission can survive, because
+    /// nothing that is not currently airborne in this one is looked at.</summary>
+    public static class WeaponLedgerRebuild
+    {
+        // protected on WeaponBase. Fail CLOSED if a future build renames it: ledgering
+        // an unlaunched round would have the client spawn replicas for missiles still
+        // sitting in their tubes, which is worse than the gap this closes.
+        private static readonly System.Reflection.FieldInfo? _isLaunchedField =
+            AccessTools.Field(typeof(WeaponBase), "_isLaunched");
+
+        private static bool _warned;
+
+        public static void Run()
+        {
+            if (_isLaunchedField == null)
+            {
+                if (!_warned)
+                {
+                    _warned = true;
+                    Plugin.Log.LogWarning("[Session] WeaponBase._isLaunched not found - in-flight " +
+                        "weapons will not survive this sync (cannot tell airborne rounds from stowed).");
+                }
+                return;
+            }
+
+            int n = Relist(UnitRegistry.Missiles)
+                  + Relist(UnitRegistry.Torpedoes)
+                  + Relist(UnitRegistry.Bombs);
+
+            if (n > 0)
+                Plugin.Log.LogInfo($"[Session] Re-ledgered {n} weapon(s) still in flight — " +
+                    "the census will replay them to the client after the load.");
+        }
+
+        private static int Relist<T>(IReadOnlyList<T> weapons) where T : WeaponBase
+        {
+            int n = 0;
+            for (int i = 0; i < weapons.Count; i++)
+            {
+                var wb = weapons[i];
+                if (wb == null || wb.IsDestroyed || wb.UniqueID == 0) continue;
+                if (!(_isLaunchedField!.GetValue(wb) is bool launched) || !launched) continue;
+
+                // isSubmunition is not recoverable after the fact - it is an argument to
+                // the launch, not state on the round. It only marks the spawn as a
+                // submunition for the client's presentation, so a re-ledgered cluster
+                // round loses that nuance and nothing else.
+                var msg = Patch_V2_WeaponLaunch_Capture.Build(wb, wb._initialSetTargetObject, false);
+                if (msg == null) continue;
+
+                CaptureState.RecordSpawn(msg);
+                n++;
+            }
+            return n;
         }
     }
 
@@ -425,6 +513,57 @@ namespace SeapowerMultiplayer
             });
             Telemetry.Count("v2.capturedHatch");
         }
+
+        /// <summary>The rail load / unload, which is a launcher-level event rather than a
+        /// container one - spawnWeapons() walks every container itself.
+        ///
+        /// Not deduped like the hatches above: load and unload are already discrete
+        /// one-shots from the launcher's state machine (each fires once per transition
+        /// into LoadAmmunition / UnloadAmmunition), and unlike a hatch there is no
+        /// "already in that state" to suppress - reloading the same ammo again is a real
+        /// event that has to reach the client.</summary>
+        internal static void OnRail(WeaponSystemLauncher launcher, string? ammoName, bool unload)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            var unit = launcher._baseObject;
+            if (unit == null) return;
+            int mountIdx = CaptureState.MountIndexOf(unit, launcher);
+            if (mountIdx < 0) return;
+            if (!unload && string.IsNullOrEmpty(ammoName)) return;
+
+            NetworkManager.Instance.BroadcastToClients(new WeaponHatchEventMessage
+            {
+                UnitId     = unit.UniqueID,
+                MountIndex = (short)mountIdx,
+                LoadAmmo   = unload ? "" : ammoName!,
+                Unload     = unload,
+            });
+            Telemetry.Count(unload ? "v2.capturedRailUnload" : "v2.capturedRailLoad");
+        }
+    }
+
+    /// <summary>The launcher putting a round on its rails. Captured at
+    /// playLoadAnimation because that is the one place the decision is already made and
+    /// the ammunition is known - _spawnedAmmunition is assigned immediately before the
+    /// call (WeaponSystemLauncher.cs:1462-1463).</summary>
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.playLoadAnimation))]
+    public static class Patch_V2_RailLoad_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance)
+        {
+            var ammoRef = WeaponHatchHandler.SpawnedAmmoRef;
+            if (ammoRef == null) return;
+            HatchStateCapture.OnRail(__instance, ammoRef(__instance)?._ap?._ammunitionFileName, unload: false);
+        }
+    }
+
+    /// <summary>And taking it off again - a launcher swapping to different ammunition
+    /// unloads first.</summary>
+    [HarmonyPatch(typeof(WeaponSystemLauncher), nameof(WeaponSystemLauncher.playUnloadAnimation))]
+    public static class Patch_V2_RailUnload_Capture
+    {
+        static void Postfix(WeaponSystemLauncher __instance)
+            => HatchStateCapture.OnRail(__instance, null, unload: true);
     }
 
     /// <summary>The launcher's SYSTEM animation - the outer door over a whole launcher
@@ -701,6 +840,37 @@ namespace SeapowerMultiplayer
             Telemetry.Count("v2.capturedAirborne");
             Plugin.Log.LogInfo($"[Capture] Airborne flip id={unit.UniqueID} ({unit.name})");
         }
+
+        /// <summary>A still-on-deck launch has just been given its flight - update the
+        /// ledger entry and re-send it, so the client can join the replica to the
+        /// formation now instead of at wheels-up. See
+        /// <see cref="Patch_V2_DeckFormation_Capture"/> for why the gap existed.
+        ///
+        /// Deck phase is NOT cleared here and the deck flag stays on the message: the
+        /// aircraft is still parented to the ship, and the client's wheels-up branch
+        /// keys off that flag being absent. The callsign rides along because
+        /// getObjectToLaunch writes it before launchVehicle forms the flight up, so by
+        /// the time this fires it is real too.</summary>
+        internal static void OnFormationKnown(ObjectBase unit)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            if (unit == null) return;
+            if (!CaptureState.DeckPhase.Contains(unit.UniqueID)) return;
+            if (!CaptureState.SpawnLedger.TryGetValue(unit.UniqueID, out var spawn)) return;
+
+            // Null on the detach half of the setter, and on a formation torn down
+            // mid-launch. Nothing to join, and 0 is what the client already holds.
+            var leader = unit.Formation?.LeaderStation?.UnitObject;
+            if (leader == null || leader.UniqueID == 0) return;
+            if (spawn.FormationLeaderId == leader.UniqueID) return; // already told
+
+            spawn.FormationLeaderId = leader.UniqueID;
+            spawn.UnitName = unit._obp?._objectName ?? spawn.UnitName;
+
+            NetworkManager.Instance.BroadcastToClients(spawn);
+            Telemetry.Count("v2.capturedDeckFormation");
+            Plugin.Log.LogInfo($"[Capture] Deck flight id={unit.UniqueID} joins leader {leader.UniqueID}");
+        }
     }
 
     [HarmonyPatch(typeof(ObjectsManager), nameof(ObjectsManager.createAircraft))]
@@ -723,6 +893,29 @@ namespace SeapowerMultiplayer
             => AircraftSpawnCapture.OnUnitCreated(__result, UnitType.Helicopter, squadronReference,
                 loadoutVariant, homeBase, parent, helicopterIniName, helicopterNumber, geoPosition, heading,
                 taskForce, nationOverride);
+    }
+
+    /// <summary>A deck launch learns its flight AFTER its spawn has gone out, and
+    /// waiting for wheels-up to say so is a visible gap.
+    ///
+    /// FlightDeck.launchVehicle creates the aircraft (getObjectToLaunch →
+    /// createAircraft, where the spawn capture fires) and only then forms it up, a
+    /// few lines later - so the deck-phase spawn genuinely has no formation to
+    /// report and goes out with FormationLeaderId 0. Until now the first message
+    /// carrying the flight was the wheels-up re-send, which is minutes of ready-up
+    /// later: on the client those aircraft sat in the formation manager unattached
+    /// for the whole deck phase and then snapped into a flight as they lifted off,
+    /// while the host showed them in it from the moment they appeared.
+    ///
+    /// Re-sending the ledger entry from the formation call closes that without a new
+    /// message or a protocol field - it is the same EntitySpawn, updated in place,
+    /// and the census already replays whatever the ledger holds. The unit STAYS in
+    /// DeckPhase: this is an identity update, not the airborne flip, and the
+    /// wheels-up re-send still has to follow.</summary>
+    [HarmonyPatch(typeof(ObjectBase), "set_Formation")]
+    public static class Patch_V2_DeckFormation_Capture
+    {
+        static void Postfix(ObjectBase __instance) => AircraftSpawnCapture.OnFormationKnown(__instance);
     }
 
     [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.giveControl))]
