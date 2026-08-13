@@ -37,26 +37,43 @@ namespace SeapowerMultiplayer
 
         // ── Host capture ──────────────────────────────────────────────────────
 
-        private static readonly Dictionary<int, (string text, byte[] mounts, float range)> _lastSent = new(256);
+        // PER TEAM. One delta table with two audiences is silently wrong: whatever it
+        // already sent to the first team it then withholds from the second, so the
+        // second team's status lines simply stop updating with nothing to indicate why.
+        private static readonly Dictionary<Team, Dictionary<int, (string text, byte[] mounts, float range)>> _lastSentByTeam =
+            new()
+            {
+                [Team.Blue] = new Dictionary<int, (string, byte[], float)>(256),
+                [Team.Red]  = new Dictionary<int, (string, byte[], float)>(256),
+            };
+
         private static readonly UnitStatusMessage _msg = new();
         private static readonly HashSet<int> _seen = new(256);
         private static readonly List<UnitStatusMessage.Mount> _scratch = new(64);
         private static readonly List<byte> _packed = new(128);
         private static float _nextFullSweep;
 
-        /// <summary>PvP: only the remote player's own taskforce. A status line that
-        /// names the track a ship is engaging is intelligence, and so is seeing an
-        /// opponent's mounts go to Engaging. Co-op: the whole friendly side, which
-        /// both players command and already share a contact picture for.</summary>
-        private static bool IsClientVisible(ObjectBase unit, bool pvp)
+        /// <summary>
+        /// May a player on <paramref name="team"/> see this unit's status?
+        ///
+        /// The rule is simply "your own side" - a status line naming the track a ship is
+        /// engaging is intelligence, and so is watching an opponent's mounts go to
+        /// Engaging. The old mode-keyed version said the same thing twice in two
+        /// different ways (co-op: the friendly side; PvP: the enemy taskforce, which was
+        /// that player's own side after the swap); stating it once per team covers every
+        /// seating, including two players sharing one side.
+        ///
+        /// Runs on the HOST, so Blue is always Globals._playerTaskforce.
+        /// </summary>
+        private static bool IsVisibleTo(ObjectBase unit, Team team)
         {
             var tf = unit._taskforce;
             if (tf == null) return false;
-            if (pvp) return tf == Globals._enemyTaskforce;
+            if (team == Team.Red) return tf == Globals._enemyTaskforce;
             return tf.Side == Taskforce.TfType.Player || tf.Side == Taskforce.TfType.Ally;
         }
 
-        /// <summary>Host: sweep the units the client can inspect and send what changed.</summary>
+        /// <summary>Host: sweep each team's own units and send that team what changed.</summary>
         public static void HostBroadcast()
         {
             if (!Plugin.Instance.CfgIsHost.Value) return;
@@ -65,11 +82,23 @@ namespace SeapowerMultiplayer
             bool full = Time.unscaledTime >= _nextFullSweep;
             if (full) _nextFullSweep = Time.unscaledTime + FullSweepInterval;
 
+            // Slot 0 is the host and needs nothing sent to it, so only teams with a
+            // GUEST on them are worth sweeping.
+            SweepTeam(Team.Blue, full);
+            SweepTeam(Team.Red, full);
+        }
+
+        private static void SweepTeam(Team team, bool full)
+        {
+            if (PlayerRegistry.CountOnTeam(team) == 0) return;
+            if (team == Team.Blue && PlayerRegistry.TeammateCount(0) == 0) return; // host alone on Blue
+
+            var lastSent = _lastSentByTeam[team];
+
             _msg.Reset();
             _msg.IsFull = full;
             _seen.Clear();
 
-            bool pvp = Plugin.Instance.CfgPvP.Value;
             var all = UnitRegistry.All;
             for (int i = 0; i < all.Count; i++)
             {
@@ -77,7 +106,7 @@ namespace SeapowerMultiplayer
                 if (unit == null || unit.UniqueID == 0) continue;
                 if (unit is WeaponBase) continue;
                 if (unit.IsDestroyed) continue;
-                if (!IsClientVisible(unit, pvp)) continue;
+                if (!IsVisibleTo(unit, team)) continue;
 
                 string text = unit.CurrentOrderText?.Value ?? "";
                 BuildMounts(unit);
@@ -86,12 +115,12 @@ namespace SeapowerMultiplayer
                 int id = unit.UniqueID;
                 _seen.Add(id);
 
-                bool known = _lastSent.TryGetValue(id, out var previous);
+                bool known = lastSent.TryGetValue(id, out var previous);
                 if (!full && known && previous.text == text && SamePacked(previous.mounts)
                     && Mathf.Abs(previous.range - range) < FuelDeltaKm)
                     continue;
 
-                _lastSent[id] = (text, _packed.ToArray(), range);
+                lastSent[id] = (text, _packed.ToArray(), range);
                 _msg.Entries.Add(new UnitStatusMessage.Entry
                 {
                     UniqueId  = id,
@@ -100,11 +129,11 @@ namespace SeapowerMultiplayer
                     Mounts    = new List<UnitStatusMessage.Mount>(_scratch),
                 });
 
-                if (_msg.Entries.Count >= MaxEntriesPerPacket) Flush();
+                if (_msg.Entries.Count >= MaxEntriesPerPacket) Flush(team);
             }
 
-            if (full) PruneLastSent();
-            if (_msg.Entries.Count > 0) Flush();
+            if (full) PruneLastSent(lastSent);
+            if (_msg.Entries.Count > 0) Flush(team);
         }
 
         /// <summary>How far RangeInKm has to move before it is worth a packet.
@@ -210,18 +239,18 @@ namespace SeapowerMultiplayer
 
         /// <summary>Forget units that are gone, so a re-used id is not mistaken for
         /// unchanged and skipped.</summary>
-        private static void PruneLastSent()
+        private static void PruneLastSent(Dictionary<int, (string text, byte[] mounts, float range)> lastSent)
         {
-            if (_lastSent.Count == _seen.Count) return;
+            if (lastSent.Count == _seen.Count) return;
             var stale = new List<int>();
-            foreach (var id in _lastSent.Keys)
+            foreach (var id in lastSent.Keys)
                 if (!_seen.Contains(id)) stale.Add(id);
-            for (int i = 0; i < stale.Count; i++) _lastSent.Remove(stale[i]);
+            for (int i = 0; i < stale.Count; i++) lastSent.Remove(stale[i]);
         }
 
-        private static void Flush()
+        private static void Flush(Team team)
         {
-            NetworkManager.Instance.BroadcastToClients(_msg, DeliveryMethod.ReliableOrdered);
+            NetworkManager.Instance.SendToTeam(team, _msg, DeliveryMethod.ReliableOrdered);
             Telemetry.Count("v2.unitStatusSent");
             _msg.Reset(); // clears IsFull - continuation packets must not re-assert it
         }
@@ -435,7 +464,7 @@ namespace SeapowerMultiplayer
 
         public static void Reset()
         {
-            _lastSent.Clear();
+            foreach (var t in _lastSentByTeam.Values) t.Clear();
             _seen.Clear();
             _desired.Clear();
             DesiredEngage.Clear();

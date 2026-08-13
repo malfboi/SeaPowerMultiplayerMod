@@ -183,6 +183,12 @@ namespace SeapowerMultiplayer
             var msg = FormationSync.Msg(obj, FormationOp.Join);
             msg.TargetEntityId = leader.UniqueID;
             FormationSync.Send(obj, msg);
+
+            // A formation has ONE owner. Without this a unit could be dragged into
+            // someone else's formation and stay yours, and "send this formation to Bob"
+            // would then mean something different depending on which member you
+            // right-clicked. The leader's owner wins.
+            FormationOwnership.HostNormaliseFormation(__instance);
         }
     }
 

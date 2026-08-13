@@ -800,6 +800,12 @@ namespace SeapowerMultiplayer
             NetworkManager.Instance.BroadcastToClients(msg);
             CaptureState.RecordSpawn(msg);
             Telemetry.Count("v2.capturedUnitSpawn");
+
+            // An aircraft belongs to whoever owns the deck it came off. Without this a
+            // launch from a formation you own produces a unit nobody owns, and every
+            // teammate can fly it - which reads as the lock quietly failing.
+            FormationOwnership.HostOnUnitSpawned(result, homeBase);
+
             Plugin.Log.LogInfo($"[Capture] Replicating {kind} spawn id={result.UniqueID} ini={iniName} " +
                 $"home={homeBase?.UniqueID ?? 0} deck={deckLaunch}");
         }

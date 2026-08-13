@@ -114,6 +114,14 @@ namespace SeapowerMultiplayer
             _lastSent.AddRange(_current);
         }
 
+        /// <summary>Forget what was last sent, so the next tick re-states every jam
+        /// assignment for a player who has just arrived.</summary>
+        public static void ForceResend()
+        {
+            _lastSent.Clear();
+            _nextFullResend = 0f;
+        }
+
         private static void Send(List<JamStateMessage.Entry> entries)
         {
             int chunks = Mathf.Max(1, Mathf.CeilToInt(entries.Count / (float)MaxEntriesPerPacket));

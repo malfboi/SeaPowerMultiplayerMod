@@ -61,29 +61,57 @@ namespace SeapowerMultiplayer
         // whose smoothness the player can judge. Streaming those faster costs very
         // little. Until a hint arrives every unit is "far", which is exactly the
         // flat-rate behaviour this had before.
-        private static Vector3 _clientFocus;
-        private static float _clientFocusRadiusSq;
-        private static bool _hasClientFocus;
-
-        public static void OnViewportHint(Messages.ViewportHintMessage msg)
+        //
+        // ONE FOCUS PER PLAYER, and "near" is the UNION of them. A single focus point
+        // meant the last hint to arrive won: with several players watching different
+        // parts of the map they would take turns stealing the fast-rate tier from each
+        // other, and each would see everyone else's ships stutter. The base stream stays
+        // a broadcast, so widening the near set is the whole of the fix.
+        private struct Focus
         {
-            if (!Plugin.Instance.CfgIsHost.Value) return;
-            _clientFocus = msg.ToLocalUnity();
-            _clientFocusRadiusSq = msg.RadiusUnity * msg.RadiusUnity;
-            _hasClientFocus = true;
+            public Vector3 Pos;
+            public float RadiusSq;
+            public float StampedAt;
         }
 
-        public static void ClearViewportHint() => _hasClientFocus = false;
+        private static readonly Dictionary<byte, Focus> _focus = new();
 
-        /// <summary>Horizontal distance only: y is metres while x/z are ~67 m Unity
-        /// units, so a 3D compare would measure altitude against a horizontal radius
-        /// and never call an airborne unit near.</summary>
+        /// <summary>A hint older than this is from a player who has stopped sending -
+        /// disconnected mid-frame, or loading - and must stop pinning units to the fast
+        /// tier forever.</summary>
+        private const float FocusStaleSec = 5f;
+
+        public static void OnViewportHint(byte slot, Messages.ViewportHintMessage msg)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (slot == PlayerRegistry.NoSender) return;
+            _focus[slot] = new Focus
+            {
+                Pos = msg.ToLocalUnity(),
+                RadiusSq = msg.RadiusUnity * msg.RadiusUnity,
+                StampedAt = Time.unscaledTime,
+            };
+        }
+
+        public static void ClearViewportHint(byte slot) => _focus.Remove(slot);
+
+        public static void ClearAllViewportHints() => _focus.Clear();
+
+        /// <summary>Near to ANY client. Horizontal distance only: y is metres while x/z
+        /// are ~67 m Unity units, so a 3D compare would measure altitude against a
+        /// horizontal radius and never call an airborne unit near.</summary>
         private static bool IsNearClient(Vector3 worldPos)
         {
-            if (!_hasClientFocus) return false;
-            float dx = worldPos.x - _clientFocus.x;
-            float dz = worldPos.z - _clientFocus.z;
-            return dx * dx + dz * dz <= _clientFocusRadiusSq;
+            if (_focus.Count == 0) return false;
+            float now = Time.unscaledTime;
+            foreach (var f in _focus.Values)
+            {
+                if (now - f.StampedAt > FocusStaleSec) continue;
+                float dx = worldPos.x - f.Pos.x;
+                float dz = worldPos.z - f.Pos.z;
+                if (dx * dx + dz * dz <= f.RadiusSq) return true;
+            }
+            return false;
         }
 
         private readonly EntityStateBatchMessage _msg = new();
@@ -96,6 +124,15 @@ namespace SeapowerMultiplayer
         // uniformly across buckets) - no per-entity storage needed.
         private static float PhaseOf(int id)
             => HeartbeatInterval * (((id % StaggerBuckets) + StaggerBuckets) % StaggerBuckets) / StaggerBuckets;
+
+        /// <summary>The live streamer, so its change-detection can be reset from outside
+        /// (a mid-mission joiner needs everything re-sent). One component on one
+        /// DontDestroyOnLoad object, so this is a plain assignment rather than a
+        /// singleton with lifecycle machinery.</summary>
+        internal static HostEntityStreamer? Instance { get; private set; }
+
+        private void Awake() => Instance = this;
+        private void OnDestroy() { if (Instance == this) Instance = null; }
 
         private void Start() => StartCoroutine(StreamLoop());
 

@@ -302,9 +302,9 @@ namespace SeapowerMultiplayer.UI
             <TextBlock Text=""Ctrl+F9 to show/hide menu"" Margin=""8,0,0,0"" VerticalAlignment=""Center""
                        Style=""{StaticResource Dim}""/>
           </StackPanel>
-          <TextBlock Grid.Column=""3"" Text=""PvP"" VerticalAlignment=""Center""
+          <TextBlock Grid.Column=""3"" Text=""{Binding TeamBadgeText}"" VerticalAlignment=""Center""
                      Style=""{StaticResource Warn}""
-                     Visibility=""{Binding PvPBadgeVisibility}""/>
+                     Visibility=""{Binding TeamBadgeVisibility}""/>
         </Grid>
 
         <StackPanel Visibility=""{Binding BodyVisibility}"">
@@ -382,8 +382,10 @@ namespace SeapowerMultiplayer.UI
                 </Grid>
                 <Button Style=""{StaticResource Btn}"" Content=""Copy Code""
                         Command=""{Binding CopyCodeCommand}""/>
-                <Button Style=""{StaticResource Btn}"" Content=""Invite Friend""
-                        Command=""{Binding InviteFriendCommand}""/>
+                <Button Style=""{StaticResource Btn}"" Content=""Invite player to Blue""
+                        Command=""{Binding InviteBlueCommand}""/>
+                <Button Style=""{StaticResource Btn}"" Content=""Invite player to Red""
+                        Command=""{Binding InviteRedCommand}""/>
                 <Button Style=""{StaticResource Btn}"" Content=""Leave Lobby""
                         Command=""{Binding LeaveLobbyCommand}""/>
               </StackPanel>
@@ -439,6 +441,41 @@ namespace SeapowerMultiplayer.UI
             <TextBlock Text=""Receiving scene..."" Style=""{StaticResource Warn}""
                        Visibility=""{Binding ReceivingVisibility}""/>
 
+            <!-- ── PLAYERS ─────────────────────────────────────────────── -->
+            <!-- Rows carry live Buttons, so the view model rebuilds this list only
+                 when the roster version moves - not on the 10 Hz refresh. -->
+            <StackPanel Visibility=""{Binding RosterVisibility}"">
+              <TextBlock Text=""PLAYERS"" FontWeight=""Bold"" FontSize=""11"" Margin=""0,12,0,4""
+                         Foreground=""{StaticResource Text.Head}""/>
+              <ItemsControl ItemsSource=""{Binding Roster}"">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <Grid Margin=""0,1"">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width=""*""/>
+                        <ColumnDefinition Width=""46""/>
+                        <ColumnDefinition Width=""Auto""/>
+                        <ColumnDefinition Width=""Auto""/>
+                      </Grid.ColumnDefinitions>
+                      <StackPanel Grid.Column=""0"" Orientation=""Horizontal"">
+                        <TextBlock Text=""{Binding NameText}"" VerticalAlignment=""Center""/>
+                        <TextBlock Text=""{Binding StatusText}"" Margin=""6,0,0,0""
+                                   VerticalAlignment=""Center"" Style=""{StaticResource Dim}""/>
+                      </StackPanel>
+                      <TextBlock Grid.Column=""1"" Text=""{Binding TeamText}"" FontWeight=""Bold""
+                                 VerticalAlignment=""Center"" Foreground=""{Binding TeamBrush}""/>
+                      <Button Grid.Column=""2"" Style=""{StaticResource Btn}"" Content=""Blue"" Width=""46""
+                              Visibility=""{Binding HostControlsVisibility}""
+                              Command=""{Binding SetBlueCommand}""/>
+                      <Button Grid.Column=""3"" Style=""{StaticResource Btn}"" Content=""Red"" Width=""46""
+                              Visibility=""{Binding HostControlsVisibility}""
+                              Command=""{Binding SetRedCommand}""/>
+                    </Grid>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+
             <!-- ── TIME CONTROL ────────────────────────────────────────── -->
             <TextBlock Text=""TIME CONTROL"" FontWeight=""Bold"" FontSize=""11"" Margin=""0,12,0,4""
                        Foreground=""{StaticResource Text.Head}""/>
@@ -470,15 +507,10 @@ namespace SeapowerMultiplayer.UI
               </Grid>
             </Button>
             <StackPanel Margin=""4,4,0,0"" Visibility=""{Binding SettingsVisibility}"">
-              <StackPanel Orientation=""Horizontal"" IsEnabled=""{Binding ModeUnlocked}"">
-                <TextBlock Text=""Mode"" Width=""64"" VerticalAlignment=""Center""/>
-                <RadioButton GroupName=""mp_mode"" Content=""PvP""
-                             IsChecked=""{Binding IsPvP, Mode=TwoWay}""/>
-                <RadioButton GroupName=""mp_mode"" Content=""Co-op""
-                             IsChecked=""{Binding IsCoop, Mode=TwoWay}""/>
-              </StackPanel>
-              <TextBlock Text=""Leave the lobby to change mode"" Style=""{StaticResource Dim}""
-                         Visibility=""{Binding ModeLockedNoticeVisibility}""/>
+              <CheckBox Content=""Lock units to players (host)"" IsEnabled=""{Binding LockEditable}""
+                        IsChecked=""{Binding LockUnits, Mode=TwoWay}""/>
+              <TextBlock Text=""Leave the lobby to change this"" Style=""{StaticResource Dim}""
+                         Visibility=""{Binding LockLockedNoticeVisibility}""/>
 
               <CheckBox Content=""Time vote (host)"" IsChecked=""{Binding TimeVote, Mode=TwoWay}""/>
 
@@ -504,15 +536,15 @@ namespace SeapowerMultiplayer.UI
                            Text=""{Binding DamageIntervalText, Mode=TwoWay}""/>
               </Grid>
 
-              <TextBlock Text=""Shared picture (co-op)"" Style=""{StaticResource Dim}"" Margin=""0,8,0,2""/>
+              <TextBlock Text=""Shared picture (teammates)"" Style=""{StaticResource Dim}"" Margin=""0,8,0,2""/>
               <StackPanel IsEnabled=""{Binding SharedPictureEnabled}"">
                 <CheckBox Content=""Contacts &amp; track numbers""
                           IsChecked=""{Binding ContactSync, Mode=TwoWay}""/>
                 <CheckBox Content=""Map markers""
                           IsChecked=""{Binding DrawingSync, Mode=TwoWay}""/>
               </StackPanel>
-              <TextBlock Style=""{StaticResource Dim}"" Visibility=""{Binding PvPIntelNoticeVisibility}""
-                         Text=""Co-op only - sharing these would give away intel""/>
+              <TextBlock Style=""{StaticResource Dim}"" Visibility=""{Binding NoTeammateNoticeVisibility}""
+                         Text=""Only shared with teammates - never with an opponent""/>
 
               <!-- Top level, not under Advanced: a consent setting has to be
                    findable without expanding a disclosure triangle. -->
@@ -531,7 +563,7 @@ namespace SeapowerMultiplayer.UI
               <StackPanel Margin=""4,2,0,0"" Visibility=""{Binding AdvancedVisibility}"">
                 <CheckBox Content=""Verbose logging"" IsChecked=""{Binding VerboseLogging, Mode=TwoWay}""/>
                 <Button Style=""{StaticResource Btn}"" Content=""Reset to defaults""
-                        IsEnabled=""{Binding ModeUnlocked}""
+                        IsEnabled=""{Binding LockEditable}""
                         Command=""{Binding ResetSettingsCommand}""/>
               </StackPanel>
             </StackPanel>

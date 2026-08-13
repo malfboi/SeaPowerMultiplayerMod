@@ -23,14 +23,17 @@ namespace SeapowerMultiplayer.UI
         internal static int SurfaceAndSubTotal => OwnVessels + EnemyVessels + OwnSubs + EnemySubs;
         internal static int AirTotal => OwnAir + EnemyAir;
 
-        internal static void Refresh(bool isPvP)
+        /// <summary><paramref name="splitBySide"/> asks for an own-vs-enemy breakdown
+        /// rather than a single total. Worth showing only when the two sides are
+        /// meaningfully opposed, i.e. a human sits on each.</summary>
+        internal static void Refresh(bool splitBySide)
         {
             var playerTf = Globals._playerTaskforce;
 
             OwnVessels = OwnSubs = OwnAir = OwnLand = OwnMissiles = OwnTorps = 0;
             EnemyVessels = EnemySubs = EnemyAir = EnemyLand = EnemyMissiles = EnemyTorps = 0;
 
-            bool Mine(ObjectBase? o) => isPvP && playerTf != null && o != null && o._taskforce == playerTf;
+            bool Mine(ObjectBase? o) => splitBySide && playerTf != null && o != null && o._taskforce == playerTf;
 
             foreach (var v in Object.FindObjectsByType<Vessel>(FindObjectsSortMode.None))
                 if (Mine(v)) OwnVessels++; else EnemyVessels++;
@@ -54,9 +57,9 @@ namespace SeapowerMultiplayer.UI
                 if (Mine(LaunchPlatformField?.GetValue(t) as ObjectBase)) OwnTorps++; else EnemyTorps++;
         }
 
-        internal static string DescribeUnits(bool isPvP)
+        internal static string DescribeUnits(bool splitBySide)
         {
-            if (isPvP)
+            if (splitBySide)
             {
                 string s = $"Ships: own {OwnVessels}  enemy {EnemyVessels}\n"
                          + $"Subs:  own {OwnSubs}  enemy {EnemySubs}\n"
@@ -73,11 +76,11 @@ namespace SeapowerMultiplayer.UI
             return c;
         }
 
-        internal static string DescribeProjectiles(bool isPvP)
+        internal static string DescribeProjectiles(bool splitBySide)
         {
             int msl  = OwnMissiles + EnemyMissiles;
             int torp = OwnTorps + EnemyTorps;
-            return isPvP
+            return splitBySide
                 ? $"Missiles: {msl} (own {OwnMissiles} / enemy {EnemyMissiles})\n"
                   + $"Torpedoes: {torp} (own {OwnTorps} / enemy {EnemyTorps})"
                 : $"Missiles: {msl}   Torpedoes: {torp}";

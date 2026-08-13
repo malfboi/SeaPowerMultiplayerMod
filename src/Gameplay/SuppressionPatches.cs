@@ -32,28 +32,35 @@ namespace SeapowerMultiplayer
         internal static bool HostSuppressesRemoteTfAi(ObjectBase? unit) =>
             unit != null && HostSuppressesRemoteTfAi(unit._taskforce);
 
-        /// <summary>Taskforce-level form of the same test, for AI that runs per
-        /// TASKFORCE rather than per unit (Taskforce.CheckAI).</summary>
+        /// <summary>
+        /// Taskforce-level form of the same test, for AI that runs per TASKFORCE rather
+        /// than per unit (Taskforce.CheckAI).
+        ///
+        /// "Not my own side, and a human is commanding it" replaces the old
+        /// "PvP and it is the enemy taskforce". Correct in every seating: a co-op trio
+        /// leaves Red as AI and suppresses nothing; 1v1 and 2v1 both make Red human and
+        /// suppress it.
+        /// </summary>
         internal static bool HostSuppressesRemoteTfAi(Taskforce? tf) =>
             Plugin.Instance.CfgIsHost.Value
-            && Plugin.Instance.CfgPvP.Value
             && NetworkManager.Instance.IsHostRunning
             && tf != null
-            && tf == Globals._enemyTaskforce;
+            && tf != Globals._playerTaskforce
+            && Teams.IsHumanControlled(tf);
 
-        /// <summary>HOST-side PvP: the remote player's fleet, tested WITHOUT requiring
-        /// the transport to be up. Spawn-time stamps run while the mission loads, which
-        /// on the host can be before it starts listening - but from the host's own
-        /// configuration the enemy taskforce is the other player's fleet either way.
+        /// <summary>HOST-side: an opposing PLAYER's fleet, tested WITHOUT requiring the
+        /// transport to be up. Spawn-time stamps run while the mission loads, which on
+        /// the host can be before it starts listening - but the seating is already known
+        /// by then, because the host assigns teams in the lobby before loading.
         /// Use this ONLY for those load-time corrections; anything that acts during a
         /// live battle should ask <see cref="HostSuppressesRemoteTfAi(ObjectBase)"/>,
         /// which additionally requires a session.</summary>
         internal static bool RemotePlayerFleet(ObjectBase? unit) =>
             Plugin.Instance.CfgIsHost.Value
-            && Plugin.Instance.CfgPvP.Value
             && unit != null
             && unit._taskforce != null
-            && unit._taskforce == Globals._enemyTaskforce;
+            && unit._taskforce != Globals._playerTaskforce
+            && PlayerRegistry.AnyOnTeam(Team.Red);
 
         /// <summary>CLIENT-side: true for a unit the local player does not own -
         /// the opposing side in PvP, the AI sides in co-op. The per-unit AI class
@@ -138,11 +145,14 @@ namespace SeapowerMultiplayer
         /// changed mid-session is what gets handed back, not the value at session start.</summary>
         internal static void EnforceInterceptSymmetry()
         {
-            bool hostPvpSession = Plugin.Instance.CfgIsHost.Value
-                && Plugin.Instance.CfgPvP.Value
-                && NetworkManager.Instance.IsHostRunning;
+            // Only when there are humans on BOTH sides: the handicaps are keyed on
+            // IsPlayerObject, so with an AI opponent they are doing exactly the job they
+            // were designed for and must be left alone.
+            bool hostContestedSession = Plugin.Instance.CfgIsHost.Value
+                && NetworkManager.Instance.IsHostRunning
+                && Teams.ContestedSession;
 
-            if (hostPvpSession)
+            if (hostContestedSession)
             {
                 if (Globals._missileInterceptChanceBonus != 0f || Globals._missileInterceptChanceReduction != 0f
                     || Globals._gunsInterceptChanceBonus != 0f || Globals._gunsInterceptChanceReduction != 0f

@@ -412,9 +412,11 @@ namespace SeapowerMultiplayer
         {
             var side = (Taskforce.TfType)hostSide;
 
-            // Only the guest's save is rewritten, and only in PvP. The host's own view
-            // is never swapped, so its side byte means exactly what it says there.
-            bool swapped = Plugin.Instance.CfgPvP.Value && !Plugin.Instance.CfgIsHost.Value;
+            // Only a RED guest's save is rewritten. The host's own view is never swapped
+            // (it is always Blue and runs the authoritative sim on the mission's own
+            // save), so its side byte means exactly what it says there - and a BLUE
+            // guest loaded unswapped, so the same is true for it.
+            bool swapped = Teams.LocalSaveSwapped;
 
             switch (side)
             {

@@ -71,6 +71,8 @@ namespace SeapowerMultiplayer.UI
         public DelegateCommand JoinClipboardCommand    { get; }
         public DelegateCommand CopyCodeCommand         { get; }
         public DelegateCommand InviteFriendCommand     { get; }
+        public DelegateCommand InviteBlueCommand       { get; }
+        public DelegateCommand InviteRedCommand        { get; }
         public DelegateCommand LeaveLobbyCommand       { get; }
         public DelegateCommand SendStateCommand        { get; }
         public DelegateCommand LiteNetPrimaryCommand   { get; }
@@ -107,6 +109,8 @@ namespace SeapowerMultiplayer.UI
 
             HostLobbyCommand     = new DelegateCommand(_ => SteamLobbyManager.CreateLobby());
             InviteFriendCommand  = new DelegateCommand(_ => SteamLobbyManager.InviteFriend());
+            InviteBlueCommand    = new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(Team.Blue));
+            InviteRedCommand     = new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(Team.Red));
             LeaveLobbyCommand    = new DelegateCommand(_ => SteamLobbyManager.LeaveLobby());
             SendStateCommand     = new DelegateCommand(_ => SessionManager.CaptureAndSend());
 
@@ -213,8 +217,13 @@ namespace SeapowerMultiplayer.UI
         private Visibility _updateBanner = Visibility.Collapsed;
         public Visibility UpdateBannerVisibility { get => _updateBanner; private set => Set(ref _updateBanner, value); }
 
-        private Visibility _pvpBadge = Visibility.Collapsed;
-        public Visibility PvPBadgeVisibility { get => _pvpBadge; private set => Set(ref _pvpBadge, value); }
+        private string _teamBadge = "";
+        /// <summary>Title-row badge: this player's TEAM. Replaces the old PvP badge -
+        /// a session has no mode to advertise any more, only each player a side.</summary>
+        public string TeamBadgeText { get => _teamBadge; private set => Set(ref _teamBadge, value); }
+
+        private Visibility _teamBadgeVis = Visibility.Collapsed;
+        public Visibility TeamBadgeVisibility { get => _teamBadgeVis; private set => Set(ref _teamBadgeVis, value); }
 
         private Visibility _syncDot = Visibility.Collapsed;
         public Visibility SyncDotVisibility { get => _syncDot; private set => Set(ref _syncDot, value); }
@@ -397,28 +406,85 @@ namespace SeapowerMultiplayer.UI
         public Visibility AdvancedVisibility => Vis(_advancedExpanded);
         public string AdvancedGlyph => _advancedExpanded ? GlyphOpen : GlyphClosed;
 
-        /// <summary>PvP is baked into the handshake and lobby metadata, so it can
-        /// only change while nothing is running.</summary>
+        /// <summary>The unit lock is published to every client at handshake time, so it
+        /// can only change while nothing is running.</summary>
         private bool _modeLocked;
-        public bool ModeUnlocked => !_modeLocked;
-        public Visibility ModeLockedNoticeVisibility => Vis(_modeLocked);
+        public bool LockEditable => !_modeLocked;
+        public Visibility LockLockedNoticeVisibility => Vis(_modeLocked);
 
-        public bool IsPvP
+        /// <summary>Host: give each player their own formations and show teammates' as
+        /// allies. Off is a free-for-all - anyone on a team may order anything on it.</summary>
+        public bool LockUnits
         {
-            get => Plugin.Instance.CfgPvP.Value;
+            get => Plugin.Instance.CfgLockUnits.Value;
             set
             {
-                SetCfg(Plugin.Instance.CfgPvP, value);
-                Raise(nameof(IsPvP)); Raise(nameof(IsCoop));
-                Raise(nameof(SharedPictureEnabled)); Raise(nameof(PvPIntelNoticeVisibility));
+                SetCfg(Plugin.Instance.CfgLockUnits, value);
+                Raise(nameof(LockUnits));
             }
         }
 
-        public bool IsCoop
+        /// <summary>This machine's own team, for the title-row badge that replaced the
+        /// PvP badge. A session no longer has a mode to display - only each player has a
+        /// side.</summary>
+        public string MyTeamText => NetworkManager.Instance.IsEstablished
+            ? Teams.Name(PlayerRegistry.LocalTeam).ToUpperInvariant() : "";
+
+        // ── Player roster ─────────────────────────────────────────────────────
+
+        /// <summary>One row of the PLAYERS list. Immutable: the roster is rebuilt
+        /// wholesale when it changes rather than mutated in place, which keeps the
+        /// binding trivial.</summary>
+        public sealed class PlayerRowVm
         {
-            get => !Plugin.Instance.CfgPvP.Value;
-            set { if (value) IsPvP = false; }
+            public string NameText   { get; }
+            public string TeamText   { get; }
+            public Brush  TeamBrush  { get; }
+            public string StatusText { get; }
+            public Visibility HostControlsVisibility { get; }
+            public DelegateCommand SetBlueCommand { get; }
+            public DelegateCommand SetRedCommand  { get; }
+
+            public PlayerRowVm(PlayerInfo p, bool isLocal, bool hostControls)
+            {
+                NameText   = isLocal ? $"{p.DisplayName} (you)" : p.DisplayName;
+                TeamText   = Teams.Name(p.Team).ToUpperInvariant();
+                TeamBrush  = p.Team == Team.Blue ? TeamBlue : TeamRed;
+                StatusText = !p.Connected   ? "disconnected"
+                           : !p.Established ? "joining"
+                           : p.Ready        ? "ready" : "in game";
+
+                // Slot 0 is the host and is pinned to Blue - the authoritative sim runs
+                // on its own unswapped save, so it has nowhere else to sit.
+                HostControlsVisibility = Vis(hostControls && p.Slot != 0);
+
+                byte slot = p.Slot;
+                SetBlueCommand = new DelegateCommand(_ => HostMove(slot, Team.Blue));
+                SetRedCommand  = new DelegateCommand(_ => HostMove(slot, Team.Red));
+            }
+
+            private static void HostMove(byte slot, Team team)
+            {
+                if (!Plugin.Instance.CfgIsHost.Value) return;
+                PlayerRegistry.HostSetTeam(slot, team);
+                PlayerRegistry.HostBroadcastRoster();
+            }
         }
+
+        private static readonly Brush TeamBlue = Frozen(0.45f, 0.70f, 1.00f);
+        private static readonly Brush TeamRed  = Frozen(1.00f, 0.45f, 0.45f);
+
+        public ObservableCollection<PlayerRowVm> Roster { get; } = new();
+
+        /// <summary>Roster version the rows were built from. The rows carry live
+        /// Buttons, and rebuilding those on the 10 Hz refresh would swallow clicks
+        /// mid-press - so they are rebuilt only when the roster actually changes.
+        /// (The Counters list gets away with per-tick rebuilds precisely because it has
+        /// nothing interactive in it.)</summary>
+        private int _rosterVersion = -1;
+
+        public Visibility HostTeamControlsVisibility { get; private set; } = Visibility.Collapsed;
+        public Visibility RosterVisibility { get; private set; } = Visibility.Collapsed;
 
         public bool TimeVote
         {
@@ -463,9 +529,10 @@ namespace SeapowerMultiplayer.UI
             }
         }
 
-        /// <summary>Co-op only: in PvP the two pictures are meant to differ.</summary>
-        public bool SharedPictureEnabled => !Plugin.Instance.CfgPvP.Value;
-        public Visibility PvPIntelNoticeVisibility => Vis(Plugin.Instance.CfgPvP.Value);
+        /// <summary>Sharing needs somebody to share with. Opponents' pictures are meant
+        /// to differ, so these only do anything once you have a teammate.</summary>
+        public bool SharedPictureEnabled => Teams.HasTeammates;
+        public Visibility NoTeammateNoticeVisibility => Vis(!Teams.HasTeammates);
 
         // Numeric settings are edited as text. A value that will not parse is
         // simply not committed, so a half-typed rate never reaches the streamer.
@@ -504,7 +571,7 @@ namespace SeapowerMultiplayer.UI
             // re-prompting or churning the anonymous id is worse.
             ConfigEntryBase[] all =
             {
-                p.CfgPvP, p.CfgTimeVote, p.CfgVerboseDebug,
+                p.CfgLockUnits, p.CfgTimeVote, p.CfgVerboseDebug,
                 p.CfgDamageSyncInterval, p.CfgMissileStateHz, p.CfgUnitStateHz,
                 p.CfgContactSync, p.CfgDrawingSync,
             };
@@ -512,9 +579,9 @@ namespace SeapowerMultiplayer.UI
 
             foreach (var n in new[]
                      {
-                         nameof(IsPvP), nameof(IsCoop), nameof(TimeVote), nameof(VerboseLogging),
+                         nameof(LockUnits), nameof(TimeVote), nameof(VerboseLogging),
                          nameof(ContactSync), nameof(DrawingSync), nameof(SharedPictureEnabled),
-                         nameof(PvPIntelNoticeVisibility),
+                         nameof(NoTeammateNoticeVisibility),
                          nameof(UnitHzText), nameof(MissileHzText), nameof(DamageIntervalText),
                      })
                 Raise(n);
@@ -685,7 +752,9 @@ namespace SeapowerMultiplayer.UI
             RefreshPopups(nm);
 
             VersionText = $"SeaPower MP  v{PluginInfo.PLUGIN_VERSION}";
-            PvPBadgeVisibility = Vis(p.CfgPvP.Value);
+            bool seated = nm.IsEstablished;
+            TeamBadgeText = seated ? Teams.Name(PlayerRegistry.LocalTeam).ToUpperInvariant() : "";
+            TeamBadgeVisibility = Vis(seated);
 
             // Set before the fatal early-return: an outdated build is a plausible
             // reason for the failure, so the prompt is worth showing either way.
@@ -703,6 +772,7 @@ namespace SeapowerMultiplayer.UI
             SyncDotBrush = StatusBrushFor(overall);
 
             RefreshNetwork(nm, p, connected);
+            RefreshRoster(nm);
             RefreshSyncState(nm, connected);
             RefreshTime(p);
             RefreshSettingsLock(nm);
@@ -760,15 +830,17 @@ namespace SeapowerMultiplayer.UI
             // Fatal popup
             FatalPopupVisibility = Vis(Plugin.FatalInitError != null && !_fatalDismissed);
 
-            // Ally lock banner - auto-expires, never dismissed.
-            bool ally = Time.unscaledTime < UnitLockManager.RefusalNoticeUntil;
-            AllyLockVisibility = Vis(ally);
-            if (ally)
+            // Order-refused banner - auto-expires, never dismissed.
+            bool refused = Time.unscaledTime < OrderRefusalNotice.NoticeUntil;
+            AllyLockVisibility = Vis(refused);
+            if (refused)
             {
-                string name = UnitLockManager.LastRefusedUnitName;
+                string name  = OrderRefusalNotice.LastRefusedUnitName;
+                string owner = OrderRefusalNotice.LastRefusedOwnerName;
+                string who   = owner.Length > 0 ? owner : "another player";
                 AllyLockText = name.Length > 0
-                    ? $"{name} is being commanded by your ally"
-                    : "That unit is being commanded by your ally";
+                    ? $"{name} is being commanded by {who}"
+                    : $"That unit is being commanded by {who}";
             }
 
             // Toast expiry
@@ -808,7 +880,7 @@ namespace SeapowerMultiplayer.UI
                 {
                     ModeText = isOwner ? "STEAM (HOST)" : "STEAM (CLIENT)";
                     StatusText = isOwner ? "In Lobby" : "Connecting"; StatusBrush = Warn;
-                    DetailText = $"Lobby: {SteamLobbyManager.MemberCount}/2 players";
+                    DetailText = $"Lobby: {SteamLobbyManager.MemberCount}/{PlayerRegistry.MaxPlayers} players";
                 }
                 else
                 {
@@ -919,8 +991,7 @@ namespace SeapowerMultiplayer.UI
         /// </summary>
         private void RefreshSettingsMirror()
         {
-            Raise(nameof(IsPvP));
-            Raise(nameof(IsCoop));
+            Raise(nameof(LockUnits));
             Raise(nameof(TimeVote));
             Raise(nameof(ContactSync));
             Raise(nameof(DrawingSync));
@@ -928,7 +999,46 @@ namespace SeapowerMultiplayer.UI
             Raise(nameof(ShareDiagnostics));
             Raise(nameof(DiagnosticsIdText));
             Raise(nameof(SharedPictureEnabled));
-            Raise(nameof(PvPIntelNoticeVisibility));
+            Raise(nameof(NoTeammateNoticeVisibility));
+            Raise(nameof(MyTeamText));
+        }
+
+        /// <summary>
+        /// Rebuild the PLAYERS list, but only when the roster actually changed.
+        ///
+        /// The version check is not an optimisation - the rows own live Buttons, and
+        /// replacing them twice a second would cancel a click that spans two ticks.
+        /// </summary>
+        private void RefreshRoster(NetworkManager nm)
+        {
+            bool show = nm.IsEstablished || nm.IsHostRunning;
+            var vis = Vis(show);
+            if (vis != RosterVisibility) { RosterVisibility = vis; Raise(nameof(RosterVisibility)); }
+
+            // Team assignment is the host's call, and only while people can still be
+            // moved without a reload - which today means before the mission is running.
+            var hostVis = Vis(nm.IsHost && show);
+            if (hostVis != HostTeamControlsVisibility)
+            {
+                HostTeamControlsVisibility = hostVis;
+                Raise(nameof(HostTeamControlsVisibility));
+            }
+
+            if (!show)
+            {
+                if (Roster.Count > 0) { Roster.Clear(); _rosterVersion = -1; }
+                return;
+            }
+
+            if (PlayerRegistry.Version == _rosterVersion) return;
+            _rosterVersion = PlayerRegistry.Version;
+
+            Roster.Clear();
+            byte localSlot = PlayerRegistry.LocalSlot;
+            foreach (var p in PlayerRegistry.All)
+                Roster.Add(new PlayerRowVm(p, p.Slot == localSlot, nm.IsHost));
+
+            Raise(nameof(MyTeamText));
         }
 
         private void RefreshSettingsLock(NetworkManager nm)
@@ -936,8 +1046,8 @@ namespace SeapowerMultiplayer.UI
             bool locked = nm.IsConnected || nm.IsHostRunning || SteamLobbyManager.InLobby;
             if (locked == _modeLocked) return;
             _modeLocked = locked;
-            Raise(nameof(ModeUnlocked));
-            Raise(nameof(ModeLockedNoticeVisibility));
+            Raise(nameof(LockEditable));
+            Raise(nameof(LockLockedNoticeVisibility));
         }
 
         private void RefreshNet2(NetworkManager nm, bool connected)
@@ -1012,11 +1122,11 @@ namespace SeapowerMultiplayer.UI
 
             if (!_unitsExpanded && !_projectilesExpanded) return;
 
-            UnitCensus.Refresh(p.CfgPvP.Value);
+            UnitCensus.Refresh(Teams.ContestedSession);
 
             if (_unitsExpanded)
             {
-                UnitCountsText = UnitCensus.DescribeUnits(p.CfgPvP.Value);
+                UnitCountsText = UnitCensus.DescribeUnits(Teams.ContestedSession);
 
                 // Shown in metres: the raw figures are horizontal Unity units
                 // (~67 m each), so one decimal hid everything under 3 m as "0.0".
@@ -1050,7 +1160,7 @@ namespace SeapowerMultiplayer.UI
             }
 
             if (_projectilesExpanded)
-                ProjectilesText = UnitCensus.DescribeProjectiles(p.CfgPvP.Value);
+                ProjectilesText = UnitCensus.DescribeProjectiles(Teams.ContestedSession);
         }
     }
 }

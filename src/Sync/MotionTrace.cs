@@ -257,11 +257,12 @@ namespace SeapowerMultiplayer
         /// Resolve the pinned unit. The target is LATCHED from the selection once, then
         /// held by id - selection deliberately stops mattering after that.
         ///
-        /// This matters in co-op: the ally lock refuses every order for a unit the
-        /// remote player has selected (UnitLockManager.BlocksOrdersFor), so both players
-        /// selecting the same unit to trace it leaves each side thinking the other owns
-        /// it and NEITHER can order it. Latching means both players select the unit,
-        /// start the trace, then deselect - the lock clears and the trace continues.
+        /// Latching by id also outlived the reason it was introduced: selection used to
+        /// claim a unit, so two players both selecting one to trace it left neither able
+        /// to order it. Ownership is persistent per formation now and selection claims
+        /// nothing, so that particular trap is gone - but pinning by id is still the
+        /// right behaviour, because it lets both players keep the trace running while
+        /// they go on to select and command other things.
         /// </summary>
         private static void ResolveTracedUnit()
         {

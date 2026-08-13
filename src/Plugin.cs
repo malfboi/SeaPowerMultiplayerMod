@@ -22,7 +22,8 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<string> CfgHostIP = null!;
         internal ConfigEntry<int> CfgPort = null!;
         internal ConfigEntry<bool> CfgAutoConnect = null!;
-        internal ConfigEntry<bool> CfgPvP = null!;
+        internal ConfigEntry<bool> CfgLockUnits = null!;
+        internal ConfigEntry<string> CfgDefaultTeam = null!;
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
 
@@ -81,7 +82,12 @@ namespace SeapowerMultiplayer
             CfgHostIP      = Config.Bind("Network", "HostIP",       "127.0.0.1", "Host IP address (used when IsHost=false)");
             CfgPort        = Config.Bind("Network", "Port",         7777,        "UDP port");
             CfgAutoConnect = Config.Bind("Network", "AutoConnect",  false,       "Connect/host automatically on game launch");
-            CfgPvP         = Config.Bind("Network", "PvP",          true,        "True = PvP mode (opposing taskforces); False = co-op (shared ally control)");
+            CfgLockUnits   = Config.Bind("Network", "LockUnitsToPlayers", false,  "Host: each player owns the formations assigned to them and sees teammates' units as allies. Off = free-for-all, any teammate can order any unit.");
+            // The lock rides on every ownership packet, so a mid-session change has to
+            // push one - otherwise clients keep enforcing the old rule and one machine
+            // silently disagrees with the others about who may command what.
+            CfgLockUnits.SettingChanged += (_, __) => FormationOwnership.HostSendFull();
+            CfgDefaultTeam = Config.Bind("Network", "DefaultTeam",  "Blue",      "Team to request when joining without an invite (Blue or Red). The host decides the final seating.");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
             // The client defers to the host's setting, and SessionSync only carries
@@ -245,14 +251,16 @@ namespace SeapowerMultiplayer
             string? role      = V("SPMP_ROLE");
             string? hostIp    = V("SPMP_HOSTIP");
             string? port      = V("SPMP_PORT");
-            string? pvp       = V("SPMP_PVP");
+            // SPMP_TEAM replaces SPMP_PVP: the two-instance test harness now says which
+            // SIDE the second instance plays, not what mode the session is in.
+            string? team      = V("SPMP_TEAM");
             string? autoConn  = V("SPMP_AUTOCONNECT");
             string? transport = V("SPMP_TRANSPORT");
             string? simLoss   = V("SPMP_NETSIM_LOSS");
             string? simLat    = V("SPMP_NETSIM_LATMS");
             string? simJitter = V("SPMP_NETSIM_JITTERMS");
 
-            if (role == null && hostIp == null && port == null && pvp == null
+            if (role == null && hostIp == null && port == null && team == null
                 && autoConn == null && transport == null && simLoss == null && simLat == null
                 && simJitter == null)
                 return;
@@ -262,7 +270,7 @@ namespace SeapowerMultiplayer
             if (role != null)      CfgIsHost.Value      = role.Equals("host", StringComparison.OrdinalIgnoreCase);
             if (hostIp != null)    CfgHostIP.Value      = hostIp;
             if (port != null && int.TryParse(port, out int p))            CfgPort.Value = p;
-            if (pvp != null)       CfgPvP.Value         = pvp == "1" || pvp.Equals("true", StringComparison.OrdinalIgnoreCase);
+            if (team != null)      CfgDefaultTeam.Value = team.Equals("red", StringComparison.OrdinalIgnoreCase) ? "Red" : "Blue";
             if (autoConn != null)  CfgAutoConnect.Value = autoConn == "1" || autoConn.Equals("true", StringComparison.OrdinalIgnoreCase);
             if (transport != null) CfgTransport.Value   = transport;
             if (simLoss != null && float.TryParse(simLoss, out float l)) CfgNetSimLossPct.Value = l;
@@ -270,7 +278,7 @@ namespace SeapowerMultiplayer
             if (simJitter != null && int.TryParse(simJitter, out int j)) CfgNetSimJitterMs.Value = j;
 
             Log.LogWarning($"[Config] SPMP_* env overrides active (role={(CfgIsHost.Value ? "host" : "client")}, " +
-                $"ip={CfgHostIP.Value}, port={CfgPort.Value}, pvp={CfgPvP.Value}, autoConnect={CfgAutoConnect.Value}, " +
+                $"ip={CfgHostIP.Value}, port={CfgPort.Value}, team={CfgDefaultTeam.Value}, autoConnect={CfgAutoConnect.Value}, " +
                 $"transport={CfgTransport.Value}, simLoss={CfgNetSimLossPct.Value}%, " +
                 $"simLat={CfgNetSimLatencyMs.Value}ms, simJitter=±{CfgNetSimJitterMs.Value}ms). " +
                 "Config persistence disabled for this run.");
@@ -383,7 +391,7 @@ namespace SeapowerMultiplayer
             WeaponHatchHandler.Tick();
             Suppression.EnforceDefenseFlag();
             Suppression.EnforceInterceptSymmetry();
-            UnitLockManager.SampleInput();
+            OrderRefusalNotice.SampleInput();
 
             // Ctrl+F11 motion trace. Last of the per-frame hooks so the FRAME row
             // records the transform the replica drivers actually left behind.

@@ -496,6 +496,14 @@ namespace SeapowerMultiplayer
                 $"allowTurnOn={s._allowTurnOn}. Will keep retrying (emission is unaffected).");
         }
 
+        /// <summary>Make the next pass a full sweep, so a joining player is told every
+        /// emitter state rather than only what changes after they arrive.</summary>
+        public static void ForceFullSweep()
+        {
+            _lastSent.Clear();
+            _nextFullSweep = 0f;
+        }
+
         public static void Reset()
         {
             _lastSent.Clear();

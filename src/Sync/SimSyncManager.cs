@@ -29,7 +29,60 @@ namespace SeapowerMultiplayer
             }
         }
 
-        public static bool BothSidesReady { get; set; }
+        // ── Readiness ─────────────────────────────────────────────────────────
+        //
+        // A SET of slots, not a bool. "BothSidesReady" could only ever describe two
+        // players: the first SessionReady to arrive flipped it true, so with three
+        // players the host would resume the moment the FASTEST loader reported in and
+        // leave the others still on their loading screens.
+
+        private static readonly System.Collections.Generic.HashSet<byte> _readySlots = new();
+
+        public static bool IsReady(byte slot) => _readySlots.Contains(slot);
+
+        /// <summary>Every established player has reported in. The host's cue to resume.</summary>
+        public static bool AllReady
+        {
+            get
+            {
+                bool any = false;
+                foreach (var p in PlayerRegistry.All)
+                {
+                    if (p.Slot == 0 || !p.Connected || !p.Established) continue;
+                    any = true;
+                    if (!_readySlots.Contains(p.Slot)) return false;
+                }
+                return any;
+            }
+        }
+
+        /// <summary>At least one established player is still loading.</summary>
+        public static bool AnyPending
+        {
+            get
+            {
+                foreach (var p in PlayerRegistry.All)
+                {
+                    if (p.Slot == 0 || !p.Connected || !p.Established) continue;
+                    if (!_readySlots.Contains(p.Slot)) return true;
+                }
+                return false;
+            }
+        }
+
+        public static void ClearAllReady() => _readySlots.Clear();
+
+        /// <summary>A player is loading a fresh session - they are not ready until they
+        /// say so.</summary>
+        public static void OnPeerJoined(byte slot) => _readySlots.Remove(slot);
+
+        /// <summary>A player left. Drop their readiness so <see cref="AllReady"/> is not
+        /// waiting on somebody who will never answer.</summary>
+        public static void OnPeerLeft(byte slot)
+        {
+            if (_readySlots.Remove(slot))
+                Plugin.Log.LogInfo($"[SimSync] Slot {slot} left — readiness dropped.");
+        }
 
         // ── Issue banner ──────────────────────────────────────────────────────
         // A failed session sync used to leave no trace outside the BepInEx log:
@@ -76,18 +129,35 @@ namespace SeapowerMultiplayer
         {
             Plugin.Log.LogInfo("[SimSync] Reset()");
             CurrentState = SimState.Idle;
-            BothSidesReady = false;
+            _readySlots.Clear();
         }
 
         /// <summary>
-        /// Called on host when a SessionReady message arrives from the client.
+        /// Host: a player finished loading.
+        ///
+        /// CurrentState still goes Synchronized on the FIRST report, and deliberately
+        /// so - it means "this machine's own sim is live", which is what its fifteen
+        /// read sites ask, and a later joiner must not switch the host's streaming off
+        /// for the players already in. Whether to RESUME is the separate question, and
+        /// that one asks <see cref="AllReady"/>.
         /// </summary>
-        public static void OnClientReady()
+        public static void OnClientReady(byte slot)
         {
-            BothSidesReady = true;
+            if (slot != PlayerRegistry.NoSender) _readySlots.Add(slot);
             CurrentState = SimState.Synchronized;
             ClearIssue();
-            Plugin.Log.LogInfo($"[SimSync] Client ready — paused={GameTime.IsPaused()}, TC={GameTime.TimeCompression}");
+
+            // Only now are unit ids meaningful on that machine. Sent earlier, the table
+            // would resolve to nothing - and an EMPTY table does not read as "not yet",
+            // it reads as "nobody owns anything", i.e. everything is commandable.
+            if (Plugin.Instance.CfgIsHost.Value && slot != PlayerRegistry.NoSender)
+            {
+                if (PlayerRegistry.TryGet(slot, out var p))
+                    FormationOwnership.HostGrantTeamTo(p.Team, slot);
+                FormationOwnership.HostSendFull(slot);
+            }
+            Plugin.Log.LogInfo($"[SimSync] Slot {slot} ready (allReady={AllReady}) — " +
+                               $"paused={GameTime.IsPaused()}, TC={GameTime.TimeCompression}");
         }
     }
 }

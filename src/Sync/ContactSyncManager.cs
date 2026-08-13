@@ -219,7 +219,7 @@ namespace SeapowerMultiplayer
         public static void ApplyReceived(ContactSyncMessage msg)
         {
             if (Plugin.Instance.CfgIsHost.Value) return;
-            if (Plugin.Instance.CfgPvP.Value) return; // co-op only - see CoopSessionActive
+            if (!Teams.HasTeammates) return; // see TeamSessionActive
 
             if (msg.IsFull) _overrides.Clear();
 
@@ -268,14 +268,14 @@ namespace SeapowerMultiplayer
         /// <summary>CO-OP ONLY. Both players command one task force and are meant to
         /// share its picture, so making it consistent costs nothing.
         ///
-        /// In PvP the two players are opponents with deliberately separate pictures.
-        /// Sharing them would hand over identifications the other side has not
-        /// earned - the client would learn a contact is a Kirov the moment the host
-        /// worked it out - which is the same intel leak
-        /// SessionManager.ClearDetectionData exists to prevent at join. Nothing here
-        /// runs in PvP; every caller checks first, and this is the backstop.</summary>
-        internal static bool CoopSessionActive
-            => !Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsEstablished;
+        /// Opponents keep deliberately separate pictures. Sharing them would hand over
+        /// identifications the other side has not earned - they would learn a contact is
+        /// a Kirov the moment we worked it out - which is the same intel leak
+        /// SessionManager.ClearDetectionData exists to prevent at join. The picture is
+        /// TEAM-scoped: it goes to teammates and no further. Every caller checks first,
+        /// and this is the backstop.</summary>
+        internal static bool TeamSessionActive
+            => Teams.HasTeammates && NetworkManager.Instance.IsEstablished;
 
         /// <summary>Host: release the client's picture back to its own sensors.
         /// An empty full sweep clears the override table; without this, switching
@@ -288,15 +288,30 @@ namespace SeapowerMultiplayer
             _nextFullSweep = 0f;
             _msg.Reset();
             _msg.IsFull = true;
-            NetworkManager.Instance.BroadcastToClients(_msg, DeliveryMethod.ReliableOrdered);
+            // The host's own picture goes to the host's TEAM. Broadcasting it handed
+            // an opponent every track number and identification we had worked out.
+            NetworkManager.Instance.SendToTeam(PlayerRegistry.LocalTeam, _msg, DeliveryMethod.ReliableOrdered);
             _msg.Reset();
             Plugin.Log.LogInfo("[Contacts] Sync disabled - released the client's contact picture");
         }
 
-        /// <summary>Host: sweep the plotting table and send what changed.</summary>
+        /// <summary>
+        /// Host: sweep the plotting table and send what changed.
+        ///
+        /// One audience, so one change-detection table is right here - unlike
+        /// UnitStatusManager and FlightDeckStreamer, this only ever sweeps the HOST's own
+        /// picture and only ever sends it to the host's own team.
+        ///
+        /// KNOWN GAP: two players on the OPPOSING team therefore get no shared picture
+        /// with each other. Closing it means sweeping the other taskforce's plotting
+        /// table as a second audience, which is a bigger change than it looks - that
+        /// side's guests are also running their own sensors locally and the client-side
+        /// overlay is additive. Their map drawings do already reach each other, via the
+        /// host's relay.
+        /// </summary>
         public static void HostBroadcast()
         {
-            if (!CoopSessionActive) return;
+            if (!TeamSessionActive) return;
 
             var table = Globals._playerTaskforce?.PlottingTable;
             if (table == null) return;
@@ -359,6 +374,14 @@ namespace SeapowerMultiplayer
                 Flush();
         }
 
+        /// <summary>Make the next sweep a full one, so a joining teammate receives the
+        /// whole picture instead of only what changes from now on.</summary>
+        public static void ForceFullSweep()
+        {
+            _lastSent.Clear();
+            _nextFullSweep = 0f;
+        }
+
         /// <summary>Drop change-tracking for contacts the host no longer holds, so a
         /// re-detected object is re-sent rather than suppressed as "unchanged".</summary>
         private static void PruneLastSent()
@@ -372,7 +395,9 @@ namespace SeapowerMultiplayer
 
         private static void Flush()
         {
-            NetworkManager.Instance.BroadcastToClients(_msg, DeliveryMethod.ReliableOrdered);
+            // The host's own picture goes to the host's TEAM. Broadcasting it handed
+            // an opponent every track number and identification we had worked out.
+            NetworkManager.Instance.SendToTeam(PlayerRegistry.LocalTeam, _msg, DeliveryMethod.ReliableOrdered);
             _sweepPacketsSent++;
             _msg.Reset(); // clears IsFull - continuation packets never re-clear
         }

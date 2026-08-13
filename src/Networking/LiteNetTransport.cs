@@ -14,7 +14,23 @@ namespace SeapowerMultiplayer.Transport
         private NetManager? _net;
         private NetPeer? _serverPeer;
         private bool _isHost;
+
+        // Scratch for the copy out of LiteNetLib's recycled reader.
+        //
+        // INVARIANT: safe to share across peers ONLY because OnDataReceived is drained
+        // synchronously inside PollEvents() and NetworkManager.Dispatch deserializes
+        // eagerly before enqueueing anything to the main thread. Nothing may hold this
+        // array past the handler - in particular the host's order relay must
+        // re-serialize the message, never forward this buffer.
         private readonly byte[] _receiveBuffer = new byte[512 * 1024]; // 512KB
+
+        // Host-allocated peer identity. Monotonic, never reused - see PeerId.
+        private readonly Dictionary<NetPeer, PeerId> _idOfPeer = new();
+        private readonly Dictionary<PeerId, NetPeer> _peerOfId = new();
+        private readonly List<PeerId> _connected = new();
+        private int _nextPeerId;
+
+        private readonly Dictionary<PeerId, int> _rttOf = new();
 
         private static ManualLogSource Log => Plugin.Log;
 
@@ -40,6 +56,7 @@ namespace SeapowerMultiplayer.Transport
             public long ReleaseAtMs;
             public byte[] Data;
             public int Length;
+            public PeerId From;
         }
 
         private float _simLossPct;
@@ -54,30 +71,77 @@ namespace SeapowerMultiplayer.Transport
             ? (_net?.ConnectedPeersCount ?? 0) > 0
             : _serverPeer?.ConnectionState == ConnectionState.Connected;
 
-        public int RttMs { get; private set; }
+        /// <summary>Worst RTT across peers - the overlay shows one number, and the
+        /// worst link is the one that explains a stutter.</summary>
+        public int RttMs
+        {
+            get
+            {
+                int worst = 0;
+                foreach (var kv in _rttOf) if (kv.Value > worst) worst = kv.Value;
+                return worst;
+            }
+        }
+
+        public int RttMsFor(PeerId peer) => _rttOf.TryGetValue(peer, out int ms) ? ms : 0;
+
         public bool LastSendFailed => false;
         public string? LastSendError => null;   // LiteNetLib fragments internally
 
-        public bool TryGetPacketStats(out long packetsSent, out long packetsLost)
+        public IReadOnlyList<PeerId> ConnectedPeers => _connected;
+
+        public ulong SteamIdOf(PeerId peer) => 0UL;   // no identity concept on direct IP
+
+        public bool TryGetPacketStats(PeerId peer, out long packetsSent, out long packetsLost)
         {
             packetsSent = 0;
             packetsLost = 0;
-            var peer = _isHost ? _net?.FirstPeer : _serverPeer;
-            if (peer == null) return false;
-            packetsSent = peer.Statistics.PacketsSent;
-            packetsLost = peer.Statistics.PacketLoss;
+            var p = Resolve(peer);
+            if (p == null) return false;
+            packetsSent = p.Statistics.PacketsSent;
+            packetsLost = p.Statistics.PacketLoss;
             return true;
         }
 
-        public event Action<byte[], int>? OnDataReceived;
-        public event Action? OnPeerConnected;
-        public event Action? OnPeerDisconnected;
+        public event Action<PeerId, byte[], int>? OnDataReceived;
+        public event Action<PeerId>? OnPeerConnected;
+        public event Action<PeerId>? OnPeerDisconnected;
 
         // LiteNetLib reassembles fragments internally and holds them until the
         // whole message lands, so there is never a half-received message to report.
 #pragma warning disable CS0067
-        public event Action<string>? OnReceiveFailed;
+        public event Action<PeerId, string>? OnReceiveFailed;
 #pragma warning restore CS0067
+
+        /// <summary>PeerId -> NetPeer. A guest's only peer is the server.</summary>
+        private NetPeer? Resolve(PeerId peer)
+        {
+            if (!_isHost) return peer == PeerId.Server || !peer.IsValid ? _serverPeer : null;
+            return _peerOfId.TryGetValue(peer, out var p) ? p : null;
+        }
+
+        /// <summary>NetPeer -> PeerId, allocating on first sight (host only).</summary>
+        private PeerId IdOf(NetPeer peer)
+        {
+            if (!_isHost) return PeerId.Server;
+            if (_idOfPeer.TryGetValue(peer, out var id)) return id;
+            id = new PeerId(++_nextPeerId);
+            _idOfPeer[peer] = id;
+            _peerOfId[id] = peer;
+            return id;
+        }
+
+        /// <summary>Drop every trace of a peer. Takes the id explicitly because a guest
+        /// never registers its server in <see cref="_idOfPeer"/> (IdOf short-circuits to
+        /// PeerId.Server), so looking it up by NetPeer would silently no-op and leave
+        /// the connected list holding a dead entry.</summary>
+        private void Forget(NetPeer? peer, PeerId id)
+        {
+            if (peer != null) _idOfPeer.Remove(peer);
+            _peerOfId.Remove(id);
+            _connected.Remove(id);
+            _rttOf.Remove(id);
+        }
 
         public void Start(bool asHost)
         {
@@ -125,13 +189,35 @@ namespace SeapowerMultiplayer.Transport
             _serverPeer = null;
             _delayQueue.Clear();
             _lastReleaseAtMs = 0;
+            _idOfPeer.Clear();
+            _peerOfId.Clear();
+            _connected.Clear();
+            _rttOf.Clear();
+            // _nextPeerId is deliberately NOT reset: ids stay unique for the process,
+            // so a stale reference from a previous session can never resolve.
             Log.LogInfo("[LiteNet] Stopped.");
+        }
+
+        /// <summary>Drop one peer and leave every other connection alive - refusing a
+        /// surplus or incompatible joiner must not kick the players already in.</summary>
+        public void Disconnect(PeerId peer, string reason)
+        {
+            var p = Resolve(peer);
+            if (p == null) return;
+            Log.LogInfo($"[LiteNet] Disconnecting {peer}: {reason}");
+            _net?.DisconnectPeer(p);
+            if (!_isHost) _serverPeer = null;
+            Forget(p, peer);
         }
 
         public void DisconnectPeers()
         {
             _net?.DisconnectAll();
             if (!_isHost) _serverPeer = null;
+            _idOfPeer.Clear();
+            _peerOfId.Clear();
+            _connected.Clear();
+            _rttOf.Clear();
             Log.LogInfo("[LiteNet] Disconnected all peers (transport stays up).");
         }
 
@@ -143,28 +229,35 @@ namespace SeapowerMultiplayer.Transport
             while (_delayQueue.Count > 0 && _delayQueue.Peek().ReleaseAtMs <= _clock.ElapsedMilliseconds)
             {
                 var pkt = _delayQueue.Dequeue();
-                OnDataReceived?.Invoke(pkt.Data, pkt.Length);
+                OnDataReceived?.Invoke(pkt.From, pkt.Data, pkt.Length);
             }
         }
 
         public void SendToServer(byte[] data, int length, TransportDelivery delivery)
         {
-            if (_serverPeer == null) return;
-            var dm = MapDelivery(delivery);
-            if ((dm == DeliveryMethod.Unreliable || dm == DeliveryMethod.ReliableSequenced)
-                && length > MaxUnreliablePayload)
-                dm = DeliveryMethod.ReliableUnordered;
-            _serverPeer.Send(data, 0, length, dm);
+            _serverPeer?.Send(data, 0, length, Resolve(delivery, length));
+        }
+
+        public void SendTo(PeerId peer, byte[] data, int length, TransportDelivery delivery)
+        {
+            Resolve(peer)?.Send(data, 0, length, Resolve(delivery, length));
         }
 
         public void BroadcastToClients(byte[] data, int length, TransportDelivery delivery)
         {
-            if (_net == null) return;
+            _net?.SendToAll(data, 0, length, Resolve(delivery, length));
+        }
+
+        /// <summary>The single place the payload-size upgrade lives. It used to be
+        /// copy-pasted into each send path, which is exactly the kind of rule that
+        /// drifts once a third path is added.</summary>
+        private static DeliveryMethod Resolve(TransportDelivery delivery, int length)
+        {
             var dm = MapDelivery(delivery);
             if ((dm == DeliveryMethod.Unreliable || dm == DeliveryMethod.ReliableSequenced)
                 && length > MaxUnreliablePayload)
                 dm = DeliveryMethod.ReliableUnordered;
-            _net.SendToAll(data, 0, length, dm);
+            return dm;
         }
 
         private static DeliveryMethod MapDelivery(TransportDelivery delivery) => delivery switch
@@ -179,17 +272,21 @@ namespace SeapowerMultiplayer.Transport
 
         void INetEventListener.OnPeerConnected(NetPeer peer)
         {
-            Log.LogInfo($"[LiteNet] Peer connected: {peer}");
-            if (!_isHost)
-                _serverPeer = peer;
-            OnPeerConnected?.Invoke();
+            if (!_isHost) _serverPeer = peer;
+            var id = IdOf(peer);
+            if (!_connected.Contains(id)) _connected.Add(id);
+            Log.LogInfo($"[LiteNet] Peer connected: {peer} as {id}");
+            OnPeerConnected?.Invoke(id);
         }
 
         void INetEventListener.OnPeerDisconnected(NetPeer peer, DisconnectInfo disconnectInfo)
         {
-            Log.LogInfo($"[LiteNet] Peer disconnected: {peer}  reason={disconnectInfo.Reason}");
+            var id = _isHost ? (_idOfPeer.TryGetValue(peer, out var k) ? k : PeerId.None)
+                             : PeerId.Server;
+            Log.LogInfo($"[LiteNet] Peer disconnected: {peer} ({id})  reason={disconnectInfo.Reason}");
             if (!_isHost) _serverPeer = null;
-            OnPeerDisconnected?.Invoke();
+            Forget(peer, id);
+            OnPeerDisconnected?.Invoke(id);
         }
 
         void INetEventListener.OnNetworkError(IPEndPoint endPoint, SocketError socketError)
@@ -200,6 +297,7 @@ namespace SeapowerMultiplayer.Transport
         void INetEventListener.OnNetworkReceive(NetPeer peer, NetPacketReader reader, byte channelNumber, DeliveryMethod deliveryMethod)
         {
             int length = reader.AvailableBytes;
+            PeerId from = IdOf(peer);
 
             // Network condition simulation (testing only)
             if (_simLossPct > 0f && deliveryMethod == DeliveryMethod.Unreliable
@@ -230,6 +328,7 @@ namespace SeapowerMultiplayer.Transport
                     ReleaseAtMs = releaseAt,
                     Data = copy,
                     Length = length,
+                    From = from,
                 });
                 return;
             }
@@ -246,14 +345,14 @@ namespace SeapowerMultiplayer.Transport
                 data = new byte[length];
                 Buffer.BlockCopy(reader.RawData, reader.Position, data, 0, length);
             }
-            OnDataReceived?.Invoke(data, length);
+            OnDataReceived?.Invoke(from, data, length);
         }
 
         void INetEventListener.OnNetworkReceiveUnconnected(IPEndPoint remoteEndPoint, NetPacketReader reader, UnconnectedMessageType messageType) { }
 
         void INetEventListener.OnNetworkLatencyUpdate(NetPeer peer, int latency)
         {
-            RttMs = latency;
+            _rttOf[IdOf(peer)] = latency;
         }
 
         void INetEventListener.OnConnectionRequest(ConnectionRequest request)

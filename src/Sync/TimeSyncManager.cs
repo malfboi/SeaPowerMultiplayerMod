@@ -380,6 +380,25 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>
+        /// Host: freeze everyone, now, for a mid-mission join.
+        ///
+        /// Must be called BEFORE SessionManager raises SceneLoading, which suppresses
+        /// outbound broadcasts - otherwise the players already in the battle keep running
+        /// while the save is written, and the stream then rewinds them to the moment it
+        /// was taken. The Pause postfix does the broadcasting; this exists to name the
+        /// intent and to keep the ordering requirement documented next to the call.
+        /// </summary>
+        public static void HostBroadcastPause()
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (GameTime.IsPaused()) return;
+            GameTime.Pause();
+        }
+
+        /// <summary>Host: put time back to where it was once a joiner is in.</summary>
+        public static void HostBroadcastResume(float timeScale) => ForceResume(timeScale);
+
+        /// <summary>
         /// Host: resume after a reconnect freeze, at the speed the session was
         /// already running at. Deliberately bypasses vote mode - this is not a
         /// player asking to change speed, it is the session returning to where it

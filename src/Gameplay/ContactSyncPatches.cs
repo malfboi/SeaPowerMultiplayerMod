@@ -22,7 +22,7 @@ namespace SeapowerMultiplayer
         static void Postfix(Vehicle __instance)
         {
             if (!Suppression.ClientActive) return;
-            if (Plugin.Instance.CfgPvP.Value) return; // co-op only - opponents keep separate pictures
+            if (!Teams.HasTeammates) return; // nobody to share a picture with
             // Read live so switching the setting off on THIS machine reverts to our
             // own sensors immediately, without waiting on the host's clearing sweep.
             if (!Plugin.Instance.CfgContactSync.Value) return;
@@ -86,7 +86,7 @@ namespace SeapowerMultiplayer
         static void Postfix(ObjectBase ____baseObject, ref AI.Compliance __result)
         {
             if (!Suppression.ClientActive) return;
-            if (Plugin.Instance.CfgPvP.Value) return; // co-op only, like the rest of the shared picture
+            if (!Teams.HasTeammates) return; // like the rest of the shared picture
             if (____baseObject == null || ____baseObject.UniqueID == 0) return;
 
             var shared = ContactSyncManager.ComplianceFor(____baseObject.UniqueID);
@@ -115,7 +115,7 @@ namespace SeapowerMultiplayer
         {
             if (sensorType != "Comms") return;
             if (!Suppression.ClientActive) return;
-            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!Teams.HasTeammates) return;
             if (OrderHandler.ApplyingFromNetwork) return;
             if (hostObject == null || contactObject == null) return;
             if (hostObject.UniqueID == 0 || contactObject.UniqueID == 0) return;
@@ -149,7 +149,7 @@ namespace SeapowerMultiplayer
         static void Postfix(VehicleInfoViewModel __instance, Vehicle target)
         {
             if (!Suppression.ClientActive) return;
-            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!Teams.HasTeammates) return;
             if (target == null) return;
 
             // DictionaryWithFallbacks yields placeholder text rather than throwing

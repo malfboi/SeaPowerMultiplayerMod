@@ -38,6 +38,8 @@ namespace SeapowerMultiplayer.Messages
         ContactReport            = 34,  // client → host: object ids the client's plotting table holds (the other half of ContactSync)
         UnitStatus               = 35,  // host → client: bottom-row status line + per-mount engagement state
         JamState                 = 36,  // host → client: offensive ECM jam assignments (who is jamming what)
+        PlayerRoster             = 37,  // host → clients: who is in the session, their team and slot
+        UnitOwnership            = 38,  // host → clients: which player commands which units
     }
 
     public interface INetMessage

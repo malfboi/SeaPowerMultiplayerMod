@@ -15,7 +15,12 @@ namespace SeapowerMultiplayer.Net2
         // toggle, and Hello/Welcome each carry the sender's packed gameplay options plus
         // its enabled-mod fingerprint. One bump, because none of them had shipped yet -
         // keep adding to this line until it does.
-        public const ushort ProtocolVersion = 230;
+        // 231 is the N-player overhaul: Hello carries a requested TEAM and a display
+        // name instead of a PvP flag, Welcome carries the assigned slot/team and a
+        // per-slot UID band, and PlayerRoster is new. The session-wide PvP/co-op mode is
+        // gone - team is a property of each player now, because a 2v1 is co-op and PvP at
+        // the same time and no single flag could say so.
+        public const ushort ProtocolVersion = 231;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices
@@ -32,6 +37,21 @@ namespace SeapowerMultiplayer.Net2
         /// <summary>Start of the client-local UID band (sent in Welcome). Host-assigned
         /// ids stay far below this, so client-side spawns can never collide.</summary>
         public const int ClientUidBase = 100_000_000;
+
+        /// <summary>Width of each guest's private UID band.</summary>
+        public const int ClientUidBandSize = 100_000_000;
+
+        /// <summary>
+        /// Per-slot UID band. Guests used to share one band, which was fine while there
+        /// was only ever one of them and a guaranteed collision the moment there were
+        /// two: both would floor their allocator to the same number and hand out the same
+        /// ids for unrelated local objects.
+        ///
+        /// Slots 1/2/3 → 100M/200M/300M, comfortably inside int.MaxValue. The wire format
+        /// already carried this per-client in Welcome, so nothing else has to change.
+        /// </summary>
+        public static int UidBaseForSlot(byte slot)
+            => slot < 1 ? 0 : ClientUidBase + (slot - 1) * ClientUidBandSize;
 
         /// <summary>Self-imposed cap for unreliable state packets. LiteNetLib 1.3.5
         /// THROWS TooBigPacketException for Unreliable payloads above
