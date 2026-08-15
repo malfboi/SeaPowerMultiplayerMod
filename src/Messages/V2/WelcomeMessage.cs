@@ -20,6 +20,10 @@ namespace SeapowerMultiplayer.Messages
         /// <summary>The host's enabled mod set - see <see cref="ModSetCheck"/>.</summary>
         public uint   ModFingerprint;
         public byte   ModCount;
+        /// <summary>Host's session rule: the game's F10 debug/cheat panel stays shut.
+        /// Carried here so it binds the client from the handshake on, before the
+        /// session save is sent. See <see cref="DebugMenuLock"/>.</summary>
+        public bool   DisableF10Menu;
 
         public MessageType Type => MessageType.Welcome;
 
@@ -34,6 +38,7 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(GameplayOptions);
             writer.Put(ModFingerprint);
             writer.Put(ModCount);
+            writer.Put(DisableF10Menu);
         }
 
         public static WelcomeMessage Deserialize(NetDataReader reader) => new()
@@ -47,6 +52,7 @@ namespace SeapowerMultiplayer.Messages
             GameplayOptions   = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
             ModFingerprint    = reader.AvailableBytes >= 4 ? reader.GetUInt() : 0u,
             ModCount          = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
+            DisableF10Menu    = reader.AvailableBytes > 0 && reader.GetBool(),
         };
     }
 }

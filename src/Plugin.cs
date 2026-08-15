@@ -111,6 +111,7 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgPvP = null!;
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
+        internal ConfigEntry<bool> CfgDisableF10Menu = null!;
 
         // Debug config
         internal ConfigEntry<bool> CfgVerboseDebug = null!;
@@ -173,6 +174,12 @@ namespace SeapowerMultiplayer
             // it at join time. The overlay makes it editable mid-session, so push
             // every change - otherwise the client stays on the legacy request path.
             CfgTimeVote.SettingChanged += (_, __) => TimeSyncManager.HostBroadcastVoteMode();
+            CfgDisableF10Menu = Config.Bind("Network", "DisableF10Menu", false,
+                "Block the game's F10 debug/cheat panel. HOST DECIDES: the host's setting is sent in " +
+                "the handshake and binds the client from the moment it connects, before the session " +
+                "save reaches it. It can only ever take the panel away - a client with this on keeps " +
+                "it shut even under a host that allows it. Only ever has an effect for players who " +
+                "enabled the game's own DevMode; for everyone else F10 already does nothing.");
             CfgDisconnectTimeoutSec = Config.Bind("Network", "DisconnectTimeoutSec", 20,
                 "Seconds of silence before the link is declared dead. The stock transport defaults " +
                 "(LiteNetLib 5s, Steam 10s) drop high-latency players during ordinary stalls. " +
@@ -474,6 +481,7 @@ namespace SeapowerMultiplayer
             WeaponHatchHandler.Tick();
             Suppression.EnforceDefenseFlag();
             Suppression.EnforceInterceptSymmetry();
+            DebugMenuLock.Tick();
             UnitLockManager.SampleInput();
 
             // Ctrl+F11 motion trace. Last of the per-frame hooks so the FRAME row

@@ -426,6 +426,20 @@ namespace SeapowerMultiplayer.UI
             set { SetCfg(Plugin.Instance.CfgTimeVote, value); Raise(nameof(TimeVote)); }
         }
 
+        public bool DisableF10Menu
+        {
+            get => Plugin.Instance.CfgDisableF10Menu.Value;
+            set { SetCfg(Plugin.Instance.CfgDisableF10Menu, value); Raise(nameof(DisableF10Menu)); }
+        }
+
+        /// <summary>The host sends this in the handshake, so like Mode it can only
+        /// be chosen while nothing is running - see <see cref="DebugMenuLock"/>.</summary>
+        public bool F10SettingUnlocked => !_modeLocked;
+
+        /// <summary>Shown to a connected client while the host's rule is what is
+        /// holding the panel shut, so an unticked checkbox is not read as "open".</summary>
+        public Visibility F10HostRuleVisibility => Vis(DebugMenuLock.HostRule);
+
         public bool ContactSync
         {
             get => Plugin.Instance.CfgContactSync.Value;
@@ -506,13 +520,14 @@ namespace SeapowerMultiplayer.UI
             {
                 p.CfgPvP, p.CfgTimeVote, p.CfgVerboseDebug,
                 p.CfgDamageSyncInterval, p.CfgMissileStateHz, p.CfgUnitStateHz,
-                p.CfgContactSync, p.CfgDrawingSync,
+                p.CfgContactSync, p.CfgDrawingSync, p.CfgDisableF10Menu,
             };
             foreach (var e in all) e.BoxedValue = e.DefaultValue;
 
             foreach (var n in new[]
                      {
                          nameof(IsPvP), nameof(IsCoop), nameof(TimeVote), nameof(VerboseLogging),
+                         nameof(DisableF10Menu),
                          nameof(ContactSync), nameof(DrawingSync), nameof(SharedPictureEnabled),
                          nameof(PvPIntelNoticeVisibility),
                          nameof(UnitHzText), nameof(MissileHzText), nameof(DamageIntervalText),
@@ -922,6 +937,8 @@ namespace SeapowerMultiplayer.UI
             Raise(nameof(IsPvP));
             Raise(nameof(IsCoop));
             Raise(nameof(TimeVote));
+            Raise(nameof(DisableF10Menu));
+            Raise(nameof(F10HostRuleVisibility));
             Raise(nameof(ContactSync));
             Raise(nameof(DrawingSync));
             Raise(nameof(VerboseLogging));
@@ -938,6 +955,7 @@ namespace SeapowerMultiplayer.UI
             _modeLocked = locked;
             Raise(nameof(ModeUnlocked));
             Raise(nameof(ModeLockedNoticeVisibility));
+            Raise(nameof(F10SettingUnlocked));
         }
 
         private void RefreshNet2(NetworkManager nm, bool connected)

@@ -517,11 +517,19 @@ namespace SeapowerMultiplayer
                         break;
 
                     case Messages.OrderType.LaunchNoisemaker:
-                        // launchNoisemaker is declared on Submarine/Vessel (not
-                        // ObjectBase); it queues a noisemaker EngageTask the host
-                        // fires natively, replicating the decoy back to the client.
-                        if (unit is Submarine subNm) subNm.launchNoisemaker();
+                        // Two senders, two shapes. The weapons-panel button names the
+                        // ammo the player chose, so launch exactly that - a ship can
+                        // carry more than one noisemaker type and picking for them
+                        // would be wrong. The hotkey path sends no ammo; fall back to
+                        // Submarine/Vessel.launchNoisemaker(), which chooses the first
+                        // type with a launcher that is loaded and idle. (Both are
+                        // declared there, not on ObjectBase.)
+                        if (!string.IsNullOrEmpty(msg.AmmoId))
+                            unit.LaunchNoisemaker(msg.AmmoId);
+                        else if (unit is Submarine subNm) subNm.launchNoisemaker();
                         else if (unit is Vessel vesNm) vesNm.launchNoisemaker();
+                        Plugin.Log.LogInfo($"[Decoy] LaunchNoisemaker applied: unit={unit.UniqueID} " +
+                                           $"({unit.name}) ammo={(string.IsNullOrEmpty(msg.AmmoId) ? "<auto>" : msg.AmmoId)}");
                         break;
 
                     case Messages.OrderType.DropFuelTanks:
@@ -812,13 +820,21 @@ namespace SeapowerMultiplayer
                         var root = unit._userRoot;
                         if (root != null && wpIdx >= 0 && wpIdx < root.TaskViewModels.Count)
                         {
-                            if (root.TaskViewModels[wpIdx].Task is GoToWaypointTask wp)
+                            // Never an attack/sonobuoy-drop waypoint - see the sender in
+                            // Patch_UserRootNode_UpdateSimulation. Enforced here too so a
+                            // peer on an older build cannot move a drop waypoint out from
+                            // under a queue that is already running.
+                            if (root.TaskViewModels[wpIdx].Task is GoToWaypointTask wp
+                                && !(wp is AttackAtWaypoint))
                                 wp._waypointGeoPos.value = new GeoPosition
                                 {
                                     _longitude = msg.DestX,
                                     _latitude  = msg.DestZ,
                                     _height    = msg.DestY,
                                 };
+                            else if (root.TaskViewModels[wpIdx].Task is AttackAtWaypoint)
+                                Plugin.Log.LogInfo($"[Order] EditWaypoint ignored for drop/attack waypoint: " +
+                                                   $"unit={unit.UniqueID} idx={wpIdx}");
                         }
                         break;
                     }
@@ -896,20 +912,31 @@ namespace SeapowerMultiplayer
                             ? StateSerializer.FindById(msg.TargetEntityId) : null;
                         int flags = (int)msg.Speed;
 
-                        // after=null appends. The issuing side chains each task after
-                        // the previous one, so a multi-drop pattern lands in the same
-                        // order here; only a drop inserted mid-route (a waypoint was
-                        // selected) ends up at the end of the list instead.
+                        // The insertion point, addressed by index (see
+                        // Patch_ObjectBase_SetAttackAtWaypointTask). A queued drop is a
+                        // CHAIN - each one is issued after the task before it - so
+                        // appending every arrival put the host's list in a different
+                        // order than the issuer's whenever the unit already had a route.
+                        // Out of range (lists drifted) falls back to appending, which is
+                        // the old behaviour and never throws.
+                        int afterIdx = ((flags >> 10) & 0x3FFF) - 1;
+                        VisualActionTask? after = null;
+                        var atkRoot = unit._userRoot;
+                        if (atkRoot != null && afterIdx >= 0 && afterIdx < atkRoot.TaskViewModels.Count)
+                            after = atkRoot.TaskViewModels[afterIdx].Task;
+
                         var atkTask = unit.SetAttackAtWaypointTask(
                             msg.AmmoId, atkTarget,
                             new GeoPosition { _longitude = msg.TargetX, _latitude = msg.TargetZ, _height = msg.TargetY },
                             new GeoPosition { _longitude = msg.DestX,   _latitude = msg.DestZ,   _height = msg.DestY },
-                            msg.ShotsToFire, null,
+                            msg.ShotsToFire, after,
                             (EngageTask.SalvoType)(flags & 0xFF), msg.Heading,
                             (flags & 0x100) != 0, (flags & 0x200) != 0);
 
                         Plugin.Log.LogInfo($"[Order] AttackAtWaypoint: unit={unit.UniqueID} ammo={msg.AmmoId} " +
-                            $"target={msg.TargetEntityId} salvo={msg.ShotsToFire} created={atkTask != null}");
+                            $"target={msg.TargetEntityId} salvo={msg.ShotsToFire} " +
+                            $"afterIdx={afterIdx} anchored={after != null} " +
+                            $"tasks={atkRoot?.TaskViewModels.Count ?? -1} created={atkTask != null}");
                         break;
                     }
 

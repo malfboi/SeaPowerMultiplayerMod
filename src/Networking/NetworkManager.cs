@@ -726,6 +726,7 @@ namespace SeapowerMultiplayer
                 GameplayOptions = RemoteGameplayOptions.PackLocal(),
                 ModFingerprint  = ModSetCheck.LocalFingerprint(),
                 ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
+                DisableF10Menu  = Plugin.Instance.CfgDisableF10Menu.Value,
             });
 
             // After the clear above, not before: acceptance resets the notice, and this
@@ -780,7 +781,8 @@ namespace SeapowerMultiplayer
             // Before the session load starts, which is the point - the guest allocates
             // ids all the way through a load, so a floor armed afterwards is too late.
             GuestIdFloor.Arm(msg.ClientUidBase);
-            Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz).");
+            Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, " +
+                        $"stateRate={msg.StateRateHz}Hz, disableF10={msg.DisableF10Menu}).");
             ReconnectManager.OnPeerEstablished();
         }
     }

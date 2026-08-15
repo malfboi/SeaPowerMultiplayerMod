@@ -102,6 +102,14 @@ namespace SeapowerMultiplayer
             if (Plugin.Instance.CfgPvP.Value) return false;       // co-op concept only
             if (OrderHandler.ApplyingFromNetwork) return false;
             if (!NetworkManager.Instance.IsConnected) return false;
+            // Weapons are never ally-locked - the same exemption OrderSyncHelper makes
+            // ("a weapon must never be REFUSED"), asserted here so the callers that ask
+            // this directly instead of going through OrderSyncHelper inherit it. The
+            // depth patch is one of those, and without this a wire-guided torpedo the
+            // partner had merely CLICKED could not be steered by its own owner.
+            // Selection no longer claims a weapon at all, so this is a backstop for a
+            // peer on an older build - and for any future direct caller.
+            if (unit is WeaponBase) return false;
             return IsLockedByRemote(unit.UniqueID);
         }
 
