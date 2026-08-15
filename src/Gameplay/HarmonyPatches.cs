@@ -2293,6 +2293,51 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── Manual noisemaker from the weapons panel (client → host) ────────────
+    //
+    // The OTHER half of the manual noisemaker. Patch_InputHandler_NoisemakerUpstream
+    // covers the HOTKEY, which builds its EngageTask inline
+    // (InputHandler.OnUpdate → AddEngageTask) and never touches a hookable method.
+    // The weapons-panel BUTTON takes a completely different route - WeaponEntry's
+    // DelegateCommand calls ObjectBase.LaunchNoisemaker(ammo) - so nothing captured
+    // it and a client clicking the button sent nothing at all. The local call is
+    // inert on the client (LaunchNoisemaker just queues an EngageTask, and
+    // HandleEngageTasks is host-only), which is why the button looked dead however
+    // many times it was pressed while the same ship launched fine from the host.
+    //
+    // Mirrors the chaff patch: forward the click, let the host launch natively, and
+    // the decoy comes back as a replicated spawn. No double-send with the hotkey
+    // patch - the two paths do not overlap. The AI's torpedo-evasion decoys go
+    // through Vessel/Submarine.launchNoisemaker(), a different method this does not
+    // touch, so auto-defence is unaffected (the client's is already suppressed).
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.LaunchNoisemaker))]
+    public static class Patch_ObjectBase_LaunchNoisemaker
+    {
+        static bool Prefix(ObjectBase __instance, string ammoForEngageName)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true; // host launches natively
+
+            if (!TaskforceAssignmentManager.ClientMayControl(__instance)) return false;
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+                return false;
+
+            // The ammo the player actually picked - a ship can carry more than one
+            // noisemaker type, and the host's fallback would otherwise choose for them.
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.LaunchNoisemaker,
+                AmmoId         = ammoForEngageName ?? "",
+            });
+            Telemetry.Count("v2.clientNoisemakerUpstream");
+            Plugin.Log.LogInfo($"[Decoy] Upstream LaunchNoisemaker: unit={__instance.UniqueID} " +
+                               $"ammo={ammoForEngageName}");
+            return false; // host owns the launch; the decoy returns as a spawn
+        }
+    }
+
     // ── Fuel-tank jettison (both directions) ────────────────────────────────
     //
     // Unlike chaff, this is not purely a player action: an aircraft drops its tanks

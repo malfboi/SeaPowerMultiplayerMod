@@ -517,11 +517,19 @@ namespace SeapowerMultiplayer
                         break;
 
                     case Messages.OrderType.LaunchNoisemaker:
-                        // launchNoisemaker is declared on Submarine/Vessel (not
-                        // ObjectBase); it queues a noisemaker EngageTask the host
-                        // fires natively, replicating the decoy back to the client.
-                        if (unit is Submarine subNm) subNm.launchNoisemaker();
+                        // Two senders, two shapes. The weapons-panel button names the
+                        // ammo the player chose, so launch exactly that - a ship can
+                        // carry more than one noisemaker type and picking for them
+                        // would be wrong. The hotkey path sends no ammo; fall back to
+                        // Submarine/Vessel.launchNoisemaker(), which chooses the first
+                        // type with a launcher that is loaded and idle. (Both are
+                        // declared there, not on ObjectBase.)
+                        if (!string.IsNullOrEmpty(msg.AmmoId))
+                            unit.LaunchNoisemaker(msg.AmmoId);
+                        else if (unit is Submarine subNm) subNm.launchNoisemaker();
                         else if (unit is Vessel vesNm) vesNm.launchNoisemaker();
+                        Plugin.Log.LogInfo($"[Decoy] LaunchNoisemaker applied: unit={unit.UniqueID} " +
+                                           $"({unit.name}) ammo={(string.IsNullOrEmpty(msg.AmmoId) ? "<auto>" : msg.AmmoId)}");
                         break;
 
                     case Messages.OrderType.DropFuelTanks:
