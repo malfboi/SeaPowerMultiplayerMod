@@ -15,7 +15,12 @@ namespace SeapowerMultiplayer.Net2
         // toggle, and Hello/Welcome each carry the sender's packed gameplay options plus
         // its enabled-mod fingerprint. One bump, because none of them had shipped yet -
         // keep adding to this line until it does.
-        public const ushort ProtocolVersion = 230;
+        // 231 adds the host's "disable F10 debug menu" rule to Welcome. Bumped rather
+        // than appended to 230's list because 230 shipped in v0.3.6: the field is
+        // trailing-optional, so a v0.3.6 client would read a v0.3.7 host's Welcome
+        // without complaint and simply never apply the rule. A silently unenforced
+        // rule is worse than a refused pairing, which is what the version gate is for.
+        public const ushort ProtocolVersion = 231;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices
