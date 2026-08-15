@@ -2618,6 +2618,33 @@ namespace SeapowerMultiplayer
             int newId = objectToAttach.UniqueID;
             int previousClaim = UnitLockManager.LocalControlledUnitId;
 
+            // NEVER claim a weapon. The ally lock exists so two players do not fight
+            // over one ship; a torpedo in the water is not that. A wire-guided torpedo
+            // or MOSS is steered from the panel while it runs, and claiming it made the
+            // OTHER player unable to steer their own weapon - the host's depth changes
+            // were dropped outright (the depth patch asks the lock directly, without the
+            // weapon exemption OrderSyncHelper applies) and every order for it was held
+            // back by the send-side backstop. OrderSyncHelper already states the policy:
+            // "a weapon must never be REFUSED either". This is where it has to start,
+            // because nothing downstream can tell a claimed weapon from a claimed ship.
+            //
+            // A prior claim on a real unit is still released: selecting the torpedo does
+            // mean the player has stopped commanding the ship, so the partner should get
+            // it back rather than have it pinned by a selection that has moved on.
+            if (objectToAttach is WeaponBase)
+            {
+                if (previousClaim != 0)
+                {
+                    NetworkManager.Instance.SendToOther(new GameEventMessage
+                    {
+                        EventType = GameEventType.UnitDeselected,
+                        Param     = (float)previousClaim,
+                    });
+                    UnitLockManager.ClearLocalControlled();
+                }
+                return;
+            }
+
             // If the remote player already controls this unit, we're only spectating -
             // don't broadcast a claim (would cause both sides to see each other as remote-locked).
             if (UnitLockManager.IsLockedByRemote(newId))
@@ -2702,6 +2729,9 @@ namespace SeapowerMultiplayer
             // with an IndexOutOfRange and left the client on a dead loading screen.
             // A lock is about live order entry; it has no business filtering a restore.
             if (SessionManager.SceneLoading) return;
+            // Weapons are never ally-locked - see UnitLockManager.BlocksOrdersFor. A
+            // torpedo rendered uncontrollable here takes its guidance panel with it.
+            if (__instance is WeaponBase) return;
             if (UnitLockManager.IsLockedByRemote(__instance.UniqueID))
                 __result = false;
         }
