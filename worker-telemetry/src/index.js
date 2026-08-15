@@ -7,7 +7,7 @@
 // webhook secret.
 //
 // Raw batches land in R2 as received (already gzipped). Metric lines are also
-// written to Analytics Engine so the aggregate questions ("did 0.3.6 reduce
+// written to Analytics Engine so the aggregate questions ("did 0.3.7 reduce
 // drift?") can be answered in SQL without downloading blobs.
 
 import { renderDashboard } from './dashboard.js';
