@@ -15,11 +15,16 @@ namespace SeapowerMultiplayer.Net2
         // toggle, and Hello/Welcome each carry the sender's packed gameplay options plus
         // its enabled-mod fingerprint. One bump, because none of them had shipped yet -
         // keep adding to this line until it does.
-        // 231 adds the host's "disable F10 debug menu" rule to Welcome. Bumped rather
-        // than appended to 230's list because 230 shipped in v0.3.6: the field is
-        // trailing-optional, so a v0.3.6 client would read a v0.3.7 host's Welcome
-        // without complaint and simply never apply the rule. A silently unenforced
-        // rule is worse than a refused pairing, which is what the version gate is for.
+        // 231 adds the host's "disable F10 debug menu" rule to Welcome, and widens
+        // PlayerOrder's AttackAtWaypoint Speed packing to carry the waypoint insertion
+        // index above the existing flag bits. Bumped rather than appended to 230's list
+        // because 230 shipped in v0.3.6, and both changes are silent across a version
+        // gap: the Welcome field is trailing-optional (a v0.3.6 client would read a
+        // v0.3.7 host's Welcome without complaint and never apply the rule), and a
+        // v0.3.6 host would mask the new index bits off and go on appending every
+        // queued drop. An unenforced rule and a mis-ordered queue are both worse than
+        // a refused pairing, which is what the version gate is for. Keep adding to
+        // this line until 231 ships.
         public const ushort ProtocolVersion = 231;
 
         /// <summary>

@@ -460,6 +460,38 @@ namespace SeapowerMultiplayer
                 typeof(float), typeof(bool), typeof(bool) })]
     public static class Patch_ObjectBase_SetAttackAtWaypointTask
     {
+        /// <summary>Index of the `after` task in the unit's task list, captured in the
+        /// Prefix and reused by the Postfix.
+        ///
+        /// `after` is the whole of a QUEUE. Every chained drop - the shift-click chain
+        /// and the Ctrl/Alt pattern both - is issued as SetAttackAtWaypointTask(...,
+        /// after: the previously created task), and AttackingState.OffsetAttack threads
+        /// that chain through the RETURN VALUE (_lastSelectedTask). Nothing carried it,
+        /// so the host passed after=null for every drop and appended each one to the end
+        /// of the list instead of inserting it where the issuer put it. A queue laid over
+        /// an existing route, or onto a selected mid-route waypoint, therefore ran in a
+        /// different ORDER on the host than the map showed - the helicopter flew its
+        /// route past the drop markers and only reached the buoys at the end.
+        ///
+        /// An index, not an id: waypoint tasks have no UniqueID, and both machines apply
+        /// the same order stream to the same list, which is the addressing EditWaypoint
+        /// and DeleteWaypoint already rely on. -1 means "no anchor" (append), which is
+        /// also what the host falls back to if the index does not resolve.
+        ///
+        /// Captured in the Prefix on purpose: the Postfix runs after the new task has
+        /// been added, which shifts every index at or after the insertion point.</summary>
+        [ThreadStatic] static int _afterIndex;
+
+        static int IndexOfTask(ObjectBase u, VisualActionTask? after)
+        {
+            if (after == null) return -1;
+            var root = u._userRoot;
+            if (root == null) return -1;
+            for (int i = 0; i < root.TaskViewModels.Count; i++)
+                if (root.TaskViewModels[i].Task == after) return i;
+            return -1;
+        }
+
         static PlayerOrderMessage Msg(ObjectBase u, string ammunitionName, ObjectBase targetObject,
             GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition, int salvo,
             EngageTask.SalvoType salvoType, float areaRadius, bool formationAttack, bool attackOnlyDetected)
@@ -479,19 +511,25 @@ namespace SeapowerMultiplayer
                 // The message is out of float fields, so the two attack flags ride in
                 // the high bits of the salvo type. They are only ever non-default on
                 // the WaypointData (mission/save import) overload, but dropping them
-                // would silently change what the host's task does.
+                // would silently change what the host's task does. The insertion index
+                // rides above them (+1 so that 0 still means "append"); Speed is a
+                // float, and every value here is far below 2^24, so it survives exactly.
                 Speed          = (int)salvoType
                                  | (formationAttack    ? 0x100 : 0)
-                                 | (attackOnlyDetected ? 0x200 : 0),
+                                 | (attackOnlyDetected ? 0x200 : 0)
+                                 | ((_afterIndex + 1) << 10),
                 Heading        = areaRadius,
             };
 
         static bool Prefix(ObjectBase __instance, ref AttackAtWaypoint __result,
                            string ammunitionName, ObjectBase targetObject,
                            GeoPosition targetGeoPosition, GeoPosition waypointGeoPosition,
-                           int salvo, EngageTask.SalvoType salvoType, float areaRadius,
+                           int salvo, VisualActionTask after,
+                           EngageTask.SalvoType salvoType, float areaRadius,
                            bool formationAttack, bool attackOnlyDetected)
         {
+            _afterIndex = IndexOfTask(__instance, after);
+
             if (OrderSyncHelper.Prefix(__instance, Msg(__instance, ammunitionName, targetObject,
                     targetGeoPosition, waypointGeoPosition, salvo, salvoType, areaRadius,
                     formationAttack, attackOnlyDetected)))
@@ -665,6 +703,23 @@ namespace SeapowerMultiplayer
             var root = unit._userRoot;
             if (root == null || start < 0 || start >= root.TaskViewModels.Count) return;
             if (!(root.TaskViewModels[start].Task is GoToWaypointTask wp)) return;
+
+            // NOT attack/sonobuoy-drop waypoints. AttackAtWaypoint derives from
+            // GoToWaypointTask, so the test above accepts one, and this drag-sync then
+            // rewrote drop waypoints by LIST INDEX - addressing that is only stable for
+            // a route the player is editing. A queue of drops is the opposite: each task
+            // completes and leaves the list as the aircraft passes it, so the two
+            // machines' lists shrink at slightly different moments and an index that
+            // meant "the second buoy" on the client lands on a different task here.
+            // Verified live: a three-buoy queue logged EditWaypoint orders for the
+            // dropping helicopter interleaved with the drops themselves, on a unit whose
+            // task list held nothing but those three drops.
+            //
+            // Nothing is lost by skipping them - a drop waypoint's position already
+            // travels authoritatively in its own AttackAtWaypoint order. Only dragging
+            // an existing drop marker goes unsynced, which is a far smaller cost than
+            // scrambling a queue mid-flight.
+            if (wp is AttackAtWaypoint) return;
 
             // 20Hz throttle per unit - mark pending if too soon
             int uid = unit.UniqueID;
