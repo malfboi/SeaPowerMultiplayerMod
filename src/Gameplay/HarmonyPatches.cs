@@ -1687,12 +1687,49 @@ namespace SeapowerMultiplayer
             // player's own switches and orders under them. (Motion is a separate
             // matter: the host still simulates those ships, so AI that steers them has
             // to be stopped at the AI itself, not here.)
-            if (Suppression.HostSuppressesRemoteTfAi(unit)) return;
+            if (Suppression.HostSuppressesRemoteTfAi(unit) && !CrossesRemoteTfGate(msg)) return;
             // Weapons are host-simulated and streamed in both modes - see Prefix.
             if (unit is WeaponBase) return;
             if (SessionManager.SceneLoading) return; // don't broadcast during scene load
             if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate - skip broadcast
             NetworkManager.Instance.BroadcastToClients(msg);
+        }
+
+        /// <summary>The one order that has to cross the remote-taskforce gate above.
+        ///
+        /// Formation membership is not the host deciding something on the other player's
+        /// behalf. It is bookkeeping the host's simulation DERIVES, because under
+        /// unified authority the host runs that player's fleet: FlightDeck.launchVehicle
+        /// forms a launch up into a Vic, a leader that dies is replaced, a flight that
+        /// recovers is torn down. All of that happens inside the host's sim, for units
+        /// the gate calls remote - so all of it was dropped, and the client's replicas
+        /// were never in the formation at all. A whole PvP client log went by without a
+        /// single FormationCommand arriving, which is the reported "the second F-14 did
+        /// not stay in formation with the first" and the ships that alternated between
+        /// "In formation" and "Loitering".
+        ///
+        /// EntitySpawn.FormationLeaderId already carries the join a launch makes, and it
+        /// is not a player order so the gate never saw it - but it covers that one join,
+        /// at spawn, and nothing after. Leader swap, detach, disband, rename and a
+        /// re-station have no other route to the client.
+        ///
+        /// CeaseFire and RecallAll are deliberately NOT here. Those carry a
+        /// player-visible weapons and station effect, and for them the gate's reasoning
+        /// holds exactly as written above: anything reaching this point for a remote-TF
+        /// unit came from host-side AI, and applying it would countermand orders the
+        /// other player gave. The structural ops change no order anyone issued.
+        ///
+        /// This does not reopen any of the self-sustaining sends the formation patches
+        /// document. OnUpdate station keeping is dropped at
+        /// Patch_UnitFormation_ReturnToFormation, leader reassignment at
+        /// FormationInternal (tested a few lines above this call), and the
+        /// station-keeping ChangeStationPosition callers by its setStationHeight filter.
+        /// What is left is one-shot.</summary>
+        private static bool CrossesRemoteTfGate(PlayerOrderMessage msg)
+        {
+            if (msg.Order != OrderType.FormationCommand) return false;
+            var op = (FormationOp)msg.ShotsToFire;
+            return op != FormationOp.CeaseFire && op != FormationOp.RecallAll;
         }
 
         internal static PlayerOrderMessage SensorMsg(ObjectBase u, int group, bool enable) =>

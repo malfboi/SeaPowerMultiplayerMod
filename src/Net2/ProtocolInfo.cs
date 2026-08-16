@@ -23,9 +23,15 @@ namespace SeapowerMultiplayer.Net2
         // v0.3.7 host's Welcome without complaint and never apply the rule), and a
         // v0.3.6 host would mask the new index bits off and go on appending every
         // queued drop. An unenforced rule and a mis-ordered queue are both worse than
-        // a refused pairing, which is what the version gate is for. Keep adding to
-        // this line until 231 ships.
-        public const ushort ProtocolVersion = 231;
+        // a refused pairing, which is what the version gate is for.
+        // 232 widens ContactSync's per-contact Classified bool into a side CODE
+        // (unknown / neutral cover / actual side). 231 shipped in v0.3.7, and the
+        // change has to be gated: the field keeps its size and position, so a 231
+        // peer would read the new code as a bool and take every value except
+        // "unknown" as "the host knows" - which is exactly the reading that made a
+        // disguised spy unit's cover identity resolve to its real taskforce on the
+        // client. Keep adding to this line until 232 ships.
+        public const ushort ProtocolVersion = 232;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices
