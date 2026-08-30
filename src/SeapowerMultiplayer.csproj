@@ -15,66 +15,66 @@
   <!-- BepInEx and Harmony — reference game-installed DLLs -->
   <ItemGroup>
     <Reference Include="BepInEx">
-      <HintPath>$(GameDir)\BepInEx\core\BepInEx.dll</HintPath>
+      <HintPath>$(GameDir)/BepInEx\core\BepInEx.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>$(GameDir)\BepInEx\core\0Harmony.dll</HintPath>
+      <HintPath>$(GameDir)/BepInEx\core\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- Game code lives in Seapower-Scripts.dll, not Assembly-CSharp.dll -->
     <Reference Include="Seapower-Scripts">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\Seapower-Scripts.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\Seapower-Scripts.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.PhysicsModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.ParticleSystemModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.ParticleSystemModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.AudioModule">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UniRx">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\UniRx.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\UniRx.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="ParadoxNotion">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\ParadoxNotion.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\ParadoxNotion.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="com.rlabrecque.steamworks.net">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- The game's UI framework. Our overlay is a NoesisView on its own camera,
          so it works in every scene instead of only inside a loaded mission. -->
     <Reference Include="Noesis.NoesisGUI">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <!-- Anchor Chain chainloader (ACPlugin attribute + IAnchorChainMod).
@@ -90,7 +90,7 @@
     <!-- AnchorChain is built against netstandard 2.1; reference the Unity facade
          so net472 can consume it. -->
     <Reference Include="netstandard">
-      <HintPath>$(GameDir)\Sea Power_Data\Managed\netstandard.dll</HintPath>
+      <HintPath>$(GameDir)/Sea Power_Data\Managed\netstandard.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
@@ -117,9 +117,11 @@
       <MergeInputs Include="$(OutputPath)$(AssemblyName).dll" />
       <MergeInputs Include="$(OutputPath)LiteNetLib.dll" />
       <MergeLibDirs Include="$(OutputPath)" />
-      <MergeLibDirs Include="..\lib" />
-      <MergeLibDirs Include="$(GameDir)\Sea Power_Data\Managed" />
-      <MergeLibDirs Include="$(GameDir)\BepInEx\core" />
+      <MergeLibDirs Include="../lib" />
+      <MergeLibDirs Include="$(GameDir)/Sea Power_Data/Managed" />
+      <MergeLibDirs Include="$(GameDir)/BepInEx/core" />
+      <MergeLibDirs Include="/NEW-DRIVE/SteamLibrary/steamapps/common/Sea Power/BepInEx/core" />
+      <MergeLibDirs Include="/NEW-DRIVE/SteamLibrary/steamapps/common/Sea Power/Sea Power_Data/Managed" />
     </ItemGroup>
     <ILRepack
       Parallel="true"
@@ -127,7 +129,7 @@
       InputAssemblies="@(MergeInputs)"
       LibraryPath="@(MergeLibDirs)"
       TargetKind="Dll"
-      OutputFile="$(OutputPath)merged\$(AssemblyName).dll" />
+      OutputFile="$(OutputPath)merged/$(AssemblyName).dll" />
   </Target>
 
   <!-- Anchor Chain loads mods from a folder under StreamingAssets (or a workshop
@@ -140,14 +142,14 @@
        see first, which may be the one you meant to disable. -->
   <Target Name="CopyToStreamingAssets" AfterTargets="ILRepackMerge" Condition="'$(SkipDeploy)' != 'true'">
     <PropertyGroup>
-      <ModDir>Sea Power_Data\StreamingAssets\SeapowerMultiplayer</ModDir>
+      <ModDir>Sea Power_Data/StreamingAssets/SeapowerMultiplayer</ModDir>
     </PropertyGroup>
     <ItemGroup>
       <ModFiles Include="$(OutputPath)merged\$(AssemblyName).dll" />
       <ModFiles Include="..\workshop\_info.ini" />
     </ItemGroup>
-    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir)\$(ModDir)\" />
-    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir2)\$(ModDir)\" />
+    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir)/$(ModDir)/" />
+    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir2)/$(ModDir)/" />
     <Message Text="Copied plugin to $(GameDir)\$(ModDir)\" Importance="high" />
     <Message Text="Copied plugin to $(GameDir2)\$(ModDir)\" Importance="high" />
   </Target>

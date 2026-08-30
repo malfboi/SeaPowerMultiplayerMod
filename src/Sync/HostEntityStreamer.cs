@@ -158,13 +158,13 @@ namespace SeapowerMultiplayer
                 CaptureUnits(UnitType.Aircraft,   UnitRegistry.AircraftList, nearOnly);
                 CaptureUnits(UnitType.Helicopter, UnitRegistry.Helicopters, nearOnly);
                 CaptureUnits(UnitType.LandUnit,   UnitRegistry.LandUnits,   nearOnly);
-                CaptureUnits(UnitType.Torpedo,    UnitRegistry.Torpedoes,   nearOnly);
             }
             // Missiles/bombs: always-dirty while flying - bypass the heartbeat filter
             if (missileTick)
             {
                 CaptureUnits(UnitType.Missile,    UnitRegistry.Missiles, false);
                 CaptureUnits(UnitType.Bomb,       UnitRegistry.Bombs,    false);
+                CaptureUnits(UnitType.Torpedo,    UnitRegistry.Torpedoes, false);
             }
 
             // Deck-phase aircraft ride a carrier-relative channel instead of the
