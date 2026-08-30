@@ -612,6 +612,13 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.WeaponWireState:
+                {
+                    var msg = WeaponWireStateMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => WeaponWireStateApplier.Apply(msg));
+                    break;
+                }
+
                 case MessageType.SessionReady:
                 {
                     var msg = SessionReadyMessage.Deserialize(reader);

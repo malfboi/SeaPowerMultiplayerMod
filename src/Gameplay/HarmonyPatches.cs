@@ -1217,6 +1217,17 @@ namespace SeapowerMultiplayer
 
             SendClientFireOrder(__instance, ammoId, targetObject, targetPosition, shotsToFire);
 
+            // Play launch voiceover locally on guest (host plays its own in the real launch path)
+            if (__instance.IsPlayerObject)
+            {
+                float interval = Globals._weaponLaunchReportInterval;
+                if (GameTime.time - Globals._weaponLaunchReportTime >= interval)
+                {
+                    Globals._weaponLaunchReportTime = GameTime.time;
+                    Singleton<VoiceMessage>.Instance.PlayVoiceMessage("WeaponAway", __instance.getNation());
+                }
+            }
+
             // The postfix removes the local enqueue - the host owns execution; the
             // weapon returns as a replica via EntitySpawn.
             __state = true;

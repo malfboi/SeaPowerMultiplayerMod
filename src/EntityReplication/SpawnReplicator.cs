@@ -537,11 +537,8 @@ namespace SeapowerMultiplayer
                             var onWireField = AccessTools.Field(typeof(WeaponBase), "_onWire");
                             if (onWireField != null) onWireField.SetValue(wb, true);
 
-                            var connLostField = AccessTools.Field(typeof(WeaponBase), "_connectionLost");
-                            if (connLostField != null) connLostField.SetValue(wb, false);
-
-                            var foreverField = AccessTools.Field(typeof(WeaponBase), "_forever");
-                            if (foreverField != null) foreverField.SetValue(wb, false);
+                            wb.ConnectionLost.Value = false;
+                            wb.ConnectionLostForever.Value = false;
                         }
                         catch (Exception ex)
                         {

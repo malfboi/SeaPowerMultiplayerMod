@@ -976,4 +976,91 @@ namespace SeapowerMultiplayer
             Telemetry.Count("v2.capturedUnitDespawn");
         }
     }
+
+    // ── Wire-guided torpedo state broadcast ──────────────────────────────────
+    //
+    // The guest's wire command forward patches return false so the local weapon
+    // fields (AimPointGeoPosition, CurrentIntendedTargetObject, _onWire, etc.)
+    // never update on the guest. The host's torpedo changes authoritatively;
+    // these postfixes snapshot the new state and broadcast it so the guest's
+    // tactical map target line / aim indicator follows.
+
+    public static class WireStateBroadcast
+    {
+        internal static WeaponWireStateMessage Snapshot(WeaponBase wb)
+        {
+            byte flags = 0;
+            if (wb._onWire) flags |= WeaponWireStateMessage.FlagOnWire;
+            if (wb.ConnectionLost.Value) flags |= WeaponWireStateMessage.FlagConnectionLost;
+            if (wb.ConnectionLostForever.Value) flags |= WeaponWireStateMessage.FlagConnectionLostForever;
+
+            return new WeaponWireStateMessage
+            {
+                WeaponId       = wb.UniqueID,
+                TargetEntityId = wb.CurrentIntendedTargetObject?.UniqueID ?? 0,
+                AimLonDeg      = wb.AimPointGeoPosition._longitude,
+                AimLatDeg      = wb.AimPointGeoPosition._latitude,
+                AimHeight      = (float)wb.AimPointGeoPosition._height,
+                InitLonDeg     = wb.InitialTargetGeoPosition._longitude,
+                InitLatDeg     = wb.InitialTargetGeoPosition._latitude,
+                InitHeight     = (float)wb.InitialTargetGeoPosition._height,
+                Flags          = flags,
+                WireSpeedIndex = WeaponWireStateMessage.WireSpeedUnchanged,
+                WireDepthFeet  = 0f,
+            };
+        }
+
+        internal static void Broadcast(WeaponBase wb)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            if (!wb._onWire && !wb.ConnectionLost.Value) return;
+
+            var msg = Snapshot(wb);
+            NetworkManager.Instance.BroadcastToClients(msg);
+            Plugin.Log.LogInfo($"[WireState] Broadcast: weapon={wb.UniqueID} target={msg.TargetEntityId} " +
+                $"aim={msg.AimLonDeg:F3},{msg.AimLatDeg:F3} flags={msg.Flags}");
+        }
+    }
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.SetWireSpeedSetting))]
+    public static class Patch_V2_TorpedoWireSpeed_Broadcast
+    {
+        static void Postfix(Torpedo __instance)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            var msg = WireStateBroadcast.Snapshot(__instance);
+            msg.WireSpeedIndex = (byte)(__instance.SpeedSetting.Value >= 0 ? __instance.SpeedSetting.Value : 255);
+            NetworkManager.Instance.BroadcastToClients(msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.OrderWireDepth))]
+    public static class Patch_V2_TorpedoWireDepth_Broadcast
+    {
+        static void Postfix(Torpedo __instance)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            var msg = WireStateBroadcast.Snapshot(__instance);
+            msg.WireDepthFeet = __instance.OrderedWireDepthFeet.Value;
+            NetworkManager.Instance.BroadcastToClients(msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.BreakWire))]
+    public static class Patch_V2_WeaponBreakWire_Broadcast
+    {
+        static void Postfix(WeaponBase __instance) => WireStateBroadcast.Broadcast(__instance);
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeapon), new[] { typeof(ObjectBase) })]
+    public static class Patch_V2_WeaponRetarget_Broadcast
+    {
+        static void Postfix(WeaponBase __instance) => WireStateBroadcast.Broadcast(__instance);
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeaponToGeoPosition))]
+    public static class Patch_V2_WeaponRetargetGeo_Broadcast
+    {
+        static void Postfix(WeaponBase __instance) => WireStateBroadcast.Broadcast(__instance);
+    }
 }
