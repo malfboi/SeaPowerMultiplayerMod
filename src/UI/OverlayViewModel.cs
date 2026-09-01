@@ -483,6 +483,12 @@ namespace SeapowerMultiplayer.UI
         /// nothing interactive in it.)</summary>
         private int _rosterVersion = -1;
 
+        /// <summary>Whether the last rebuild put team buttons on the rows. Tracked
+        /// separately from the roster version because it flips on MISSION state, not on
+        /// roster state - and each row captures the answer at construction, so a change
+        /// has to force a rebuild or the buttons stay as they were.</summary>
+        private bool _rosterHadTeamButtons;
+
         public Visibility HostTeamControlsVisibility { get; private set; } = Visibility.Collapsed;
         public Visibility RosterVisibility { get; private set; } = Visibility.Collapsed;
 
@@ -1047,9 +1053,16 @@ namespace SeapowerMultiplayer.UI
             var vis = Vis(show);
             if (vis != RosterVisibility) { RosterVisibility = vis; Raise(nameof(RosterVisibility)); }
 
-            // Team assignment is the host's call, and only while people can still be
-            // moved without a reload - which today means before the mission is running.
-            var hostVis = Vis(nm.IsHost && show);
+            // Team assignment is the host's call, and only BEFORE the mission is live.
+            //
+            // Moving someone between sides mid-mission is not a UI nicety: which team a
+            // player is on decides whether their save was side-swapped, and that is
+            // settled once, when they load. Flipping it afterwards would leave them
+            // commanding a fleet the swap says is not theirs, with the host refusing
+            // every order and nothing on screen to explain it. The correct way to change
+            // sides is to rejoin, so the button simply goes away.
+            bool canAssignTeams = nm.IsHost && show && !SessionManager.MissionIsLive;
+            var hostVis = Vis(canAssignTeams);
             if (hostVis != HostTeamControlsVisibility)
             {
                 HostTeamControlsVisibility = hostVis;
@@ -1062,13 +1075,15 @@ namespace SeapowerMultiplayer.UI
                 return;
             }
 
-            if (PlayerRegistry.Version == _rosterVersion) return;
+            if (PlayerRegistry.Version == _rosterVersion
+                && canAssignTeams == _rosterHadTeamButtons) return;
             _rosterVersion = PlayerRegistry.Version;
+            _rosterHadTeamButtons = canAssignTeams;
 
             Roster.Clear();
             byte localSlot = PlayerRegistry.LocalSlot;
             foreach (var p in PlayerRegistry.All)
-                Roster.Add(new PlayerRowVm(p, p.Slot == localSlot, nm.IsHost));
+                Roster.Add(new PlayerRowVm(p, p.Slot == localSlot, canAssignTeams));
 
             Raise(nameof(MyTeamText));
         }

@@ -2674,7 +2674,6 @@ namespace SeapowerMultiplayer
     {
         static void Postfix(ObjectBase __instance, ref bool __result)
         {
-            if (!Teams.HasTeammates) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (__instance == null) return;
             // Host is authoritative: it must execute client-originated orders to

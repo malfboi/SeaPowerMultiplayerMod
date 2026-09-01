@@ -1121,6 +1121,32 @@ namespace SeapowerMultiplayer
                 var msg = WelcomeMessage.Deserialize(reader);
                 _mainThreadQueue.Enqueue(() => HandleWelcome(msg));
             }
+            else if (!_isHost && _clientHandshake == HandshakeState.AwaitingWelcome)
+            {
+                // THE SAME RACE AS ABOVE, one message later.
+                //
+                // The host sends Welcome and then the player roster back to back, so both
+                // land in one Poll batch. The Welcome's state transition is QUEUED to the
+                // main thread, so when the roster is tested here - on the network thread -
+                // IsEstablishedFor still reads false and the roster was dropped. Nothing
+                // re-sent it, so the guest spent the whole session with a roster
+                // containing only itself: no teammates, therefore no "send to player"
+                // entry, and no names anywhere.
+                //
+                // Dispatching is safe and ordering-correct for exactly the reason the
+                // Hello path gives: Dispatch only ENQUEUES the apply, and the queue is
+                // FIFO, so it runs after the HandleWelcome already sitting in front of it.
+                // Scoped to a client that is genuinely mid-handshake - a host still
+                // refuses gameplay from a peer that has not said Hello.
+                try
+                {
+                    Dispatch(from, type, reader);
+                }
+                catch (System.Exception ex)
+                {
+                    Log.LogError($"[Net] Failed to handle {type} from {from} during handshake: {ex}");
+                }
+            }
             else
             {
                 Telemetry.Count("net.droppedPreHandshake");

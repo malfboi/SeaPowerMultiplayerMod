@@ -155,6 +155,13 @@ namespace SeapowerMultiplayer
                 if (PlayerRegistry.TryGet(slot, out var p))
                     FormationOwnership.HostGrantTeamTo(p.Team, slot);
                 FormationOwnership.HostSendFull(slot);
+
+                // Re-state the roster now that this player is definitely listening.
+                // The one sent at handshake time can lose a race with the client's own
+                // Welcome, and a roster is otherwise only re-sent when somebody joins or
+                // leaves - so a guest that missed it stayed teammate-less for the whole
+                // session. Four short entries; cheap insurance against a silent gap.
+                PlayerRegistry.HostBroadcastRoster();
             }
             Plugin.Log.LogInfo($"[SimSync] Slot {slot} ready (allReady={AllReady}) — " +
                                $"paused={GameTime.IsPaused()}, TC={GameTime.TimeCompression}");

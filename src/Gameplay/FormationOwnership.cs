@@ -147,7 +147,14 @@ namespace SeapowerMultiplayer
                 _pendingDelta.Add((unit.UniqueID, slot));
             }
 
-            if (_pendingDelta.Count == 0) return;
+            if (_pendingDelta.Count == 0)
+            {
+                Plugin.Log.LogInfo($"[Ownership] {PlayerRegistry.DisplayName(slot)} took nothing on " +
+                                   $"{Teams.Name(team)} - {tf.TaskforceObjects.Count} object(s) there, " +
+                                   $"{_owner.Count} already owned, the rest not ownable (weapons, or no id yet). " +
+                                   "(Expected for anyone but the first player on a side.)");
+                return;
+            }
             Epoch++;
             Plugin.Log.LogInfo($"[Ownership] {PlayerRegistry.DisplayName(slot)} took {_pendingDelta.Count} unit(s) on {Teams.Name(team)}.");
             HostBroadcastDelta();
@@ -297,6 +304,10 @@ namespace SeapowerMultiplayer
 
             // A full table can touch every unit on the map, so re-label the lot rather
             // than trying to work out which ones moved.
+            Plugin.Log.LogInfo($"[Ownership] Applied {(msg.Full ? "FULL" : "delta")} table: " +
+                               $"{msg.Entries.Count} entries, lock={msg.LockActive}, epoch={msg.Epoch}; " +
+                               $"now holding {_owner.Count} owned unit(s), my slot={PlayerRegistry.LocalSlot}.");
+
             if (msg.Full) MapUnitViewModelRegistry.NotifyAll();
             else foreach (var (id, _) in msg.Entries) MapUnitViewModelRegistry.NotifyOwnershipChanged(id);
         }

@@ -32,10 +32,25 @@ namespace SeapowerMultiplayer
         internal static ContextMenuItem? BuildSendToPlayer(ObjectBase? anchor)
         {
             if (anchor == null || anchor.UniqueID == 0) return null;
-            if (!OwnershipRules.LockActive) return null;              // free-for-all: nothing to send
             if (!NetworkManager.Instance.IsEstablished) return null;
             if (SessionManager.SceneLoading) return null;
-            if (!FormationOwnership.IsMine(anchor)) return null;      // not yours to give away
+
+            // From here on the player could reasonably expect the entry, so say why it
+            // is missing rather than just not drawing it. A right-click is not a hot
+            // path, so an unthrottled line is fine.
+            if (!OwnershipRules.LockActive)
+            {
+                Plugin.Log.LogInfo("[Ownership] No send-to-player entry: unit lock is off " +
+                                   "(free-for-all - nobody owns anything).");
+                return null;
+            }
+            if (!FormationOwnership.IsMine(anchor))
+            {
+                Plugin.Log.LogInfo($"[Ownership] No send-to-player entry for unit {anchor.UniqueID}: " +
+                                   $"owner is slot {FormationOwnership.OwnerOf(anchor)}, I am slot " +
+                                   $"{PlayerRegistry.LocalSlot}.");
+                return null;
+            }
 
             var mine = Teams.LocalTeam;
             var subs = new TrulyObservableCollection<ContextMenuItem>();
@@ -61,7 +76,20 @@ namespace SeapowerMultiplayer
                 })));
             }
 
-            if (subs.Count == 0) return null;                         // nobody to send to
+            if (subs.Count == 0)
+            {
+                // The interesting failure: we own it, but found no teammate to offer.
+                // Dump the roster as this machine sees it - a missing or mis-flagged
+                // entry here is why the submenu would be empty.
+                var sb = new System.Text.StringBuilder();
+                foreach (var p in PlayerRegistry.All)
+                    sb.Append($"[slot={p.Slot} team={p.Team} conn={p.Connected} est={p.Established} " +
+                              $"name='{p.DisplayName}'] ");
+                Plugin.Log.LogInfo($"[Ownership] No send-to-player entry for unit {anchor.UniqueID}: " +
+                                   $"I own it but see no teammate. My slot={PlayerRegistry.LocalSlot}, " +
+                                   $"my team={mine}. Roster: {(sb.Length > 0 ? sb.ToString() : "(empty)")}");
+                return null;
+            }
 
             return new ContextMenuItem(
                 anchor.Formation != null ? "Send formation to player" : "Send unit to player",

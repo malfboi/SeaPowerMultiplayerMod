@@ -242,6 +242,12 @@ namespace SeapowerMultiplayer
 
         public static void HostRemove(PeerId peer)
         {
+            // HOST ONLY. This is called from the shared disconnect path, and on a guest
+            // it matched the LOCAL player - whose Peer is PeerId.Server - and deleted it
+            // from the guest's own roster. Harmless in that the session was ending
+            // anyway, but it logged "<you> left" on your own machine, which reads as a
+            // fault rather than a teardown.
+            if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!TryGetByPeer(peer, out var p)) return;
             Plugin.Log.LogInfo($"[Players] {p.DisplayName} (slot {p.Slot}) left.");
             _slots[p.Slot] = null;
