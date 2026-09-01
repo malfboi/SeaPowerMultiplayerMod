@@ -24,6 +24,7 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgAutoConnect = null!;
         internal ConfigEntry<bool> CfgLockUnits = null!;
         internal ConfigEntry<string> CfgDefaultTeam = null!;
+        internal ConfigEntry<string> CfgUsername = null!;
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
 
@@ -88,6 +89,7 @@ namespace SeapowerMultiplayer
             // silently disagrees with the others about who may command what.
             CfgLockUnits.SettingChanged += (_, __) => FormationOwnership.HostSendFull();
             CfgDefaultTeam = Config.Bind("Network", "DefaultTeam",  "Blue",      "Team to request when joining without an invite (Blue or Red). The host decides the final seating.");
+            CfgUsername    = Config.Bind("Network", "Username",     "",          "Name other players see in the roster and the 'send to player' menu. Mainly for LiteNetLib, which has no identity of its own - leave empty there and you show up as \"Player 2\". On Steam this overrides your persona name if set.");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
             // The client defers to the host's setting, and SessionSync only carries
@@ -254,6 +256,10 @@ namespace SeapowerMultiplayer
             // SPMP_TEAM replaces SPMP_PVP: the two-instance test harness now says which
             // SIDE the second instance plays, not what mode the session is in.
             string? team      = V("SPMP_TEAM");
+            // The whole point of a name override is telling two instances on ONE
+            // machine apart, so it has to be settable per-process, not just in the
+            // config file both of them share.
+            string? username  = V("SPMP_USERNAME");
             string? autoConn  = V("SPMP_AUTOCONNECT");
             string? transport = V("SPMP_TRANSPORT");
             string? simLoss   = V("SPMP_NETSIM_LOSS");
@@ -261,8 +267,8 @@ namespace SeapowerMultiplayer
             string? simJitter = V("SPMP_NETSIM_JITTERMS");
 
             if (role == null && hostIp == null && port == null && team == null
-                && autoConn == null && transport == null && simLoss == null && simLat == null
-                && simJitter == null)
+                && username == null && autoConn == null && transport == null && simLoss == null
+                && simLat == null && simJitter == null)
                 return;
 
             Config.SaveOnConfigSet = false; // keep dev overrides out of the shared cfg
@@ -271,6 +277,7 @@ namespace SeapowerMultiplayer
             if (hostIp != null)    CfgHostIP.Value      = hostIp;
             if (port != null && int.TryParse(port, out int p))            CfgPort.Value = p;
             if (team != null)      CfgDefaultTeam.Value = team.Equals("red", StringComparison.OrdinalIgnoreCase) ? "Red" : "Blue";
+            if (username != null)  CfgUsername.Value    = username;
             if (autoConn != null)  CfgAutoConnect.Value = autoConn == "1" || autoConn.Equals("true", StringComparison.OrdinalIgnoreCase);
             if (transport != null) CfgTransport.Value   = transport;
             if (simLoss != null && float.TryParse(simLoss, out float l)) CfgNetSimLossPct.Value = l;
@@ -278,7 +285,8 @@ namespace SeapowerMultiplayer
             if (simJitter != null && int.TryParse(simJitter, out int j)) CfgNetSimJitterMs.Value = j;
 
             Log.LogWarning($"[Config] SPMP_* env overrides active (role={(CfgIsHost.Value ? "host" : "client")}, " +
-                $"ip={CfgHostIP.Value}, port={CfgPort.Value}, team={CfgDefaultTeam.Value}, autoConnect={CfgAutoConnect.Value}, " +
+                $"ip={CfgHostIP.Value}, port={CfgPort.Value}, team={CfgDefaultTeam.Value}, user={CfgUsername.Value}, " +
+                $"autoConnect={CfgAutoConnect.Value}, " +
                 $"transport={CfgTransport.Value}, simLoss={CfgNetSimLossPct.Value}%, " +
                 $"simLat={CfgNetSimLatencyMs.Value}ms, simJitter=±{CfgNetSimJitterMs.Value}ms). " +
                 "Config persistence disabled for this run.");

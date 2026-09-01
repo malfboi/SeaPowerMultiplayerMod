@@ -27,9 +27,10 @@ namespace SeapowerMultiplayer
         public bool   Ready;                // SessionReady for the current sync epoch
         public int    UidBase;
 
-        /// <summary>What the roster and the "send to player" menu show. Steam gives us a
-        /// persona name; direct-IP has no identity concept, so fall back to the slot -
-        /// which is exactly the "index number" the LiteNetLib case needs.</summary>
+        /// <summary>What the roster and the "send to player" menu show. Resolved by the
+        /// sender as: the configured Username, else the Steam persona, else empty - and
+        /// empty falls back to the slot here, which is exactly the "index number" a
+        /// LiteNetLib player gets when they have not set a name.</summary>
         public string DisplayName => string.IsNullOrEmpty(Name) ? $"Player {Slot + 1}" : Name;
     }
 

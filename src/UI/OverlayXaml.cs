@@ -507,6 +507,16 @@ namespace SeapowerMultiplayer.UI
               </Grid>
             </Button>
             <StackPanel Margin=""4,4,0,0"" Visibility=""{Binding SettingsVisibility}"">
+              <Grid IsEnabled=""{Binding LockEditable}"" Margin=""0,0,0,2"">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width=""64""/>
+                  <ColumnDefinition Width=""*""/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column=""0"" Text=""Name"" VerticalAlignment=""Center""/>
+                <TextBox   Grid.Column=""1"" Style=""{StaticResource Field}""
+                           Text=""{Binding UsernameText, Mode=TwoWay}""/>
+              </Grid>
+
               <CheckBox Content=""Lock units to players (host)"" IsEnabled=""{Binding LockEditable}""
                         IsChecked=""{Binding LockUnits, Mode=TwoWay}""/>
               <TextBlock Text=""Leave the lobby to change this"" Style=""{StaticResource Dim}""

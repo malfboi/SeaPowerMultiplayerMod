@@ -534,6 +534,20 @@ namespace SeapowerMultiplayer.UI
         public bool SharedPictureEnabled => Teams.HasTeammates;
         public Visibility NoTeammateNoticeVisibility => Vis(!Teams.HasTeammates);
 
+        /// <summary>
+        /// The name other players see. Empty falls back to the Steam persona, then to
+        /// "Player N".
+        ///
+        /// Editable only while nothing is running, for the same reason the team lock is:
+        /// it is sent once in the handshake and republished in the roster, so changing it
+        /// mid-session would leave every other machine showing the old one.
+        /// </summary>
+        public string UsernameText
+        {
+            get => Plugin.Instance.CfgUsername.Value;
+            set { SetCfg(Plugin.Instance.CfgUsername, value ?? ""); Raise(nameof(UsernameText)); }
+        }
+
         // Numeric settings are edited as text. A value that will not parse is
         // simply not committed, so a half-typed rate never reaches the streamer.
         public string UnitHzText
@@ -1001,6 +1015,7 @@ namespace SeapowerMultiplayer.UI
             Raise(nameof(SharedPictureEnabled));
             Raise(nameof(NoTeammateNoticeVisibility));
             Raise(nameof(MyTeamText));
+            Raise(nameof(UsernameText));
         }
 
         /// <summary>

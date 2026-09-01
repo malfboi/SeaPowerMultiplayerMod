@@ -103,17 +103,43 @@ namespace SeapowerMultiplayer
             }
         }
 
-        /// <summary>This machine's Steam persona name, or "" on direct IP - those players
-        /// fall back to their slot number in the roster and the send-to-player menu.</summary>
+        /// <summary>
+        /// The name other players see in the roster and the send-to-player menu.
+        ///
+        /// Configured name first, then the Steam persona, then "" - which the registry
+        /// renders as "Player N". The explicit setting wins over Steam deliberately: its
+        /// main job is telling two instances on ONE machine apart while testing, and both
+        /// of those are signed in as the same Steam account, so deferring to the persona
+        /// would give them the same name.
+        /// </summary>
         internal static string LocalPersonaName()
         {
+            string configured = Plugin.Instance.CfgUsername.Value?.Trim() ?? "";
+            if (configured.Length > 0) return Sanitize(configured);
+
             try
             {
                 if (Plugin.Instance.CfgTransport.Value == "Steam")
-                    return Steamworks.SteamFriends.GetPersonaName() ?? "";
+                    return Sanitize(Steamworks.SteamFriends.GetPersonaName() ?? "");
             }
             catch (Exception) { /* Steam not initialised - fall through to the slot name */ }
             return "";
+        }
+
+        /// <summary>Names go on the wire and into game menu labels, so cap the length and
+        /// drop control characters - a pasted newline would otherwise break the roster
+        /// row and the context-menu entry it ends up in.</summary>
+        private static string Sanitize(string name)
+        {
+            const int MaxNameChars = 32;
+            var sb = new System.Text.StringBuilder(name.Length);
+            foreach (char c in name)
+            {
+                if (char.IsControl(c)) continue;
+                sb.Append(c);
+                if (sb.Length >= MaxNameChars) break;
+            }
+            return sb.ToString().Trim();
         }
 
         /// <summary>Has THIS peer finished handshaking? The per-peer question the
@@ -1130,9 +1156,14 @@ namespace SeapowerMultiplayer
 
             var requestedTeam = msg.RequestedTeam == (byte)Team.Red ? Team.Red : Team.Blue;
             PlayerInfo? seated = null;
+            // Sanitized on RECEIPT, not just where it was typed: this arrived off the
+            // wire, and the name goes straight into every other player's roster row and
+            // context-menu labels. A peer sending a 4 KB name or an embedded newline is
+            // everyone else's problem otherwise.
             if (refusal == null
                 && !PlayerRegistry.HostTryAdd(from, _transport?.SteamIdOf(from) ?? 0UL,
-                                              msg.DisplayName, requestedTeam, out seated, out var full))
+                                              Sanitize(msg.DisplayName ?? ""), requestedTeam,
+                                              out seated, out var full))
             {
                 refusal = full;
             }
