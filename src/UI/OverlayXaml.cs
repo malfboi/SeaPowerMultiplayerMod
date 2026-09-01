@@ -524,6 +524,11 @@ namespace SeapowerMultiplayer.UI
 
               <CheckBox Content=""Time vote (host)"" IsChecked=""{Binding TimeVote, Mode=TwoWay}""/>
 
+              <CheckBox Content=""Disable F10 debug menu (host)"" IsEnabled=""{Binding F10SettingUnlocked}""
+                        IsChecked=""{Binding DisableF10Menu, Mode=TwoWay}""/>
+              <TextBlock Text=""Host has disabled the F10 debug menu"" Style=""{StaticResource Dim}""
+                         Visibility=""{Binding F10HostRuleVisibility}""/>
+
               <TextBlock Text=""Sync state (applies live)"" Style=""{StaticResource Dim}"" Margin=""0,8,0,2""/>
               <Grid>
                 <Grid.ColumnDefinitions>

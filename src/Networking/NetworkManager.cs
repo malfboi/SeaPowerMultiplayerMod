@@ -1211,6 +1211,7 @@ namespace SeapowerMultiplayer
                 GameplayOptions = RemoteGameplayOptions.PackLocal(),
                 ModFingerprint  = ModSetCheck.LocalFingerprint(),
                 ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
+                DisableF10Menu  = Plugin.Instance.CfgDisableF10Menu.Value,
             });
 
             // Everyone learns who just joined - including the joiner, whose own identity
@@ -1290,7 +1291,8 @@ namespace SeapowerMultiplayer
             // ids all the way through a load, so a floor armed afterwards is too late.
             GuestIdFloor.Arm(msg.ClientUidBase);
             Log.LogInfo($"[Handshake] Established (slot={msg.AssignedSlot}, team={(Team)msg.AssignedTeam}, " +
-                        $"uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz).");
+                        $"uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz, " +
+                        $"disableF10={msg.DisableF10Menu}).");
             ReconnectManager.OnPeerEstablished();
         }
     }

@@ -190,7 +190,12 @@ namespace SeapowerMultiplayer
                     var (unit, index) = kvp.Value;
                     var root = unit._userRoot;
                     if (root == null || index >= root.TaskViewModels.Count) continue;
-                    if (root.TaskViewModels[index].Task is GoToWaypointTask wp)
+                    // Drop/attack waypoints are excluded here for the same reason as at
+                    // the send site, and more sharply: this runs up to 150 ms late, by
+                    // which time a queue of drops has had even longer to complete tasks
+                    // and shift every index under the one recorded above.
+                    if (root.TaskViewModels[index].Task is GoToWaypointTask wp
+                        && !(wp is AttackAtWaypoint))
                         Patch_UserRootNode_UpdateSimulation.SendEditWaypoint(unit, index, wp);
                 }
                 Patch_UserRootNode_UpdateSimulation._pending.Clear();

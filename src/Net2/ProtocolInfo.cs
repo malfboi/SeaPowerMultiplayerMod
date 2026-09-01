@@ -15,12 +15,23 @@ namespace SeapowerMultiplayer.Net2
         // toggle, and Hello/Welcome each carry the sender's packed gameplay options plus
         // its enabled-mod fingerprint. One bump, because none of them had shipped yet -
         // keep adding to this line until it does.
-        // 231 is the N-player overhaul: Hello carries a requested TEAM and a display
-        // name instead of a PvP flag, Welcome carries the assigned slot/team and a
-        // per-slot UID band, and PlayerRoster is new. The session-wide PvP/co-op mode is
-        // gone - team is a property of each player now, because a 2v1 is co-op and PvP at
-        // the same time and no single flag could say so.
-        public const ushort ProtocolVersion = 231;
+        // 233 is 0.3.7's wire changes and the N-player overhaul landing together. Both
+        // branches independently claimed a number (231 here, 232 there), so neither is
+        // safe to reuse - a peer that saw the OTHER 231 would pair and then disagree
+        // about the Welcome layout. 233 is the first value that means "both".
+        //
+        // From 0.3.7: Welcome carries the host's "disable F10 debug menu" rule;
+        // PlayerOrder's AttackAtWaypoint Speed packing widened to carry the waypoint
+        // insertion index; ContactSync's per-contact Classified bool widened into a side
+        // CODE (unknown / neutral cover / actual side) so a disguised spy unit's cover
+        // identity stops resolving to its real taskforce on the client.
+        //
+        // From the N-player work: Hello carries a requested TEAM and a display name
+        // instead of a PvP flag, Welcome carries the assigned slot/team and a per-slot
+        // UID band, and PlayerRoster and UnitOwnership are new. The session-wide
+        // PvP/co-op mode is gone - team is a property of each player now, because a 2v1
+        // is co-op and PvP at the same time and no single flag could say so.
+        public const ushort ProtocolVersion = 233;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

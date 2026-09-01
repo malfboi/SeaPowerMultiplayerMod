@@ -354,6 +354,23 @@ namespace SeapowerMultiplayer
             }
         }
 
+        /// <summary>Mounts whose alignToTarget has thrown, keyed (unit id, mount index).
+        ///
+        /// A mount that throws once throws every frame after it, because the cause does
+        /// not heal: index i names a different WeaponSystem here than it does on the
+        /// host - a ship or aircraft mod enabled on one side only shifts the list, which
+        /// is exactly what the [Mods] mismatch warning is about - or the system it lands
+        /// on carries nothing to rotate. Either way the loop below re-entered it from
+        /// LateUpdate every frame for the rest of the battle, paying a thrown exception
+        /// and an UNTHROTTLED LogWarning each time: a BepInEx disk write per mount per
+        /// frame, on the render path. One PvP client log carried 4,378 of them, 2,709
+        /// from a single pair of F-14s and the rest from two Perrys, over half the lines
+        /// in the file.
+        ///
+        /// So the first throw retires that mount for the session and says so once. The
+        /// mount could not aim either way - all this drops is the repeat.</summary>
+        private static readonly HashSet<(int unitId, int mount)> _aimFailed = new();
+
         /// <summary>
         /// CLIENT: train each engaging mount on the target the host says it is engaging.
         ///
@@ -409,6 +426,9 @@ namespace SeapowerMultiplayer
                     var ws = systems[i];
                     if (ws == null || ws.Inoperable.Value) continue;
 
+                    var aimKey = (e.UniqueId, i);
+                    if (_aimFailed.Contains(aimKey)) continue;
+
                     var target = ReplicaRegistry.Find(m.TargetId) ?? StateSerializer.FindById(m.TargetId);
                     if (target == null || target.IsDestroyed) continue;
 
@@ -421,7 +441,9 @@ namespace SeapowerMultiplayer
                     try { ws.alignToTarget(target.getUnityPosition(), fixedAngle, 0); }
                     catch (System.Exception ex)
                     {
-                        Plugin.Log.LogWarning($"[UnitStatus] {unit.name} mount {i} alignToTarget threw: {ex.Message}");
+                        _aimFailed.Add(aimKey);
+                        Plugin.Log.LogWarning($"[UnitStatus] {unit.name} mount {i} alignToTarget threw: " +
+                            $"{ex.Message} - not aiming that mount again this session");
                     }
                 }
             }
@@ -468,6 +490,7 @@ namespace SeapowerMultiplayer
             _seen.Clear();
             _desired.Clear();
             DesiredEngage.Clear();
+            _aimFailed.Clear();
             _scratch.Clear();
             _packed.Clear();
             _nextFullSweep = 0f;

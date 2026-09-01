@@ -89,6 +89,16 @@ namespace SeapowerMultiplayer
         public static bool BlocksOrdersFor(ObjectBase? unit)
         {
             if (unit == null) return false;
+            // Weapons are never owned, and must never be REFUSED - the same exemption
+            // OrderSyncHelper.Prefix makes, asserted here so the callers that ask this
+            // directly rather than going through OrderSyncHelper inherit it. The
+            // submarine depth patch is one of those, and without it a wire-guided
+            // torpedo could not be steered by its own owner. (Ported from 0.3.7's
+            // "fix controllable torps", which made the same assertion in the transient
+            // lock this predicate replaced. Ownership is never granted to a WeaponBase,
+            // so today this is a backstop rather than a live fix - which is exactly why
+            // it is worth keeping.)
+            if (unit is WeaponBase) return false;
             if (!OwnershipRules.LockActive) return false;         // free-for-all
             if (OrderHandler.ApplyingFromNetwork) return false;   // somebody else's authorised order
             if (Authority.IsAllowed) return false;                // host-authoritative replay

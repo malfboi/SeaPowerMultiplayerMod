@@ -26,6 +26,10 @@ namespace SeapowerMultiplayer.Messages
         /// <summary>The host's enabled mod set - see <see cref="ModSetCheck"/>.</summary>
         public uint   ModFingerprint;
         public byte   ModCount;
+        /// <summary>Host's session rule: the game's F10 debug/cheat panel stays shut.
+        /// Carried here so it binds the client from the handshake on, before the
+        /// session save is sent. See <see cref="DebugMenuLock"/>.</summary>
+        public bool   DisableF10Menu;
 
         public MessageType Type => MessageType.Welcome;
 
@@ -39,7 +43,11 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(GameplayOptions);
             writer.Put(ModFingerprint);
             writer.Put(ModCount);
+            // Both trailing-optional, in a fixed order. AssignedSlot came from the
+            // N-player work and DisableF10Menu from 0.3.7; the order below is the
+            // contract, and Deserialize reads them back in exactly it.
             writer.Put(AssignedSlot);
+            writer.Put(DisableF10Menu);
         }
 
         public static WelcomeMessage Deserialize(NetDataReader reader) => new()
@@ -52,8 +60,11 @@ namespace SeapowerMultiplayer.Messages
             GameplayOptions = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
             ModFingerprint  = reader.AvailableBytes >= 4 ? reader.GetUInt() : 0u,
             ModCount        = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)0,
-            // Appended, so it follows the established trailing-field pattern.
+            // Trailing, in Serialize's order. IsPvP and AssignedTaskforce are gone:
+            // AssignedTeam took the latter's wire position, and there is no session-wide
+            // mode left for the former to carry.
             AssignedSlot    = reader.AvailableBytes > 0 ? reader.GetByte() : (byte)1,
+            DisableF10Menu  = reader.AvailableBytes > 0 && reader.GetBool()
         };
     }
 }

@@ -39,14 +39,14 @@ namespace SeapowerMultiplayer
         internal readonly struct Override
         {
             public readonly int     TrackId;
-            public readonly bool    Classified; // host knows whose it is
+            public readonly byte    Side;       // ContactSyncMessage.Side* - what the host resolved
             public readonly object? BoxedClass; // null = host has not identified it
             public readonly byte    Compliance; // host's AI.Compliance roll, 0 = none yet
 
-            public Override(int trackId, bool classified, object? boxedClass, byte compliance)
+            public Override(int trackId, byte side, object? boxedClass, byte compliance)
             {
                 TrackId    = trackId;
-                Classified = classified;
+                Side       = side;
                 BoxedClass = boxedClass;
                 Compliance = compliance;
             }
@@ -158,7 +158,7 @@ namespace SeapowerMultiplayer
         private static Type?      _sourcedSideType;
         private static bool       _sideReflectionResolved;
 
-        /// <summary>One boxed SourcedProperty per taskforce. There are two, and
+        /// <summary>One boxed SourcedProperty per taskforce. There is a handful, and
         /// SetValue copies the struct in, so the boxes are safe to share.</summary>
         private static readonly Dictionary<Taskforce, object> _boxedSides = new(2);
 
@@ -186,13 +186,23 @@ namespace SeapowerMultiplayer
             return true;
         }
 
-        /// <summary>Client: give a contact a Side when the host has classified it
-        /// and the client's own sensors have not. Additive like the rest of the
-        /// overlay - a Side the client resolved itself is never overwritten.</summary>
-        internal static bool ApplySideIfMissing(Vehicle vehicle, Taskforce side)
+        /// <summary>Client: write the side the host resolved onto a contact.
+        ///
+        /// Only called when the host actually has an answer, so this never erases a
+        /// side the client worked out and the host has not - the caller's
+        /// SideUnknown check is what keeps the overlay additive.
+        ///
+        /// It DOES overwrite a side the client resolved differently, and it has to.
+        /// Side is a sticky field: UpdateFromECS only assigns it inside a
+        /// HasComponent&lt;DetectedSide&gt; guard and never clears it, then ends with
+        /// <c>UnitTaskforce.Value = Side.Value</c>. Leaving a stale disagreeing Side
+        /// in place meant the game re-derived the old taskforce from it on every
+        /// tick and the postfix put ours back - two ReactiveProperty transitions per
+        /// tick, and Taskforce.AddVehcleListeners raises a "track classified" alert
+        /// and voice line off each one.</summary>
+        internal static bool ApplySide(Vehicle vehicle, Taskforce side)
         {
             if (side == null || !ResolveSideReflection()) return false;
-            if (_sideField!.GetValue(vehicle) != null) return false; // client already knows
 
             if (!_boxedSides.TryGetValue(side, out var boxed))
             {
@@ -200,9 +210,77 @@ namespace SeapowerMultiplayer
                 _sourcedSideValueField!.SetValue(boxed, side);
                 _boxedSides[side] = boxed;
             }
-            _sideField.SetValue(vehicle, boxed);
+            _sideField!.SetValue(vehicle, boxed);
             return true;
         }
+
+        /// <summary>The spy units the player's task force has seen through for
+        /// itself. The game keys the disguise off this list, and it is per-machine:
+        /// nothing puts it in the save or on the wire.</summary>
+        private static List<ObjectBase>? IdentifiedSpyUnits
+            => Globals._playerTaskforce?._identifiedSpyUnits;
+
+        private static bool IsDisguisedSpy(ObjectBase obj)
+        {
+            var p = obj._obp;
+            return p != null
+                && !string.IsNullOrEmpty(p._disguisedAs)
+                && p._unitRoles != null
+                && p._unitRoles.Contains(ObjectBaseParameters.UnitRoles.Spy);
+        }
+
+        /// <summary>Client: the taskforce the host's side code names, or null when
+        /// the host has no answer and the local picture should stand.</summary>
+        internal static Taskforce? ResolveSide(in Override ov, ObjectBase obj)
+        {
+            if (ov.Side == ContactSyncMessage.SideActual) return obj._taskforce;
+            if (ov.Side != ContactSyncMessage.SideCover)  return null;
+
+            // Additive, like the rest of the overlay: if OUR sensors have already
+            // seen through the disguise the host is still looking at, keep the real
+            // side rather than pushing the contact back to its cover identity - and
+            // rather than starting the same tick-by-tick fight in the other
+            // direction, since the local pipeline would keep writing the real side
+            // straight back.
+            if (IdentifiedSpyUnits?.Contains(obj) == true) return null;
+            return Globals._neutralTaskforce;
+        }
+
+        /// <summary>
+        /// CLIENT: share the host's unmasking of a disguised spy unit.
+        ///
+        /// A spy vessel with <c>_disguisedAs</c> set is reported to its detector's
+        /// task force as NEUTRAL until a sensor gets inside truth distance, at which
+        /// point SensorUtils.CheckClassificationOrIdentification adds it to that
+        /// task force's <c>_identifiedSpyUnits</c> and every later track carries its
+        /// real side instead. That list is per-machine, so the host unmasking a spy
+        /// left the client's own ESM, visual and sonar still writing
+        /// DetectedSide(neutral) for it - forever fighting the side this overlay
+        /// writes, one map alert and voice line per 3 s batch window.
+        ///
+        /// Adding the object to the client's list makes the client's own sensor
+        /// pipeline agree, so the fight stops at its source rather than being papered
+        /// over. Re-checked per tick because Taskforce.OnUpdate prunes the list of
+        /// anything it currently has no map vehicle for.
+        /// </summary>
+        internal static void SyncSpyUnmasking(ObjectBase obj, byte sideCode)
+        {
+            if (sideCode != ContactSyncMessage.SideActual) return;
+            if (!IsDisguisedSpy(obj)) return;
+
+            var identified = IdentifiedSpyUnits;
+            if (identified == null || identified.Contains(obj)) return;
+
+            identified.Add(obj);
+
+            // Once per contact per session: the prune above means we re-add this
+            // one whenever its map vehicle blinks, and that is not news.
+            if (_loggedUnmaskings.Add(obj.UniqueID))
+                Plugin.Log.LogInfo($"[Contacts] Host has seen through spy unit {obj.name} " +
+                    $"(id={obj.UniqueID}) - sharing it with our own sensors");
+        }
+
+        private static readonly HashSet<int> _loggedUnmaskings = new(8);
 
         /// <summary>Host side of the same problem: reading Vehicle.Class in source
         /// would name SourcedProperty&lt;string&gt; and pull the reference in just
@@ -213,6 +291,19 @@ namespace SeapowerMultiplayer
             object? boxed = _classField!.GetValue(vehicle);   // null when the Nullable is empty
             if (boxed == null) return "";
             return _sourcedValueField!.GetValue(boxed) as string ?? "";
+        }
+
+        /// <summary>Host: which of the three answers our picture gives for this
+        /// contact. The game only ever resolves a side to the contact's own task
+        /// force or - for a spy unit still wearing its cover - to the neutral one,
+        /// so "anything but its own" and "cover" are the same case, and folding
+        /// them together puts the client on the same neutral reading we are looking
+        /// at.</summary>
+        private static byte SideCodeFor(Vehicle vehicle, ObjectBase obj)
+        {
+            var tf = vehicle.UnitTaskforce.Value;
+            if (tf == null) return ContactSyncMessage.SideUnknown;
+            return tf == obj._taskforce ? ContactSyncMessage.SideActual : ContactSyncMessage.SideCover;
         }
 
         /// <summary>Client: fold a host packet into the override table.</summary>
@@ -226,7 +317,7 @@ namespace SeapowerMultiplayer
             for (int i = 0; i < msg.Entries.Count; i++)
             {
                 var e = msg.Entries[i];
-                _overrides[e.UniqueId] = new Override(e.TrackId, e.Classified, BoxClass(e.ClassName), e.Compliance);
+                _overrides[e.UniqueId] = new Override(e.TrackId, e.Side, BoxClass(e.ClassName), e.Compliance);
             }
 
             // The override keys ARE the host's contact list, so the reveal sweep
@@ -239,6 +330,7 @@ namespace SeapowerMultiplayer
             _overrides.Clear();
             _lastSent.Clear();
             _boxedSides.Clear(); // taskforce objects do not survive a scene change
+            _loggedUnmaskings.Clear();
             _privateTrackIds.Clear();
             _nextPrivateTrackId = PrivateTrackBase;
             _nextFullSweep = 0f;
@@ -254,7 +346,7 @@ namespace SeapowerMultiplayer
                 ? (AI.Compliance)ov.Compliance
                 : AI.Compliance.Unknown;
 
-        private static readonly Dictionary<int, (int trackId, bool classified, string cls, byte compliance)> _lastSent = new(128);
+        private static readonly Dictionary<int, (int trackId, byte side, string cls, byte compliance)> _lastSent = new(128);
         private static readonly ContactSyncMessage _msg = new();
         private static readonly HashSet<int> _seen = new(128);
         private static float _nextFullSweep;
@@ -337,7 +429,7 @@ namespace SeapowerMultiplayer
                 int id = obj.UniqueID;
                 _seen.Add(id);
 
-                bool classified = vehicle.UnitTaskforce.Value != null;
+                byte side = SideCodeFor(vehicle, obj);
                 string cls = ReadClassName(vehicle);
 
                 // Only neutrals answer an identification request; for anyone else the
@@ -348,7 +440,7 @@ namespace SeapowerMultiplayer
                     ? (byte)obj._ai.CurrentCompliance
                     : (byte)AI.Compliance.Unknown;
 
-                var current = (vehicle.Id, classified, cls, compliance);
+                var current = (vehicle.Id, side, cls, compliance);
                 if (!full && _lastSent.TryGetValue(id, out var previous) && previous == current)
                     continue;
 
@@ -357,7 +449,7 @@ namespace SeapowerMultiplayer
                 {
                     UniqueId   = id,
                     TrackId    = vehicle.Id,
-                    Classified = classified,
+                    Side       = side,
                     ClassName  = cls,
                     Compliance = compliance,
                 });
