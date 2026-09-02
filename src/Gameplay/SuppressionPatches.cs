@@ -1449,6 +1449,100 @@ namespace SeapowerMultiplayer
             !Suppression.HostSuppressesRemoteTfAi(__instance._flightDeck?._baseObject);
     }
 
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.LoadPreparationTask))]
+    public static class Patch_V2_RemoteTf_PreparedAircraft
+    {
+        static void Prefix(FlightDeck __instance, ref int __state) =>
+            __state = __instance._aiPreparationData.Count;
+
+        static void Postfix(FlightDeck __instance, IniHandler ini, string sectionName,
+                            string keyName, int __state)
+        {
+            var deck = __instance._baseObject;
+            if (deck == null) return;
+            if (deck.IsPlayerObject) return;                  // vanilla already made a real task
+            if (!Suppression.RemotePlayerFleet(deck)) return; // a genuine AI deck keeps AI prep
+
+            // Nothing was diverted by THIS call (parse rejected it, or the count clamped
+            // to zero) - there is nothing to convert.
+            var prep = __instance._aiPreparationData;
+            if (prep.Count <= __state) return;
+
+            int idx = prep.Count - 1;
+            var data = prep[idx];
+            if (data?._vehicle == null || data._loadout == null) return;
+
+            string[] taskData = ini.readValue(sectionName, keyName, "").Split(',');
+            if (taskData.Length < 5) return;
+
+            var vehicle = data._vehicle;
+            var squadron = FindSquadron(vehicle, taskData[1].Trim());
+            if (squadron == null || squadron.Callsigns.Count == 0) return;
+
+            int vehicleIndex  = __instance._vehiclesOnBoard.IndexOf(vehicle);
+            int loadoutIndex  = vehicle.Loadouts.IndexOf(data._loadout);
+            int squadronIndex = vehicle.Squadrons.IndexOf(squadron);
+            if (vehicleIndex < 0 || loadoutIndex < 0 || squadronIndex < 0) return;
+
+            // The player branch clamps against the SQUADRON as well as the vehicle; the
+            // AI branch never looked at a squadron, so that clamp has not been applied.
+            // Skipped for a save, exactly as vanilla skips it.
+            int count = data._launchCount;
+            if (!SaveLoadManager.IsASaveFile)
+            {
+                if (squadron.Numbers < count) count = squadron.Numbers;
+                if (count < 1) return;
+            }
+
+            var ltp = new LaunchTaskParameters
+            {
+                _vehicleIndex  = vehicleIndex,
+                _loadoutIndex  = loadoutIndex,
+                _squadronIndex = squadronIndex,
+                _callsignIndex = 0,
+                _launchCount   = count,
+            };
+
+            // Drop the AI record FIRST: createLaunchTask → CreatePendingLaunchTask spends
+            // the airframes out of the squadron and vehicle pools, and leaving the record
+            // behind would let the same aircraft be counted twice.
+            prep.RemoveAt(idx);
+
+            // Authority: this is the host reproducing the game's own load-time behaviour,
+            // not a player order, so the ownership gate on createLaunchTask
+            // (Patch_FlightDeck_CreateLaunchTask_Ownership) must not refuse it.
+            PendingLaunchTask? task;
+            using (Authority.Allowed())
+                task = __instance.createLaunchTask(vehicle, data._loadout, squadron,
+                    squadron.Callsigns[0], ltp, allowLaunch: false, data._readyUpTime);
+
+            if (task == null)
+            {
+                // Only CanLaunchVehicle refuses (deck out of ammo points for this
+                // loadout). Put the record back so the deck's books stay honest.
+                prep.Insert(idx, data);
+                Plugin.Log.LogWarning($"[Deck] {deck.getUIDAndName()}: could not prepare " +
+                    $"{count}x {vehicle._fileName} for its owner - deck stores refused it.");
+                return;
+            }
+
+            Plugin.Log.LogInfo($"[Deck] {deck.getUIDAndName()}: prepared {count}x " +
+                $"{vehicle._fileName} ({squadron._name}) for the player commanding that side " +
+                "- vanilla would have filed it as AI preparation data.");
+            Telemetry.Count("v2.remotePreparedAircraft");
+        }
+
+        private static Squadron? FindSquadron(VehicleTypeOnBoard vehicle, string name)
+        {
+            var squadrons = vehicle.Squadrons;
+            for (int i = 0; i < squadrons.Count; i++)
+                if (squadrons[i] != null && squadrons[i]._name == name) return squadrons[i];
+
+            // Vanilla's own fallback when the name does not match (FlightDeck.cs:3111).
+            return squadrons.Count > 0 ? squadrons[0] : null;
+        }
+    }
+
     /// <summary>HOST-side PvP: give the remote player's aircraft the winchester rules
     /// THEIR player set, not this machine's.
     ///
