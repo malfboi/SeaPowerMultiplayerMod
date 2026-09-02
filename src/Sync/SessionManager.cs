@@ -51,6 +51,39 @@ namespace SeapowerMultiplayer
         // of the save is done and leaves the rest on a fire-and-forget Task, so the
         // capture has to wait for that Task before reading anything. See
         // AwaitingSaveCompletion for why.
+        /// <summary>Slot this capture is for, or NoSender for a whole-session sync.</summary>
+        private static byte _pendingOnlySlot = PlayerRegistry.NoSender;
+
+        /// <summary>False when this capture is a mid-mission join rather than a new battle.</summary>
+        private static bool _pendingSessionBoundary = true;
+
+        /// <summary>Time compression to restore once the joiner is in. Sampled before the
+        /// pause; 0 means "it was already paused, leave it that way".</summary>
+        private static float _resumeTimeCompression;
+
+        /// <summary>Deadline for a mid-mission joiner to finish loading, or 0 when nobody
+        /// is joining. Without it one stuck joiner holds every other player at a paused
+        /// screen forever, with no way out but a disconnect.</summary>
+        private static float _joinDeadline;
+
+        /// <summary>The one slot the deadline above is waiting on, or NoSender.
+        ///
+        /// Not <see cref="SimSyncManager.AllReady"/>: that asks whether EVERY connected
+        /// player is ready, which a unicast can never satisfy. On the first send of a
+        /// mission the other guests have been sent nothing and will never report in, so
+        /// waiting on all of them means sitting out the full timeout before the resume -
+        /// two minutes of everybody paused - and then resuming with a warning about a
+        /// player who was never joining.</summary>
+        private static byte _awaitingSlot = PlayerRegistry.NoSender;
+
+        /// <summary>The slot currently being sent the world, or
+        /// <see cref="PlayerRegistry.NoSender"/> when nothing is in flight. The overlay
+        /// shows this player as "connecting" and disables every Send button while it is
+        /// set - see <see cref="HostSendTo"/> for why only one at a time.</summary>
+        public static byte AwaitingSlot => _awaitingSlot;
+
+        private const float JoinTimeoutSec = 180f;
+
         private static string? _pendingSavePath;
         private static System.DateTime _saveWriteTimeBefore;
         private static float _saveWaitDeadline;
@@ -64,12 +97,75 @@ namespace SeapowerMultiplayer
         public static void TickRetry()
         {
             TickPendingSave();
+            TickJoinDeadline();
+
+            // Slot 0's readiness IS "the host's own mission is live", and nothing else
+            // maintains it: SimSyncManager's set is only ever added to for a REMOTE slot
+            // (OnClientReady skips NoSender), so without this the host reads as "in
+            // lobby" for the whole battle - on its own screen and on every guest's.
+            // Cheap: HostSetReadyAndPublish compares before it writes and only sends a
+            // roster on the edge.
+            if (Plugin.Instance.CfgIsHost.Value)
+                PlayerRegistry.HostSetReadyAndPublish(0, MissionIsLive);
 
             if (_retrySendAt <= 0f) return;
             if (Time.unscaledTime < _retrySendAt) return;
             _retrySendAt = 0f;
             Log.LogInfo($"[Session] Retry #{_retryCount}/{MaxRetries} — re-sending session sync");
             CaptureAndSend();
+        }
+
+        /// <summary>
+        /// Host: a mid-mission joiner has taken too long. Resume without them rather than
+        /// hold everybody else at a paused screen indefinitely - the failure mode this
+        /// replaces has no exit at all except somebody disconnecting.
+        /// </summary>
+        private static void TickJoinDeadline()
+        {
+            if (_joinDeadline <= 0f) return;
+
+            bool ready = _awaitingSlot != PlayerRegistry.NoSender
+                ? SimSyncManager.IsReady(_awaitingSlot)
+                : SimSyncManager.AllReady;
+
+            if (ready)
+            {
+                _joinDeadline = 0f;
+                HostFinishJoin();
+                return;
+            }
+            if (Time.unscaledTime < _joinDeadline) return;
+
+            _joinDeadline = 0f;
+            Log.LogError($"[Session] Joining player did not finish loading within {JoinTimeoutSec:F0}s — resuming without them.");
+            SimSyncManager.ReportIssue(
+                "A joining player never finished loading.",
+                "The session has resumed without them; they can try again.",
+                warning: true);
+            HostFinishJoin();
+        }
+
+        /// <summary>Host: everyone who is coming is in. Re-send the world to whoever just
+        /// arrived, then let time run again.</summary>
+        private static void HostFinishJoin()
+        {
+            _awaitingSlot = PlayerRegistry.NoSender;
+
+            // Their picture starts empty while every host-side delta table believes it is
+            // already up to date, so without this the joiner sits looking at stale or
+            // missing UI on several channels until each one's next full sweep.
+            HostStreamers.ForceFullResend();
+
+            if (_resumeTimeCompression > 0f)
+            {
+                Log.LogInfo($"[Session] Join complete — resuming at x{_resumeTimeCompression}.");
+                TimeSyncManager.HostBroadcastResume(_resumeTimeCompression);
+            }
+            else
+            {
+                Log.LogInfo("[Session] Join complete — session was paused, leaving it paused.");
+            }
+            _resumeTimeCompression = 0f;
         }
 
         /// <summary>
@@ -135,7 +231,76 @@ namespace SeapowerMultiplayer
             SimSyncManager.Reset();
         }
 
-        public static void CaptureAndSend()
+        /// <summary>Full session sync to EVERY player - the "Send State &amp; Wait" button.
+        /// This is a session boundary: it starts a new battle for everyone.</summary>
+        public static void CaptureAndSend() => BeginCapture(sessionBoundary: true, onlySlot: PlayerRegistry.NoSender);
+
+        /// <summary>
+        /// Bring ONE player into a battle already in progress.
+        ///
+        /// Everyone else keeps playing their current session - no reload, no lost
+        /// ledger, no reseeded RNG. See <see cref="BeginCapture"/> for exactly which
+        /// resets are skipped and why each one would hurt.
+        /// </summary>
+        public static void CaptureAndSendTo(byte slot)
+        {
+            if (slot == PlayerRegistry.NoSender) return;
+            Log.LogInfo($"[Session] Mid-mission join: capturing for slot {slot}.");
+            BeginCapture(sessionBoundary: false, onlySlot: slot);
+        }
+
+        /// <summary>
+        /// The overlay's per-player Send button. Picks the right kind of send for one
+        /// player, which is not always the same kind.
+        ///
+        /// Once a battle is running, sending to one player must NOT be a session
+        /// boundary: a boundary reloads everybody, and it is the only path with no
+        /// resume of its own - it zeroes _joinDeadline, so nothing ever calls
+        /// HostFinishJoin and the players who never needed a resync sit paused with no
+        /// way back. The per-player path arms that deadline and resumes on AllReady (or
+        /// on timeout), which is why it is the one to use for anybody joining a battle
+        /// in progress.
+        ///
+        /// Before a battle is running there is nothing to preserve, and the boundary is
+        /// REQUIRED rather than merely harmless: its resets (CaptureState.SpawnLedger,
+        /// the census, the engage-task and order-dedup ledgers) are what stop a SECOND
+        /// mission in the same lobby inheriting the first one's ledger and replaying it
+        /// as ghost units. See the reset blocks in BeginCapture.
+        ///
+        /// Same discriminator NetworkManager already uses to decide whether a seated
+        /// player gets a mid-mission join or waits for the host.
+        /// </summary>
+        public static void HostSendTo(byte slot)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (slot == PlayerRegistry.NoSender) return;
+
+            // ONE AT A TIME. A capture pauses the session, writes a save and ships it;
+            // starting a second before the first player is in would overwrite
+            // _pendingOnlySlot mid-flight and send that player's save to the wrong
+            // recipient, and both would then be waited on by a single deadline. The
+            // overlay greys the buttons out for the same reason, but the refusal lives
+            // here so it holds however the call arrives.
+            if (_awaitingSlot != PlayerRegistry.NoSender)
+            {
+                Log.LogWarning($"[Session] Send to slot {slot} refused — already sending to " +
+                    $"slot {_awaitingSlot}. Wait for them to finish loading.");
+                return;
+            }
+
+            // ALWAYS unicast. The two flags are independent and were being conflated:
+            // sessionBoundary says "this is a new battle, run the new-battle resets",
+            // onlySlot says "who gets the world". Deciding the target from the boundary
+            // meant the FIRST send of a mission went to everybody - press Send next to
+            // one player and every connected player started loading.
+            bool battleRunning = MissionIsLive && SimSyncManager.CurrentState == SimState.Synchronized;
+
+            Log.LogInfo($"[Session] Send to slot {slot} " +
+                $"({(battleRunning ? "mid-mission join" : "first sync of this mission")}).");
+            BeginCapture(sessionBoundary: !battleRunning, onlySlot: slot);
+        }
+
+        private static void BeginCapture(bool sessionBoundary, byte onlySlot)
         {
             // Checked before anything else, and before any state is touched. The
             // old path went ahead from the main menu: it paused, set
@@ -177,21 +342,65 @@ namespace SeapowerMultiplayer
 
             Log.LogInfo("[Session] CaptureAndSend starting...");
 
+            _pendingOnlySlot = onlySlot;
+            _pendingSessionBoundary = sessionBoundary;
+
+            // Marked HERE rather than when the save actually goes out, so the overlay can
+            // grey out every Send button for the whole operation - the save is written
+            // asynchronously (TickPendingSave), and that gap is long enough to click a
+            // second player in.
+            _awaitingSlot = onlySlot;
+
+            // A full re-sync supersedes any join in flight: everyone is about to reload
+            // anyway, so the join's own resume must not fire on top of it.
+            if (sessionBoundary) _joinDeadline = 0f;
+
+            // Remember what to go back to. Read BEFORE the pause, or we resume into a
+            // paused game and the players who never left are frozen indefinitely.
+            _resumeTimeCompression = GameTime.IsPaused() ? 0f : GameTime.TimeCompression;
+
+            // Freeze the players already in FIRST, so they stop where the save is taken
+            // rather than running on while it is written and then being rewound by the
+            // stream. Only matters for a mid-mission join - a session boundary reloads
+            // everyone anyway.
+            if (!sessionBoundary) TimeSyncManager.HostBroadcastPause();
+
             // Pause and set sync state before saving
             SceneLoading = true; // suppress broadcasts during pause+save
             Log.LogInfo("[Session] Pausing game...");
             GameTime.Pause();
-            SimSyncManager.Reset();
-            SimSyncManager.CurrentState = SimState.WaitingForClient;
+
+            if (sessionBoundary)
+            {
+                SimSyncManager.Reset();
+                SimSyncManager.CurrentState = SimState.WaitingForClient;
+            }
+            else
+            {
+                // Host stays Synchronized. WaitingForClient gates HostEntityStreamer, so
+                // dropping into it would switch the entity stream off for the players
+                // already in the battle while the joiner loads.
+                SimSyncManager.OnPeerJoined(onlySlot);
+            }
             SceneLoading = false; // host isn't actually loading a scene
 
-            // Reset sync state on host side too
+            // Host-local and idempotent - safe either way.
             UnitRegistry.Clear();
             UnitRegistry.PopulateFromScene();
-            StateApplier.ResetOrphanTracking();
-            Patch_ObjectBase_HandleEngageTasks.Reset();
-            Patch_Submarine_SetDepth.Reset();
-            OrderDeduplicator.Clear();
+
+            // SESSION-BOUNDARY ONLY. Each of these is a "new battle" operation, and each
+            // would take something away from the players still in the old one:
+            //   OrderDeduplicator     - clearing it lets already-sent orders re-send.
+            //   HandleEngageTasks /
+            //   Submarine.SetDepth    - hold live per-unit ownership locks.
+            //   StateApplier orphans  - re-arms orphan purging mid-battle.
+            if (sessionBoundary)
+            {
+                StateApplier.ResetOrphanTracking();
+                Patch_ObjectBase_HandleEngageTasks.Reset();
+                Patch_Submarine_SetDepth.Reset();
+                OrderDeduplicator.Clear();
+            }
 
             // Capture state is scoped to a SESSION, not to the connection. Its only
             // other Clear() is on peer disconnect, and two battles played in one lobby
@@ -209,23 +418,42 @@ namespace SeapowerMultiplayer
             // host-only state (HostCaptureActive requires CfgIsHost). CaptureAndSend IS
             // the host's session boundary, which is why every other per-session reset is
             // already in this block.
-            CaptureState.Clear();
-            HatchStateCapture.Clear();
-            Patch_V2_MissionEnd_Capture.Reset();
-            EntityCensusManager.Reset();
+            // SESSION-BOUNDARY ONLY, and this is the single most dangerous block in the
+            // whole mid-mission-join feature.
+            //
+            // CaptureState.SpawnLedger is what a census diff request is answered from.
+            // Clearing it while other people are playing does not merely waste work - it
+            // destroys the only record of every weapon currently in the air, so the next
+            // self-heal from ANY existing player gets nothing back and their missiles
+            // quietly stop being replayable. Same story for the hatch state and the
+            // census sequence. None of it may run for a joiner.
+            if (sessionBoundary)
+            {
+                CaptureState.Clear();
+                HatchStateCapture.Clear();
+                Patch_V2_MissionEnd_Capture.Reset();
+                EntityCensusManager.Reset();
 
-            // Immediately after the clear, and only ever after it: put back the ledger
-            // entries for rounds that are in the air at this instant, so a mid-battle
-            // resync does not lose every missile and torpedo already flying. See
-            // WeaponLedgerRebuild for why the clear itself has to stay.
-            WeaponLedgerRebuild.Run();            
-            FlightDeckStreamer.Reset();
-            FlightDeckStateApplier.Reset();
+                // Immediately after the clear, and only ever after it: put back the ledger
+                // entries for rounds that are in the air at this instant, so a mid-battle
+                // resync does not lose every missile and torpedo already flying. See
+                // WeaponLedgerRebuild for why the clear itself has to stay.
+                WeaponLedgerRebuild.Run();
+                FlightDeckStreamer.Reset();
+                FlightDeckStateApplier.Reset();
 
-            // PvP: flush stale engage tasks on enemy puppet units so the remote
-            // player's save-restored tasks don't fire without their say-so.
-            if (Plugin.Instance.CfgPvP.Value)
-                FlushEnemyEngageTasks();
+                // Flush stale engage tasks on the opposing side's units so a human
+                // opponent's save-restored tasks don't fire without their say-so. Only when
+                // somebody is actually sitting on that side - against the AI those tasks are
+                // the AI's and should stand.
+                //
+                // Never for a joiner: mid-battle this would cancel live engagements that
+                // an opponent who is already playing has ordered. Someone taking over a
+                // fleet mid-mission inherits whatever is in flight, which is the right
+                // answer anyway.
+                if (Teams.ContestedSession)
+                    FlushEnemyEngageTasks();
+            }
 
             // SaveGame does not check IsSavingAllowed, but set it true to be safe
             bool wasAllowed = SaveLoadManager.IsSavingAllowed;
@@ -350,8 +578,14 @@ namespace SeapowerMultiplayer
                 CampaignFileContent = campaignFileContent,
             };
 
-            Log.LogInfo($"[Session] Broadcasting SessionSync: save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
-            NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
+            bool toOne = _pendingOnlySlot != PlayerRegistry.NoSender;
+            Log.LogInfo($"[Session] Sending SessionSync to {(toOne ? $"slot {_pendingOnlySlot}" : "all players")}: " +
+                        $"save={saveContent.Length}ch, mission={missionFileName} ({missionFileContent.Length}ch), rngSeed={rngSeed}");
+
+            // Unicast for a joiner. Broadcasting a multi-megabyte save would push every
+            // existing player through a full reload of a session they are already in.
+            if (toOne) NetworkManager.Instance.SendToSlot(_pendingOnlySlot, msg, DeliveryMethod.ReliableOrdered);
+            else NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
 
             if (NetworkManager.Instance.LastSendFailed)
             {
@@ -384,8 +618,39 @@ namespace SeapowerMultiplayer
             _retryCount = 0;
             SimSyncManager.ClearIssue();
 
-            // Seed host RNG to match what client will use
-            RngSeeder.SeedAll(rngSeed);
+            // The host is the first player on Blue, so it takes Blue's formations under
+            // the same rule as anyone else. Idempotent - only ever claims units nobody
+            // holds - so running it on every capture is safe.
+            FormationOwnership.HostGrantTeamTo(Team.Blue, 0);
+
+            if (_pendingSessionBoundary)
+            {
+                // Seed host RNG to match what the clients will use.
+                RngSeeder.SeedAll(rngSeed);
+            }
+            else
+            {
+                // NOT for a joiner. Reseeding mid-battle would jolt the RNG under the
+                // players already in - and it buys nothing: under unified host authority
+                // the guest's own RNG only drives cosmetics, so host and joiner diverging
+                // there is invisible. The joiner still seeds itself from the message.
+            }
+
+            // Every send aimed at ONE player waits for that player and then resumes
+            // everybody - including a first-sync send, which is a session boundary but
+            // still has exactly one recipient. Tied to onlySlot rather than to
+            // !sessionBoundary because a boundary zeroes this deadline on the way in
+            // (see BeginCapture) and nothing else ever calls HostFinishJoin: that is why
+            // a full send leaves every player paused with no way to resume.
+            //
+            // A broadcast boundary (Ctrl+F10, reconnect recovery) still arms nothing and
+            // is still resumed by hand, exactly as before.
+            if (_pendingOnlySlot != PlayerRegistry.NoSender)
+            {
+                _awaitingSlot = _pendingOnlySlot;
+                _joinDeadline = Time.unscaledTime + JoinTimeoutSec;
+                Log.LogInfo($"[Session] Waiting up to {JoinTimeoutSec:F0}s for slot {_pendingOnlySlot} to load.");
+            }
 
             Log.LogInfo($"[Session] State sent. SimState={SimSyncManager.CurrentState}, GamePaused={GameTime.IsPaused()}");
         }
@@ -532,8 +797,11 @@ namespace SeapowerMultiplayer
                 patchedSave = standalone;
             }
 
-            // PvP: swap PlayerTaskforce ↔ EnemyTaskforce so client controls the opposing side
-            if (Plugin.Instance.CfgPvP.Value)
+            // A RED guest swaps PlayerTaskforce ↔ EnemyTaskforce so it commands the
+            // opposing side. A BLUE guest is on the host's own side and loads the save
+            // exactly as the host wrote it - which is what makes two Blue guests
+            // co-operate with no extra machinery.
+            if (Teams.LocalSaveSwapped)
             {
                 patchedSave = SwapTaskforceSides(patchedSave, "save");
 
@@ -747,8 +1015,9 @@ namespace SeapowerMultiplayer
             // The save file may contain active engage tasks that bypass the Harmony
             // suppression layers (AddEngageTask, InsertEngageTask) because they're
             // deserialized directly into the unit's weapon queue - the remote
-            // player's units must not fire without their say-so.
-            if (Plugin.Instance.CfgPvP.Value)
+            // player's units must not fire without their say-so. Gated on somebody
+            // actually being on that side - against the AI those tasks are legitimate.
+            if (Teams.ContestedSession)
             {
                 FlushEnemyEngageTasks();
             }
@@ -777,8 +1046,11 @@ namespace SeapowerMultiplayer
             bool isHost = Plugin.Instance.CfgIsHost.Value;
             Log.LogInfo($"[Session] IsHost={isHost}, IsConnected={NetworkManager.Instance.IsConnected}");
 
-            // PvP post-load: clear detection data so sides must re-detect through sensors
-            if (Plugin.Instance.CfgPvP.Value && !isHost)
+            // Post-load: an opposing player must re-detect through its own sensors rather
+            // than inherit the host's picture. Keyed on the save swap, which is exactly
+            // "I am on the other side from the host" - a BLUE guest is the host's
+            // teammate and keeps the shared picture.
+            if (Teams.LocalSaveSwapped)
             {
                 ClearDetectionData();
             }

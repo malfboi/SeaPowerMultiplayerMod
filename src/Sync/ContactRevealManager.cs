@@ -67,7 +67,7 @@ namespace SeapowerMultiplayer
         public static void ApplyReceived(ContactReportMessage msg)
         {
             if (!Plugin.Instance.CfgIsHost.Value) return;
-            if (!ContactSyncManager.CoopSessionActive) return;
+            if (!ContactSyncManager.TeamSessionActive) return;
 
             _remoteHeld.Clear();
             for (int i = 0; i < msg.UniqueIds.Count; i++)
@@ -117,7 +117,7 @@ namespace SeapowerMultiplayer
         /// </summary>
         public static void Tick()
         {
-            if (!ContactSyncManager.CoopSessionActive) return;
+            if (!ContactSyncManager.TeamSessionActive) return;
             if (_remoteHeld.Count == 0) return;
 
             var table = Globals._playerTaskforce?.PlottingTable;

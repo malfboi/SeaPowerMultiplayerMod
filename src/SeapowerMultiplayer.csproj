@@ -104,6 +104,14 @@
 
 	<PropertyGroup>
     <GameDir2>C:\Users\hughe\Desktop\Sea Power</GameDir2>
+    <!-- Third and fourth local test instances (Run Coop.bat launches all four).
+         Conditioned on existing, unlike the two above: these are only present on a
+         machine set up for 4-player local testing. Missing them silently is right;
+         a stale DLL here is NOT silent - the protocol version is baked into the
+         LiteNetLib connect key, so an out-of-date instance is rejected at connect
+         and simply looks like the Connect button doing nothing. -->
+    <GameDir3>C:\Users\hughe\Desktop\Sea Power Player 3</GameDir3>
+    <GameDir4>C:\Users\hughe\Desktop\Sea Power Player 4</GameDir4>
   </PropertyGroup>
 
   <!-- Merge LiteNetLib into our assembly.
@@ -150,6 +158,14 @@
     <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir2)\$(ModDir)\" />
     <Message Text="Copied plugin to $(GameDir)\$(ModDir)\" Importance="high" />
     <Message Text="Copied plugin to $(GameDir2)\$(ModDir)\" Importance="high" />
+    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir3)\$(ModDir)\"
+          Condition="Exists('$(GameDir3)')" />
+    <Copy SourceFiles="@(ModFiles)" DestinationFolder="$(GameDir4)\$(ModDir)\"
+          Condition="Exists('$(GameDir4)')" />
+    <Message Text="Copied plugin to $(GameDir3)\$(ModDir)\"
+             Importance="high" Condition="Exists('$(GameDir3)')" />
+    <Message Text="Copied plugin to $(GameDir4)\$(ModDir)\"
+             Importance="high" Condition="Exists('$(GameDir4)')" />
   </Target>
 
   <!-- Bundled scenarios. FileManager builds the mod search path from the folders

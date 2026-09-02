@@ -292,7 +292,7 @@ namespace SeapowerMultiplayer
                 .Str("pv", PluginInfo.PLUGIN_VERSION)
                 .Str("role", p.CfgIsHost.Value ? "host" : "client")
                 .Str("tr", p.CfgTransport.Value)
-                .Str("mode", p.CfgPvP.Value ? "pvp" : "coop")
+                .Str("mode", PlayerRegistry.SeatingLabel())
                 .Str("trig", trigger)
                 .Str("errKind", trigger == "error" ? _lastErrorKind : null)
                 .Num("drop", dropped).Num("lines", lines)

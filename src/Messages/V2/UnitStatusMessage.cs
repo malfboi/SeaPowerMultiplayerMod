@@ -74,6 +74,35 @@ namespace SeapowerMultiplayer.Messages
             /// the home base already replicates - so the readout, the map ring and the
             /// bingo threshold all follow.</summary>
             public float RangeKm;
+
+            /// <summary>Air units only (0 elsewhere): <c>ObjectBase._homeBase</c>'s id,
+            /// or 0 for none.
+            ///
+            /// It only HALF replicated before, and the missing half broke every
+            /// return-to-base order a guest gave. EntitySpawn carries HomeBaseId, so an
+            /// aircraft launched off a deck while the guest was connected got one; every
+            /// other air unit did not. Vanilla's own repair for a null home base is
+            /// <c>ObjectBase.SearchForHomeBase</c>, and its only caller is
+            /// <c>AI.OnFixedUpdate</c> (AI.cs:389) - which
+            /// Patch_V2_AI_OnFixedUpdate_Suppress turns off wholesale on a client. So a
+            /// guest's aircraft that arrived any other way (in the session save at join,
+            /// airborne at mission start, or rebased since) kept <c>_homeBase == null</c>
+            /// for the rest of the battle, and all three of the game's RTB entry points
+            /// are guarded on it:
+            ///
+            ///   - context menu (ObjectBaseViewModel.cs:932) - `if (homeBase != null)`
+            ///     around the setOrder call, so the menu item silently did nothing;
+            ///   - T on an aircraft (InputHandler.cs:1722) - SetStateByName
+            ///     ("ReturnToBase"), whose onEnter calls setOrder(ReturnToBase) only when
+            ///     the base is non-null and setOrder(Order.Type.NONE) otherwise, which is
+            ///     why the guest heard the acknowledgement and nothing happened;
+            ///   - T on a helicopter (InputHandler.cs:1731) - reaches the wire, but with
+            ///     TargetEntityId 0.
+            ///
+            /// Carried here rather than as an event because it is state: a missed rebase
+            /// would otherwise strand the unit until the next one, and this stream's 10 s
+            /// full sweep repairs it for free.</summary>
+            public int HomeBaseId;
         }
 
         /// <summary>True on the periodic sweep. Incremental packets carry only
@@ -100,6 +129,7 @@ namespace SeapowerMultiplayer.Messages
                 writer.Put(e.UniqueId);
                 writer.Put(e.OrderText ?? "");
                 writer.Put(e.RangeKm);
+                writer.Put(e.HomeBaseId);
                 int count = e.Mounts?.Count ?? 0;
                 writer.Put((byte)count);
                 for (int m = 0; m < count; m++)
@@ -122,9 +152,10 @@ namespace SeapowerMultiplayer.Messages
                 var entry = new Entry
                 {
                     UniqueId  = reader.GetInt(),
-                    OrderText = reader.GetString(),
-                    RangeKm   = reader.GetFloat(),
-                    Mounts    = new List<Mount>(),
+                    OrderText  = reader.GetString(),
+                    RangeKm    = reader.GetFloat(),
+                    HomeBaseId = reader.GetInt(),
+                    Mounts     = new List<Mount>(),
                 };
                 int mountCount = reader.GetByte();
                 for (int m = 0; m < mountCount; m++)

@@ -25,6 +25,10 @@ namespace SeapowerMultiplayer
         private static readonly EntityCensusMessage _msg = new();
         private static readonly HashSet<int> _hostIds = new();
 
+        /// <summary>Emit a manifest on the very next tick rather than waiting out the
+        /// interval. The joiner's self-heal has nothing to work from until one lands.</summary>
+        public static void ForceCensusNow() => _nextCensus = 0f;
+
         /// <summary>Called from the host streamer loop each frame.</summary>
         public static void HostTick()
         {
@@ -64,18 +68,23 @@ namespace SeapowerMultiplayer
             }
         }
 
-        /// <summary>Host: replay requested spawns verbatim from the ledger.</summary>
-        public static void HandleDiffRequest(CensusDiffRequestMessage msg)
+        /// <summary>Host: replay requested spawns verbatim from the ledger, to the ONE
+        /// player that asked.
+        ///
+        /// This used to broadcast. With a single guest that was merely wasteful; with
+        /// several it re-spawns entities on peers that already have them, and every
+        /// self-heal by any player costs everyone else a burst of redundant spawns.</summary>
+        public static void HandleDiffRequest(byte requesterSlot, CensusDiffRequestMessage msg)
         {
             if (!Plugin.Instance.CfgIsHost.Value) return;
             foreach (var id in msg.Ids)
             {
                 if (CaptureState.SpawnLedger.TryGetValue(id, out var spawn))
                 {
-                    NetworkManager.Instance.BroadcastToClients(spawn);
+                    NetworkManager.Instance.SendToSlot(requesterSlot, spawn);
                     Telemetry.Count("v2.spawnReplayed");
                     Plugin.Log.LogInfo($"[Census] Replayed {spawn.Kind} spawn id={id} " +
-                        $"ammo={spawn.AmmoName} shooter={spawn.ShooterId}");
+                        $"to slot {requesterSlot} ammo={spawn.AmmoName} shooter={spawn.ShooterId}");
                 }
             }
         }

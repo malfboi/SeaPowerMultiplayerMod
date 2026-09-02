@@ -26,7 +26,7 @@ namespace SeapowerMultiplayer
         }
 
         private static bool SessionLive()
-            => ContactSyncManager.CoopSessionActive
+            => ContactSyncManager.TeamSessionActive
                && SimSyncManager.CurrentState == SimState.Synchronized
                && !SessionManager.SceneLoading;
 

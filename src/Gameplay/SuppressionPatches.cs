@@ -32,28 +32,35 @@ namespace SeapowerMultiplayer
         internal static bool HostSuppressesRemoteTfAi(ObjectBase? unit) =>
             unit != null && HostSuppressesRemoteTfAi(unit._taskforce);
 
-        /// <summary>Taskforce-level form of the same test, for AI that runs per
-        /// TASKFORCE rather than per unit (Taskforce.CheckAI).</summary>
+        /// <summary>
+        /// Taskforce-level form of the same test, for AI that runs per TASKFORCE rather
+        /// than per unit (Taskforce.CheckAI).
+        ///
+        /// "Not my own side, and a human is commanding it" replaces the old
+        /// "PvP and it is the enemy taskforce". Correct in every seating: a co-op trio
+        /// leaves Red as AI and suppresses nothing; 1v1 and 2v1 both make Red human and
+        /// suppress it.
+        /// </summary>
         internal static bool HostSuppressesRemoteTfAi(Taskforce? tf) =>
             Plugin.Instance.CfgIsHost.Value
-            && Plugin.Instance.CfgPvP.Value
             && NetworkManager.Instance.IsHostRunning
             && tf != null
-            && tf == Globals._enemyTaskforce;
+            && tf != Globals._playerTaskforce
+            && Teams.IsHumanControlled(tf);
 
-        /// <summary>HOST-side PvP: the remote player's fleet, tested WITHOUT requiring
-        /// the transport to be up. Spawn-time stamps run while the mission loads, which
-        /// on the host can be before it starts listening - but from the host's own
-        /// configuration the enemy taskforce is the other player's fleet either way.
+        /// <summary>HOST-side: an opposing PLAYER's fleet, tested WITHOUT requiring the
+        /// transport to be up. Spawn-time stamps run while the mission loads, which on
+        /// the host can be before it starts listening - but the seating is already known
+        /// by then, because the host assigns teams in the lobby before loading.
         /// Use this ONLY for those load-time corrections; anything that acts during a
         /// live battle should ask <see cref="HostSuppressesRemoteTfAi(ObjectBase)"/>,
         /// which additionally requires a session.</summary>
         internal static bool RemotePlayerFleet(ObjectBase? unit) =>
             Plugin.Instance.CfgIsHost.Value
-            && Plugin.Instance.CfgPvP.Value
             && unit != null
             && unit._taskforce != null
-            && unit._taskforce == Globals._enemyTaskforce;
+            && unit._taskforce != Globals._playerTaskforce
+            && PlayerRegistry.AnyOnTeam(Team.Red);
 
         /// <summary>CLIENT-side: true for a unit the local player does not own -
         /// the opposing side in PvP, the AI sides in co-op. The per-unit AI class
@@ -138,11 +145,14 @@ namespace SeapowerMultiplayer
         /// changed mid-session is what gets handed back, not the value at session start.</summary>
         internal static void EnforceInterceptSymmetry()
         {
-            bool hostPvpSession = Plugin.Instance.CfgIsHost.Value
-                && Plugin.Instance.CfgPvP.Value
-                && NetworkManager.Instance.IsHostRunning;
+            // Only when there are humans on BOTH sides: the handicaps are keyed on
+            // IsPlayerObject, so with an AI opponent they are doing exactly the job they
+            // were designed for and must be left alone.
+            bool hostContestedSession = Plugin.Instance.CfgIsHost.Value
+                && NetworkManager.Instance.IsHostRunning
+                && Teams.ContestedSession;
 
-            if (hostPvpSession)
+            if (hostContestedSession)
             {
                 if (Globals._missileInterceptChanceBonus != 0f || Globals._missileInterceptChanceReduction != 0f
                     || Globals._gunsInterceptChanceBonus != 0f || Globals._gunsInterceptChanceReduction != 0f
@@ -1437,6 +1447,100 @@ namespace SeapowerMultiplayer
     {
         static bool Prefix(PendingLaunchTask __instance) =>
             !Suppression.HostSuppressesRemoteTfAi(__instance._flightDeck?._baseObject);
+    }
+
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.LoadPreparationTask))]
+    public static class Patch_V2_RemoteTf_PreparedAircraft
+    {
+        static void Prefix(FlightDeck __instance, ref int __state) =>
+            __state = __instance._aiPreparationData.Count;
+
+        static void Postfix(FlightDeck __instance, IniHandler ini, string sectionName,
+                            string keyName, int __state)
+        {
+            var deck = __instance._baseObject;
+            if (deck == null) return;
+            if (deck.IsPlayerObject) return;                  // vanilla already made a real task
+            if (!Suppression.RemotePlayerFleet(deck)) return; // a genuine AI deck keeps AI prep
+
+            // Nothing was diverted by THIS call (parse rejected it, or the count clamped
+            // to zero) - there is nothing to convert.
+            var prep = __instance._aiPreparationData;
+            if (prep.Count <= __state) return;
+
+            int idx = prep.Count - 1;
+            var data = prep[idx];
+            if (data?._vehicle == null || data._loadout == null) return;
+
+            string[] taskData = ini.readValue(sectionName, keyName, "").Split(',');
+            if (taskData.Length < 5) return;
+
+            var vehicle = data._vehicle;
+            var squadron = FindSquadron(vehicle, taskData[1].Trim());
+            if (squadron == null || squadron.Callsigns.Count == 0) return;
+
+            int vehicleIndex  = __instance._vehiclesOnBoard.IndexOf(vehicle);
+            int loadoutIndex  = vehicle.Loadouts.IndexOf(data._loadout);
+            int squadronIndex = vehicle.Squadrons.IndexOf(squadron);
+            if (vehicleIndex < 0 || loadoutIndex < 0 || squadronIndex < 0) return;
+
+            // The player branch clamps against the SQUADRON as well as the vehicle; the
+            // AI branch never looked at a squadron, so that clamp has not been applied.
+            // Skipped for a save, exactly as vanilla skips it.
+            int count = data._launchCount;
+            if (!SaveLoadManager.IsASaveFile)
+            {
+                if (squadron.Numbers < count) count = squadron.Numbers;
+                if (count < 1) return;
+            }
+
+            var ltp = new LaunchTaskParameters
+            {
+                _vehicleIndex  = vehicleIndex,
+                _loadoutIndex  = loadoutIndex,
+                _squadronIndex = squadronIndex,
+                _callsignIndex = 0,
+                _launchCount   = count,
+            };
+
+            // Drop the AI record FIRST: createLaunchTask → CreatePendingLaunchTask spends
+            // the airframes out of the squadron and vehicle pools, and leaving the record
+            // behind would let the same aircraft be counted twice.
+            prep.RemoveAt(idx);
+
+            // Authority: this is the host reproducing the game's own load-time behaviour,
+            // not a player order, so the ownership gate on createLaunchTask
+            // (Patch_FlightDeck_CreateLaunchTask_Ownership) must not refuse it.
+            PendingLaunchTask? task;
+            using (Authority.Allowed())
+                task = __instance.createLaunchTask(vehicle, data._loadout, squadron,
+                    squadron.Callsigns[0], ltp, allowLaunch: false, data._readyUpTime);
+
+            if (task == null)
+            {
+                // Only CanLaunchVehicle refuses (deck out of ammo points for this
+                // loadout). Put the record back so the deck's books stay honest.
+                prep.Insert(idx, data);
+                Plugin.Log.LogWarning($"[Deck] {deck.getUIDAndName()}: could not prepare " +
+                    $"{count}x {vehicle._fileName} for its owner - deck stores refused it.");
+                return;
+            }
+
+            Plugin.Log.LogInfo($"[Deck] {deck.getUIDAndName()}: prepared {count}x " +
+                $"{vehicle._fileName} ({squadron._name}) for the player commanding that side " +
+                "- vanilla would have filed it as AI preparation data.");
+            Telemetry.Count("v2.remotePreparedAircraft");
+        }
+
+        private static Squadron? FindSquadron(VehicleTypeOnBoard vehicle, string name)
+        {
+            var squadrons = vehicle.Squadrons;
+            for (int i = 0; i < squadrons.Count; i++)
+                if (squadrons[i] != null && squadrons[i]._name == name) return squadrons[i];
+
+            // Vanilla's own fallback when the name does not match (FlightDeck.cs:3111).
+            return squadrons.Count > 0 ? squadrons[0] : null;
+        }
     }
 
     /// <summary>HOST-side PvP: give the remote player's aircraft the winchester rules

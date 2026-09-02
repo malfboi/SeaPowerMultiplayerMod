@@ -33,16 +33,133 @@ namespace SeapowerMultiplayer
         private static ManualLogSource Log => Plugin.Log;
 
         // ── v2 handshake state ────────────────────────────────────────────────────
-        private HandshakeState _handshake = HandshakeState.Disconnected;
-        private float _handshakeDeadline  = -1f;   // realtimeSinceStartup
-        private float _refuseDisconnectAt = -1f;   // give the refusal Welcome time to flush
+        //
+        // PER PEER on the host. It used to be one scalar for the whole manager, which
+        // worked only because there was exactly one guest: a second peer connecting reset
+        // it to AwaitingHello and clobbered the first peer's Established, which then
+        // blocked every outbound message through BlockedPreHandshake. Worse, a refusal
+        // called DisconnectPeers() and kicked the healthy players along with the
+        // incompatible joiner.
+        private sealed class PeerSession
+        {
+            public PeerId Peer;
+            public HandshakeState State;
+            public float Deadline = -1f;            // realtimeSinceStartup
+            public float RefuseDisconnectAt = -1f;  // let the refusal Welcome flush first
+            public byte Slot;
+        }
+
+        private readonly Dictionary<PeerId, PeerSession> _peers = new();
+
+        /// <summary>A guest has exactly one peer (the host), so its state stays a
+        /// scalar.</summary>
+        private HandshakeState _clientHandshake = HandshakeState.Disconnected;
+        private float _clientDeadline = -1f;
+
+        /// <summary>How many peers have completed the handshake this session. Only the
+        /// first one's gameplay options are adopted.</summary>
+        private int _establishedCount;
+
         private const float HandshakeTimeoutSec = 5f;
 
-        public HandshakeState Handshake => _handshake;
+        /// <summary>
+        /// UI-facing summary for the overlay's single status line.
+        ///
+        /// Established wins outright rather than being picked by enum order: Refused
+        /// sorts above it, so "someone was turned away" would otherwise mask a session
+        /// that is up and running perfectly well for everyone else.
+        /// </summary>
+        public HandshakeState Handshake
+        {
+            get
+            {
+                if (!_isHost) return _clientHandshake;
+                var best = HandshakeState.Disconnected;
+                foreach (var s in _peers.Values)
+                {
+                    if (s.State == HandshakeState.Established) return HandshakeState.Established;
+                    if (s.State > best) best = s.State;
+                }
+                return best;
+            }
+        }
 
-        /// <summary>True once the v2 Hello/Welcome handshake completed. All gameplay
-        /// traffic (everything except Hello/Welcome) is gated on this.</summary>
-        public bool IsEstablished => _running && _handshake == HandshakeState.Established;
+        /// <summary>
+        /// True once at least one peer completed the v2 handshake. All gameplay traffic
+        /// (everything except Hello/Welcome) is gated on this.
+        ///
+        /// "At least one" preserves the meaning every existing call site relies on: they
+        /// gate host streaming on "is anyone listening", which is exactly this.
+        /// </summary>
+        public bool IsEstablished
+        {
+            get
+            {
+                if (!_running) return false;
+                if (!_isHost) return _clientHandshake == HandshakeState.Established;
+                foreach (var s in _peers.Values)
+                    if (s.State == HandshakeState.Established) return true;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The name other players see in the roster and the send-to-player menu.
+        ///
+        /// Configured name first, then the Steam persona, then "" - which the registry
+        /// renders as "Player N". The explicit setting wins over Steam deliberately: its
+        /// main job is telling two instances on ONE machine apart while testing, and both
+        /// of those are signed in as the same Steam account, so deferring to the persona
+        /// would give them the same name.
+        /// </summary>
+        internal static string LocalPersonaName()
+        {
+            string configured = Plugin.Instance.CfgUsername.Value?.Trim() ?? "";
+            if (configured.Length > 0) return Sanitize(configured);
+
+            try
+            {
+                if (Plugin.Instance.CfgTransport.Value == "Steam")
+                    return Sanitize(Steamworks.SteamFriends.GetPersonaName() ?? "");
+            }
+            catch (Exception) { /* Steam not initialised - fall through to the slot name */ }
+            return "";
+        }
+
+        /// <summary>Names go on the wire and into game menu labels, so cap the length and
+        /// drop control characters - a pasted newline would otherwise break the roster
+        /// row and the context-menu entry it ends up in.</summary>
+        private static string Sanitize(string name)
+        {
+            const int MaxNameChars = 32;
+            var sb = new System.Text.StringBuilder(name.Length);
+            foreach (char c in name)
+            {
+                if (char.IsControl(c)) continue;
+                sb.Append(c);
+                if (sb.Length >= MaxNameChars) break;
+            }
+            return sb.ToString().Trim();
+        }
+
+        /// <summary>Has THIS peer finished handshaking? The per-peer question the
+        /// dispatch gate and the roster need.</summary>
+        public bool IsEstablishedFor(PeerId peer)
+        {
+            if (!_isHost) return _clientHandshake == HandshakeState.Established;
+            return _peers.TryGetValue(peer, out var s) && s.State == HandshakeState.Established;
+        }
+
+        /// <summary>Every peer past the handshake. The audience for a broadcast - a peer
+        /// still handshaking must not receive the entity stream.</summary>
+        public IEnumerable<PeerId> EstablishedPeers
+        {
+            get
+            {
+                foreach (var s in _peers.Values)
+                    if (s.State == HandshakeState.Established) yield return s.Peer;
+            }
+        }
 
         /// <summary>Session parameters received in Welcome (client side only).</summary>
         public WelcomeMessage? SessionParams { get; private set; }
@@ -73,7 +190,7 @@ namespace SeapowerMultiplayer
             if (now < _nextLossSampleAt) return;
             _nextLossSampleAt = now + LossSampleIntervalSec;
 
-            if (_transport == null || !_transport.TryGetPacketStats(out long sent, out long lost))
+            if (!TryGetAggregatePacketStats(out long sent, out long lost))
             {
                 _lossSamples.Clear();
                 PacketLossPct = -1f;
@@ -92,6 +209,26 @@ namespace SeapowerMultiplayer
             long dSent = sent - _lossSamples[0].sent;
             long dLost = lost - _lossSamples[0].lost;
             PacketLossPct = dSent > 0 ? 100f * dLost / dSent : 0f;
+        }
+
+        /// <summary>Sum the per-peer counters into the single figure the overlay shows.
+        /// A peer leaving makes the totals fall, which the caller's "counters went
+        /// backwards" guard already treats as a window reset.</summary>
+        private bool TryGetAggregatePacketStats(out long sent, out long lost)
+        {
+            sent = 0;
+            lost = 0;
+            if (_transport == null) return false;
+
+            bool any = false;
+            foreach (var peer in _transport.ConnectedPeers)
+            {
+                if (!_transport.TryGetPacketStats(peer, out long s, out long l)) continue;
+                sent += s;
+                lost += l;
+                any = true;
+            }
+            return any;
         }
 
         // ── Public API ────────────────────────────────────────────────────────────
@@ -115,6 +252,11 @@ namespace SeapowerMultiplayer
             _isHost = true;
             _transport = CreateTransport();
             WireTransportEvents();
+            _establishedCount = 0;
+            // Seat ourselves before anyone can connect: the host is a player too now, and
+            // slot 0 / Blue is what every ownership and routing decision is measured
+            // against.
+            PlayerRegistry.HostInit(LocalPersonaName());
             _transport.Start(asHost: true);
             _running = true;
             Log.LogInfo($"[Net] Hosting (transport={Plugin.Instance.CfgTransport.Value})");
@@ -150,9 +292,9 @@ namespace SeapowerMultiplayer
             _transport?.Stop();
             _transport = null;
             _running = false;
-            _handshake = HandshakeState.Disconnected;
-            _handshakeDeadline = -1f;
-            _refuseDisconnectAt = -1f;
+            _peers.Clear();
+            _clientHandshake = HandshakeState.Disconnected;
+            PlayerRegistry.Reset();
             SessionParams = null;
             Log.LogInfo("[Net] Stopped.");
         }
@@ -176,25 +318,57 @@ namespace SeapowerMultiplayer
                 catch (Exception ex) { Log.LogError($"[Net] queued main-thread action threw: {ex}"); }
             }
 
-            // Handshake timeout: peer connected but never completed Hello/Welcome -
-            // almost certainly a pre-v2 plugin or an incompatible phase build.
-            if (_handshakeDeadline > 0f && Time.realtimeSinceStartup > _handshakeDeadline
-                && (_handshake == HandshakeState.AwaitingHello || _handshake == HandshakeState.AwaitingWelcome))
+            TickHandshakeDeadlines();
+        }
+
+        /// <summary>
+        /// Handshake timeouts and deferred refusals, PER PEER.
+        ///
+        /// Every disconnect here names one peer. The old code called DisconnectPeers(),
+        /// so one joiner running an incompatible build - or simply never answering - took
+        /// down every player already in the session with it.
+        /// </summary>
+        private void TickHandshakeDeadlines()
+        {
+            float now = Time.realtimeSinceStartup;
+
+            if (!_isHost)
             {
-                Log.LogError(_isHost
-                    ? "[Handshake] No Hello from peer within timeout — peer likely runs an incompatible plugin version. Disconnecting."
-                    : "[Handshake] No Welcome from host within timeout — host likely runs an incompatible plugin version. Disconnecting.");
-                _handshakeDeadline = -1f;
-                _handshake = HandshakeState.Refused;
-                Telemetry.Count("handshake.timeout");
-                _transport?.DisconnectPeers();
+                if (_clientHandshake == HandshakeState.AwaitingWelcome
+                    && _clientDeadline > 0f && now > _clientDeadline)
+                {
+                    Log.LogError("[Handshake] No Welcome from host within timeout — host likely runs an incompatible plugin version. Disconnecting.");
+                    _clientDeadline = -1f;
+                    _clientHandshake = HandshakeState.Refused;
+                    Telemetry.Count("handshake.timeout");
+                    _transport?.DisconnectPeers();
+                }
+                return;
             }
 
-            // Deferred disconnect after sending a refusal Welcome (lets it flush)
-            if (_refuseDisconnectAt > 0f && Time.realtimeSinceStartup > _refuseDisconnectAt)
+            List<PeerId>? drop = null;
+            foreach (var s in _peers.Values)
             {
-                _refuseDisconnectAt = -1f;
-                _transport?.DisconnectPeers();
+                if (s.State == HandshakeState.AwaitingHello && s.Deadline > 0f && now > s.Deadline)
+                {
+                    Log.LogError($"[Handshake] No Hello from {s.Peer} within timeout — that player likely runs an incompatible plugin version. Disconnecting them.");
+                    s.Deadline = -1f;
+                    s.State = HandshakeState.Refused;
+                    Telemetry.Count("handshake.timeout");
+                    (drop ??= new List<PeerId>()).Add(s.Peer);
+                }
+                else if (s.RefuseDisconnectAt > 0f && now > s.RefuseDisconnectAt)
+                {
+                    s.RefuseDisconnectAt = -1f;
+                    (drop ??= new List<PeerId>()).Add(s.Peer);
+                }
+            }
+
+            if (drop == null) return;
+            foreach (var peer in drop)
+            {
+                _transport?.Disconnect(peer, "handshake refused");
+                _peers.Remove(peer);
             }
         }
 
@@ -204,39 +378,187 @@ namespace SeapowerMultiplayer
         {
             if (_transport == null) return;
             if (BlockedPreHandshake(msg.Type)) return;
-            if (BlockedByAllyLock(msg)) return;
-            _writer.Reset();
-            _writer.Put((byte)msg.Type);
-            msg.Serialize(_writer);
+            if (BlockedByOwnership(msg)) return;
+            if (!Serialize(msg)) return;
             _transport.SendToServer(_writer.Data, _writer.Length, MapDelivery(delivery));
             Telemetry.OnSend((byte)msg.Type, _writer.Length);
         }
 
+        /// <summary>
+        /// Send to every ESTABLISHED peer.
+        ///
+        /// Deliberately no longer the transport's own broadcast: that sprayed to every
+        /// connected socket, including a peer still mid-handshake, which made the
+        /// per-peer handshake gate one-directional. Looping established peers is what
+        /// makes it real.
+        /// </summary>
         public void BroadcastToClients(INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
         {
             if (_transport == null) return;
             if (BlockedPreHandshake(msg.Type)) return;
-            if (BlockedByAllyLock(msg)) return;
-            _writer.Reset();
-            _writer.Put((byte)msg.Type);
-            msg.Serialize(_writer);
-            _transport.BroadcastToClients(_writer.Data, _writer.Length, MapDelivery(delivery));
+            if (BlockedByOwnership(msg)) return;
+            if (!Serialize(msg)) return;
+
+            var dm = MapDelivery(delivery);
+            foreach (var s in _peers.Values)
+            {
+                if (s.State != HandshakeState.Established) continue;
+                _transport.SendTo(s.Peer, _writer.Data, _writer.Length, dm);
+            }
             Telemetry.OnSend((byte)msg.Type, _writer.Length);
         }
 
         /// <summary>
-        /// Ally-lock backstop. Order patches are supposed to refuse locally AND not
+        /// Host: send only to players on one team.
+        ///
+        /// The audience question the old co-op/PvP flag was standing in for. A shared
+        /// contact picture, a map drawing or a relayed order is its team's business and
+        /// nobody else's - sending it to the other side leaks intent that their sensors
+        /// have not earned.
+        ///
+        /// GUESTS NEVER CALL THIS. They always SendToServer and let the host pick the
+        /// audience; a guest has no connection to its teammates to send on.
+        /// </summary>
+        public void SendToTeam(Team team, INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+            => SendToTeamExcept(team, PlayerRegistry.NoSender, msg, delivery);
+
+        /// <summary>Host: <see cref="SendToTeam"/> minus one slot - the relay case, where
+        /// the sender must not be told its own message.</summary>
+        public void SendToTeamExcept(Team team, byte exceptSlot, INetMessage msg,
+                                     DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (_transport == null || !_isHost) return;
+            if (BlockedPreHandshake(msg.Type)) return;
+            if (!Serialize(msg)) return;
+
+            var dm = MapDelivery(delivery);
+            foreach (var s in _peers.Values)
+            {
+                if (s.State != HandshakeState.Established) continue;
+                if (s.Slot == exceptSlot) continue;
+                if (!PlayerRegistry.TryGet(s.Slot, out var p) || p.Team != team) continue;
+                _transport.SendTo(s.Peer, _writer.Data, _writer.Length, dm);
+            }
+            Telemetry.OnSend((byte)msg.Type, _writer.Length);
+        }
+
+        /// <summary>Which player a peer is, or <see cref="PlayerRegistry.NoSender"/> when
+        /// the peer is unknown (guest, or a message that arrived mid-teardown).
+        ///
+        /// Derived from the CONNECTION, never from a field in the message. A slot the
+        /// sender wrote itself would be trivially forgeable, and every ownership decision
+        /// downstream hangs off this answer.</summary>
+        public byte SlotOf(PeerId peer)
+        {
+            if (!_isHost) return PlayerRegistry.NoSender;
+            return _peers.TryGetValue(peer, out var s) ? s.Slot : PlayerRegistry.NoSender;
+        }
+
+        /// <summary>
+        /// Host: pass a guest-originated message on to the REST of that guest's team.
+        ///
+        /// Guests have no connection to each other, so without this a second player on a
+        /// team never learns what their teammate did - they only see the resulting motion
+        /// in the entity stream, and nothing at all for orders with no kinematic effect
+        /// (weapon status, EMCON, waypoint lists, formation ops, classification).
+        ///
+        /// Team-scoped, not broadcast: relaying an order to the opposing side would leak
+        /// intent their sensors have not earned - they would learn a course change before
+        /// they could possibly detect it.
+        /// </summary>
+        public void RelayToTeam(byte senderSlot, INetMessage msg,
+                                DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (!_isHost) return;                                   // guests never relay
+            if (senderSlot == PlayerRegistry.NoSender) return;
+            if (!PlayerRegistry.TryGet(senderSlot, out var sender)) return;
+            if (PlayerRegistry.TeammateCount(senderSlot) == 0) return;   // nobody to tell
+            SendToTeamExcept(sender.Team, senderSlot, msg, delivery);
+            Telemetry.Count("net.relayedToTeam");
+        }
+
+        /// <summary>Host: pass a guest-originated message on to every OTHER peer,
+        /// regardless of team. For genuinely global things - time votes.</summary>
+        public void RelayToAll(byte senderSlot, INetMessage msg,
+                               DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (!_isHost) return;
+            if (_transport == null) return;
+            if (BlockedPreHandshake(msg.Type)) return;
+            if (!Serialize(msg)) return;
+
+            var dm = MapDelivery(delivery);
+            foreach (var s in _peers.Values)
+            {
+                if (s.State != HandshakeState.Established) continue;
+                if (s.Slot == senderSlot) continue;
+                _transport.SendTo(s.Peer, _writer.Data, _writer.Length, dm);
+            }
+            Telemetry.OnSend((byte)msg.Type, _writer.Length);
+            Telemetry.Count("net.relayedToAll");
+        }
+
+        /// <summary>Host: send to one player by slot.</summary>
+        public void SendToSlot(byte slot, INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            foreach (var s in _peers.Values)
+            {
+                if (s.Slot != slot) continue;
+                SendTo(s.Peer, msg, delivery);
+                return;
+            }
+        }
+
+        /// <summary>
+        /// Fill the shared writer once so a fan-out serializes a single time, stamping
+        /// the originating player on the way past.
+        ///
+        /// Central on purpose: GameEvents are relayed, so the originator has to travel
+        /// WITH the message, and there are twenty send sites that would each have had to
+        /// remember. Only an unstamped message is claimed - one the host is relaying
+        /// already carries the true sender and must pass through untouched.
+        /// </summary>
+        private bool Serialize(INetMessage msg)
+        {
+            if (msg is GameEventMessage ge && ge.Slot == PlayerRegistry.NoSender)
+                ge.Slot = PlayerRegistry.LocalSlot;
+
+            _writer.Reset();
+            _writer.Put((byte)msg.Type);
+            msg.Serialize(_writer);
+            return true;
+        }
+
+        /// <summary>
+        /// Send to exactly one peer. The only way to deliver per-recipient data - the
+        /// handshake verdict, a joiner's own slot and UID band, and (from the
+        /// mid-mission join work) a session save meant for one player.
+        ///
+        /// Deliberately NOT gated by BlockedPreHandshake: its whole purpose includes
+        /// answering a peer that has not finished handshaking yet.
+        /// </summary>
+        public void SendTo(PeerId peer, INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (_transport == null) return;
+            if (!peer.IsValid) return;
+            if (!Serialize(msg)) return;
+            _transport.SendTo(peer, _writer.Data, _writer.Length, MapDelivery(delivery));
+            Telemetry.OnSend((byte)msg.Type, _writer.Length);
+        }
+
+        /// <summary>
+        /// Ownership backstop. Order patches are supposed to refuse locally AND not
         /// send, but each one re-implements its own gating and the ones with bespoke
-        /// send logic kept forgetting the lock - so an order the local player was
-        /// refused still reached the other player, who applied it. That asymmetry is
-        /// the worst possible outcome: the two sims diverge silently.
+        /// send logic kept forgetting - so an order the local player was refused still
+        /// reached the other players, who applied it. That asymmetry is the worst
+        /// possible outcome: the sims diverge silently.
         ///
         /// Catching it here means no order path, present or future, can leak. It is
-        /// deliberately narrow: only PlayerOrderMessage, only for the one unit the
-        /// remote player holds. Host-authoritative capture events (spawns, impacts,
-        /// damage) are not orders and are untouched.
+        /// deliberately narrow: only PlayerOrderMessage, only for units somebody else
+        /// owns. Host-authoritative capture events (spawns, impacts, damage) are not
+        /// orders and are untouched.
         /// </summary>
-        private bool BlockedByAllyLock(INetMessage msg)
+        private bool BlockedByOwnership(INetMessage msg)
         {
             if (msg.Type != MessageType.PlayerOrder) return false;
             if (msg is not PlayerOrderMessage order) return false;
@@ -246,11 +568,10 @@ namespace SeapowerMultiplayer
             // and since that path applies locally without asking the lock, blocking
             // only the send would desync the very thing this guard exists to prevent.
             if (order.Order == OrderType.ClassifyContact) return false;
-            if (!UnitLockManager.IsLockedByRemote(order.SourceEntityId)) return false;
-            if (Plugin.Instance.CfgPvP.Value) return false;
             if (OrderHandler.ApplyingFromNetwork) return false;
+            if (!FormationOwnership.BlocksOrdersFor(StateSerializer.FindById(order.SourceEntityId))) return false;
 
-            Telemetry.Count("net.sendBlockedByAllyLock");
+            Telemetry.Count("net.sendBlockedByOwnership");
             return true;
         }
 
@@ -258,7 +579,7 @@ namespace SeapowerMultiplayer
         private bool BlockedPreHandshake(MessageType type)
         {
             if (type == MessageType.Hello || type == MessageType.Welcome) return false;
-            if (_handshake == HandshakeState.Established) return false;
+            if (IsEstablished) return false;
             Telemetry.Count("net.sendBlockedPreHandshake");
             return true;
         }
@@ -269,6 +590,20 @@ namespace SeapowerMultiplayer
                 BroadcastToClients(msg, delivery);
             else
                 SendToServer(msg, delivery);
+        }
+
+        /// <summary>
+        /// Tell MY TEAM, whichever role I am.
+        ///
+        /// A guest cannot address its teammates directly, so it sends upstream and the
+        /// host's relay picks the audience; a host addresses its own team directly. For
+        /// anything that is a side's private business - which unit I have selected, my
+        /// map plot - where SendToOther would have handed it to the opposition.
+        /// </summary>
+        public void SendToMyTeam(INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (_isHost) SendToTeam(PlayerRegistry.LocalTeam, msg, delivery);
+            else SendToServer(msg, delivery);
         }
 
         // ── Transport factory ───────────────────────────────────────────────────
@@ -302,9 +637,9 @@ namespace SeapowerMultiplayer
 
         // ── Transport event handlers ────────────────────────────────────────────
 
-        private void OnPeerConnected()
+        private void OnPeerConnected(PeerId peer)
         {
-            Log.LogInfo("[Net] Peer connected");
+            Log.LogInfo($"[Net] Peer connected: {peer}");
             _mainThreadQueue.Enqueue(() =>
             {
                 // A new peer means a new attempt - don't carry a stale failure
@@ -313,43 +648,80 @@ namespace SeapowerMultiplayer
 
                 if (_isHost)
                 {
-                    _handshake = HandshakeState.AwaitingHello;
-                    _handshakeDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
-                    Log.LogInfo("[Handshake] Awaiting client Hello...");
+                    // Per peer: a second joiner arriving must not touch the first's state.
+                    _peers[peer] = new PeerSession
+                    {
+                        Peer = peer,
+                        State = HandshakeState.AwaitingHello,
+                        Deadline = Time.realtimeSinceStartup + HandshakeTimeoutSec,
+                    };
+                    Log.LogInfo($"[Handshake] Awaiting Hello from {peer}...");
                 }
                 else
                 {
+                    var requested = SteamLobbyManager.PendingTeamForJoin ?? Team.Blue;
+                    PlayerRegistry.GuestInit(LocalPersonaName(), requested);
+
                     var hello = new HelloMessage
                     {
                         ProtocolVersion = ProtocolInfo.ProtocolVersion,
                         PluginVersion   = PluginInfo.PLUGIN_VERSION,
-                        IsPvP           = Plugin.Instance.CfgPvP.Value,
+                        RequestedTeam   = (byte)requested,
                         GameVersion     = ProtocolInfo.GameVersion,
                         GameplayOptions = RemoteGameplayOptions.PackLocal(),
                         ModFingerprint  = ModSetCheck.LocalFingerprint(),
                         ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
+                        DisplayName     = LocalPersonaName(),
                     };
                     ModSetCheck.LogLocal("client");
-                    _handshake = HandshakeState.AwaitingWelcome;
-                    _handshakeDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
+                    _clientHandshake = HandshakeState.AwaitingWelcome;
+                    _clientDeadline = Time.realtimeSinceStartup + HandshakeTimeoutSec;
                     SendToServer(hello);
-                    Log.LogInfo($"[Handshake] Hello sent (protocol {ProtocolInfo.ProtocolVersion}, pvp={hello.IsPvP}); awaiting Welcome...");
+                    Log.LogInfo($"[Handshake] Hello sent (protocol {ProtocolInfo.ProtocolVersion}, team={requested}); awaiting Welcome...");
                 }
             });
         }
 
-        private void OnPeerDisconnected()
+        private void OnPeerDisconnected(PeerId peer)
         {
-            Log.LogInfo("[Net] Peer disconnected");
+            Log.LogInfo($"[Net] Peer disconnected: {peer}");
             _mainThreadQueue.Enqueue(() =>
             {
                 // Captured before the reset below: only a peer that got as far as
                 // Established was in a session worth freezing for.
-                bool wasEstablished = _handshake == HandshakeState.Established;
+                bool wasEstablished = IsEstablishedFor(peer);
+                byte slot = SlotOf(peer);
 
-                _handshake = HandshakeState.Disconnected;
-                _handshakeDeadline = -1f;
-                _refuseDisconnectAt = -1f;
+                _peers.Remove(peer);
+                // Back to zero means the next joiner is once again the first, and its
+                // gameplay options should be adopted - otherwise a guest who dropped and
+                // reconnected would silently run the session on stale settings.
+                if (wasEstablished && _establishedCount > 0) _establishedCount--;
+                if (!_isHost)
+                {
+                    _clientHandshake = HandshakeState.Disconnected;
+                    _clientDeadline = -1f;
+                }
+
+                PerPeerTeardown(slot);
+                PlayerRegistry.HostRemove(peer);
+
+                // HOST WITH PLAYERS LEFT: stop here.
+                //
+                // Everything below tears down session-wide state that the REMAINING
+                // players are still using. Clearing CaptureState alone breaks their
+                // census self-heal - the spawn ledger is what a diff request is answered
+                // from - so one player rage-quitting used to quietly degrade everyone
+                // else's session. A guest never takes this branch: losing the host is
+                // losing everything.
+                if (_isHost && _peers.Count > 0)
+                {
+                    PlayerRegistry.HostBroadcastRoster();
+                    ReconnectManager.OnPeerLost(wasEstablished, peersRemain: true);
+                    return;
+                }
+
+                if (_isHost) PlayerRegistry.HostBroadcastRoster();
                 SessionParams = null;
                 UnitReplicaDriver.Reset();
                 AircraftReplicaDriver.Reset();
@@ -358,9 +730,10 @@ namespace SeapowerMultiplayer
                 WeaponHatchHandler.Reset();
                 FlightDeckStreamer.Reset();
                 FlightDeckStateApplier.Reset();
+                FlightDeckJamGuard.Reset();
                 RemoteGameplayOptions.Reset();
                 ViewportHintSender.Reset();
-                HostEntityStreamer.ClearViewportHint();
+                HostEntityStreamer.ClearAllViewportHints();
                 SpawnReplicator.Reset();
                 WeaponReplicaDriver.Reset();
                 UnitIdentityApplier.Reset();
@@ -372,14 +745,14 @@ namespace SeapowerMultiplayer
                 ReplicaRegistry.Clear();
                 Suppression.EnforceDefenseFlag(); // restores client auto-defence
                 Suppression.EnforceInterceptSymmetry(); // restores the difficulty handicap
-                TaskforceAssignmentManager.Reset();
+                FormationOwnership.Reset();
                 ContactSyncManager.Reset();
                 ContactRevealManager.Reset();
                 DrawingSyncManager.Reset();
                 SensorStateManager.Reset();
                 JamStateManager.Reset();
                 UnitStatusManager.Reset();
-                UnitLockManager.Reset();
+                OrderRefusalNotice.Reset();
                 AttackDesignationSync.Reset();
                 WeaponStatusSync.Reset();
                 StateApplier.ResetOrphanTracking();
@@ -396,8 +769,31 @@ namespace SeapowerMultiplayer
 
                 // Last: the resets above have already handed local control back,
                 // so this is what stops the client drifting into a solo game.
-                ReconnectManager.OnPeerLost(wasEstablished);
+                ReconnectManager.OnPeerLost(wasEstablished, peersRemain: false);
             });
+        }
+
+        /// <summary>
+        /// Release state belonging to ONE departing player, leaving everyone else's
+        /// session untouched.
+        ///
+        /// Small on purpose. Most of the big teardown below is the GUEST's - on the host
+        /// the replica drivers, the spawn replicator and the id floor are already no-ops
+        /// - so the per-peer set is just the handful of things genuinely keyed to a
+        /// particular player.
+        /// </summary>
+        private void PerPeerTeardown(byte slot)
+        {
+            if (slot == PlayerRegistry.NoSender) return;
+
+            SimSyncManager.OnPeerLeft(slot);
+            HostEntityStreamer.ClearViewportHint(slot);
+
+            // Their formations go to the longest-present remaining teammate, so nothing
+            // on that side is left commandable by nobody. Before HostRemove, which is
+            // what decides who the heir is.
+            FormationOwnership.HostReleaseSlot(slot);
+
         }
 
         /// <summary>
@@ -405,9 +801,9 @@ namespace SeapowerMultiplayer
         /// successful send and will not retry, so the only recovery is a fresh
         /// Send from the host — surface that instead of failing silently.
         /// </summary>
-        private void OnReceiveFailed(string reason)
+        private void OnReceiveFailed(PeerId peer, string reason)
         {
-            Log.LogError($"[Net] Inbound message lost: {reason}");
+            Log.LogError($"[Net] Inbound message from {peer} lost: {reason}");
             _mainThreadQueue.Enqueue(() =>
             {
                 SimSyncManager.ReportIssue(
@@ -417,17 +813,19 @@ namespace SeapowerMultiplayer
             });
         }
 
-        private void OnDataReceived(byte[] data, int length)
+        private void OnDataReceived(PeerId from, byte[] data, int length)
         {
             var reader = new NetDataReader(data, 0, length);
             var type = (MessageType)reader.GetByte();
             Telemetry.OnReceive((byte)type, length);
 
-            // Handshake gate: until Established, only Hello (host) / Welcome (client)
-            // are processed; everything else is dropped.
-            if (_handshake != HandshakeState.Established)
+            // Handshake gate, PER PEER: until this peer is Established, only its Hello
+            // (host) / Welcome (client) is processed; everything else from it is dropped.
+            // Peer-scoped so a second joiner mid-handshake cannot have its traffic
+            // accepted on the strength of an established first peer, nor block it.
+            if (!IsEstablishedFor(from))
             {
-                HandlePreHandshake(type, reader);
+                HandlePreHandshake(from, type, reader);
                 return;
             }
 
@@ -439,15 +837,28 @@ namespace SeapowerMultiplayer
             // the frame's event batch, reliable deliveries included). Log and move on.
             try
             {
-                Dispatch(type, reader);
+                Dispatch(from, type, reader);
             }
             catch (System.Exception ex)
             {
-                Log.LogError($"[Net] Failed to handle {type} (len={length}): {ex}");
+                Log.LogError($"[Net] Failed to handle {type} from {from} (len={length}): {ex}");
             }
         }
 
-        private void Dispatch(MessageType type, NetDataReader reader)
+        /// <summary>
+        /// Run a queued apply with the sender's slot ambient, so handlers can ask WHO
+        /// sent this without every message growing a redundant (and forgeable) slot
+        /// field. Cleared in a finally: a throwing handler must not leave the next
+        /// LOCAL action running as if a remote player had made it.
+        /// </summary>
+        private static void ApplyAs(byte slot, Action apply)
+        {
+            PlayerRegistry.BeginApply(slot);
+            try { apply(); }
+            finally { PlayerRegistry.EndApply(); }
+        }
+
+        private void Dispatch(PeerId from, MessageType type, NetDataReader reader)
         {
             switch (type)
             {
@@ -538,21 +949,45 @@ namespace SeapowerMultiplayer
                 case MessageType.CensusDiffRequest:
                 {
                     var msg = CensusDiffRequestMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => EntityCensusManager.HandleDiffRequest(msg));
+                    byte slot = SlotOf(from);
+                    _mainThreadQueue.Enqueue(() => EntityCensusManager.HandleDiffRequest(slot, msg));
                     break;
                 }
 
                 case MessageType.PlayerOrder:
                 {
                     var msg = PlayerOrderMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => OrderHandler.Apply(msg));
+                    byte slot = SlotOf(from);
+                    // NOT relayed here. OrderHandler.Apply relays from inside itself,
+                    // after its guards - so "the teammates saw it" and "the host applied
+                    // it" cannot come apart. Relaying at dispatch would forward orders
+                    // the host then refuses, which is the worst outcome available: the
+                    // two sims diverge and nothing says so.
+                    _mainThreadQueue.Enqueue(() => ApplyAs(slot, () => OrderHandler.Apply(msg)));
                     break;
                 }
 
                 case MessageType.GameEvent:
                 {
                     var msg = GameEventMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => GameEventHandler.Apply(msg));
+                    byte slot = SlotOf(from);
+
+                    // The host decides who sent this, from the CONNECTION. Whatever the
+                    // guest wrote in the field is overwritten before it is applied or
+                    // relayed, so a guest cannot attribute its own actions to somebody
+                    // else. Guests keep what they were given - it came from the host.
+                    if (_isHost && slot != PlayerRegistry.NoSender) msg.Slot = slot;
+
+                    // Relayed at receipt, not inside the handler: it must reach the
+                    // sender's teammates even when the host itself ignores the event
+                    // (an opponent's ally-lock claim is no business of the host's, but
+                    // it is very much their teammate's).
+                    switch (GameEventRelay.AudienceFor(msg.EventType))
+                    {
+                        case RelayAudience.Team: RelayToTeam(slot, msg); break;
+                        case RelayAudience.All:  RelayToAll(slot, msg);  break;
+                    }
+                    _mainThreadQueue.Enqueue(() => ApplyAs(slot, () => GameEventHandler.Apply(msg)));
                     break;
                 }
 
@@ -566,7 +1001,8 @@ namespace SeapowerMultiplayer
                 case MessageType.ViewportHint:
                 {
                     var msg = ViewportHintMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => HostEntityStreamer.OnViewportHint(msg));
+                    byte slot = SlotOf(from);
+                    _mainThreadQueue.Enqueue(() => HostEntityStreamer.OnViewportHint(slot, msg));
                     break;
                 }
 
@@ -587,7 +1023,12 @@ namespace SeapowerMultiplayer
                 case MessageType.DrawingSync:
                 {
                     var msg = DrawingSyncMessage.Deserialize(reader);
-                    _mainThreadQueue.Enqueue(() => DrawingSyncManager.ApplyReceived(msg));
+                    byte slot = SlotOf(from);
+                    // Relayed at receipt for the same reason as GameEvent: a Red guest's
+                    // plot has to reach the other Red guest even though the Blue host
+                    // ignores it entirely.
+                    RelayToTeam(slot, msg);
+                    _mainThreadQueue.Enqueue(() => ApplyAs(slot, () => DrawingSyncManager.ApplyReceived(msg)));
                     break;
                 }
 
@@ -612,12 +1053,27 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.PlayerRoster:
+                {
+                    var msg = PlayerRosterMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => PlayerRegistry.ApplyRoster(msg));
+                    break;
+                }
+
+                case MessageType.UnitOwnership:
+                {
+                    var msg = UnitOwnershipMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => FormationOwnership.ApplySnapshot(msg));
+                    break;
+                }
+
                 case MessageType.SessionReady:
                 {
                     var msg = SessionReadyMessage.Deserialize(reader);
+                    byte slot = SlotOf(from);
                     _mainThreadQueue.Enqueue(() =>
                     {
-                        SimSyncManager.OnClientReady();
+                        SimSyncManager.OnClientReady(slot);
                         ReconnectManager.OnClientResynced();
                     });
                     break;
@@ -646,7 +1102,7 @@ namespace SeapowerMultiplayer
 
         // ── v2 handshake ──────────────────────────────────────────────────────────
 
-        private void HandlePreHandshake(MessageType type, NetDataReader reader)
+        private void HandlePreHandshake(PeerId from, MessageType type, NetDataReader reader)
         {
             // No synchronous _handshake check here: OnPeerConnected QUEUES the
             // AwaitingHello/AwaitingWelcome transition, so when the peer's Hello
@@ -659,23 +1115,50 @@ namespace SeapowerMultiplayer
             if (type == MessageType.Hello && _isHost)
             {
                 var msg = HelloMessage.Deserialize(reader);
-                _mainThreadQueue.Enqueue(() => HandleHello(msg));
+                _mainThreadQueue.Enqueue(() => HandleHello(from, msg));
             }
             else if (type == MessageType.Welcome && !_isHost)
             {
                 var msg = WelcomeMessage.Deserialize(reader);
                 _mainThreadQueue.Enqueue(() => HandleWelcome(msg));
             }
+            else if (!_isHost && _clientHandshake == HandshakeState.AwaitingWelcome)
+            {
+                // THE SAME RACE AS ABOVE, one message later.
+                //
+                // The host sends Welcome and then the player roster back to back, so both
+                // land in one Poll batch. The Welcome's state transition is QUEUED to the
+                // main thread, so when the roster is tested here - on the network thread -
+                // IsEstablishedFor still reads false and the roster was dropped. Nothing
+                // re-sent it, so the guest spent the whole session with a roster
+                // containing only itself: no teammates, therefore no "send to player"
+                // entry, and no names anywhere.
+                //
+                // Dispatching is safe and ordering-correct for exactly the reason the
+                // Hello path gives: Dispatch only ENQUEUES the apply, and the queue is
+                // FIFO, so it runs after the HandleWelcome already sitting in front of it.
+                // Scoped to a client that is genuinely mid-handshake - a host still
+                // refuses gameplay from a peer that has not said Hello.
+                try
+                {
+                    Dispatch(from, type, reader);
+                }
+                catch (System.Exception ex)
+                {
+                    Log.LogError($"[Net] Failed to handle {type} from {from} during handshake: {ex}");
+                }
+            }
             else
             {
                 Telemetry.Count("net.droppedPreHandshake");
-                Log.LogDebug($"[Handshake] Dropped {type} (state={_handshake})");
+                Log.LogDebug($"[Handshake] Dropped {type} from {from} (state={Handshake})");
             }
         }
 
-        private void HandleHello(HelloMessage msg)
+        private void HandleHello(PeerId from, HelloMessage msg)
         {
-            if (_handshake != HandshakeState.AwaitingHello) return;
+            if (!_peers.TryGetValue(from, out var session)) return;
+            if (session.State != HandshakeState.AwaitingHello) return;
 
             string? refusal = null;
             if (msg.ProtocolVersion != ProtocolInfo.ProtocolVersion)
@@ -694,40 +1177,73 @@ namespace SeapowerMultiplayer
                           "Both players must run the same game build — update through Steam and restart.";
                 VersionMismatchNotice = refusal;
             }
-            else if (msg.IsPvP != Plugin.Instance.CfgPvP.Value)
-                refusal = $"Mode mismatch: host is {(Plugin.Instance.CfgPvP.Value ? "PvP" : "co-op")}, client is {(msg.IsPvP ? "PvP" : "co-op")}.";
+            // The old mode-mismatch refusal lived here. There is no session mode any more:
+            // a joiner asks for a team and the host seats them, so there is nothing left
+            // to disagree about.
+
+            var requestedTeam = msg.RequestedTeam == (byte)Team.Red ? Team.Red : Team.Blue;
+            PlayerInfo? seated = null;
+            // Sanitized on RECEIPT, not just where it was typed: this arrived off the
+            // wire, and the name goes straight into every other player's roster row and
+            // context-menu labels. A peer sending a 4 KB name or an embedded newline is
+            // everyone else's problem otherwise.
+            if (refusal == null
+                && !PlayerRegistry.HostTryAdd(from, _transport?.SteamIdOf(from) ?? 0UL,
+                                              Sanitize(msg.DisplayName ?? ""), requestedTeam,
+                                              out seated, out var full))
+            {
+                refusal = full;
+            }
 
             if (refusal != null)
             {
-                Log.LogError($"[Handshake] Refusing client (plugin {msg.PluginVersion}, game {msg.GameVersion}): {refusal}");
+                Log.LogError($"[Handshake] Refusing {from} (plugin {msg.PluginVersion}, game {msg.GameVersion}): {refusal}");
                 Telemetry.Count("handshake.refused");
-                BroadcastToClients(new WelcomeMessage { Accepted = false, RefusalReason = refusal });
-                _handshake = HandshakeState.Refused;
-                _handshakeDeadline = -1f;
-                _refuseDisconnectAt = Time.realtimeSinceStartup + 0.75f;
+                // UNICAST. Broadcasting the refusal told every established player they
+                // had been refused too.
+                SendTo(from, new WelcomeMessage { Accepted = false, RefusalReason = refusal });
+                session.State = HandshakeState.Refused;
+                session.Deadline = -1f;
+                session.RefuseDisconnectAt = Time.realtimeSinceStartup + 0.75f;
                 return;
             }
 
-            _handshake = HandshakeState.Established;
-            _handshakeDeadline = -1f;
+            session.State = HandshakeState.Established;
+            session.Deadline = -1f;
+            session.Slot = seated!.Slot;
             VersionMismatchNotice = null;
 
             // Only after the refusal checks above: a client that is going to be turned
             // away has no options worth adopting, and its byte may not even mean what
             // this build thinks it does.
-            RemoteGameplayOptions.Apply(msg.GameplayOptions);
+            //
+            // FIRST established peer only. These are global gameplay settings, so with
+            // several guests the last one to join would silently overwrite everyone
+            // else's session.
+            if (_establishedCount == 0)
+                RemoteGameplayOptions.Apply(msg.GameplayOptions);
+            else if (msg.GameplayOptions != RemoteGameplayOptions.PackLocal())
+                Log.LogWarning($"[Handshake] {seated.DisplayName} has different gameplay options to the session — the session's own settings stand.");
+            _establishedCount++;
 
-            BroadcastToClients(new WelcomeMessage
+            // UNICAST: slot, team and UID band are per-recipient and cannot ride a
+            // broadcast. This is the only message that can tell a player who they are.
+            SendTo(from, new WelcomeMessage
             {
                 Accepted        = true,
-                IsPvP           = Plugin.Instance.CfgPvP.Value,
-                ClientUidBase   = ProtocolInfo.ClientUidBase,
+                AssignedTeam    = (byte)seated.Team,
+                AssignedSlot    = seated.Slot,
+                ClientUidBase   = seated.UidBase,
                 StateRateHz     = 10,
                 GameplayOptions = RemoteGameplayOptions.PackLocal(),
                 ModFingerprint  = ModSetCheck.LocalFingerprint(),
                 ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
                 DisableF10Menu  = Plugin.Instance.CfgDisableF10Menu.Value,
             });
+
+            // Everyone learns who just joined - including the joiner, whose own identity
+            // came from the Welcome above.
+            PlayerRegistry.HostBroadcastRoster();
 
             // After the clear above, not before: acceptance resets the notice, and this
             // is a warning that has to survive it. A mod mismatch does not refuse - it
@@ -741,14 +1257,29 @@ namespace SeapowerMultiplayer
                 Log.LogWarning($"[Mods] {modWarning}");
                 VersionMismatchNotice = modWarning;
             }
-            Log.LogInfo($"[Handshake] Client accepted (plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}, game {ProtocolInfo.GameVersion}). Established.");
+            Log.LogInfo($"[Handshake] {seated.DisplayName} accepted as slot {seated.Slot} on {seated.Team} " +
+                        $"(plugin {msg.PluginVersion}, protocol {msg.ProtocolVersion}, game {ProtocolInfo.GameVersion}). Established.");
             ReconnectManager.OnPeerEstablished();
+
+            // MID-MISSION JOIN. A battle is already running and other people are in it,
+            // so this player gets the world unicast to them while everyone else keeps
+            // their session - rather than the host's "Send State & Wait" button, which
+            // starts a new battle for everybody.
+            //
+            // Not for the first joiner: with nobody else in yet there is no session to
+            // preserve, and the host still drives that one from the button.
+            if (SessionManager.MissionIsLive
+                && SimSyncManager.CurrentState == SimState.Synchronized
+                && _establishedCount > 1)
+            {
+                SessionManager.CaptureAndSendTo(seated.Slot);
+            }
         }
 
         private void HandleWelcome(WelcomeMessage msg)
         {
-            if (_handshake != HandshakeState.AwaitingWelcome) return;
-            _handshakeDeadline = -1f;
+            if (_clientHandshake != HandshakeState.AwaitingWelcome) return;
+            _clientDeadline = -1f;
 
             if (!msg.Accepted)
             {
@@ -759,14 +1290,19 @@ namespace SeapowerMultiplayer
                 if (msg.RefusalReason.StartsWith("Protocol mismatch")
                  || msg.RefusalReason.StartsWith("Sea Power version mismatch"))
                     VersionMismatchNotice = msg.RefusalReason;
-                _handshake = HandshakeState.Refused;
+                _clientHandshake = HandshakeState.Refused;
                 Stop();
                 return;
             }
 
             SessionParams = msg;
-            _handshake = HandshakeState.Established;
+            _clientHandshake = HandshakeState.Established;
             VersionMismatchNotice = null;
+
+            // Before anything reads our team - in particular before any SessionSync can
+            // arrive, which BlockedPreHandshake guarantees - because the save swap is
+            // decided from it.
+            PlayerRegistry.ApplyWelcome(msg);
             RemoteGameplayOptions.Apply(msg.GameplayOptions);
 
             // See the host half in HandleHello - both ends warn, so whichever player is
@@ -781,8 +1317,9 @@ namespace SeapowerMultiplayer
             // Before the session load starts, which is the point - the guest allocates
             // ids all the way through a load, so a floor armed afterwards is too late.
             GuestIdFloor.Arm(msg.ClientUidBase);
-            Log.LogInfo($"[Handshake] Established (pvp={msg.IsPvP}, uidBase={msg.ClientUidBase}, " +
-                        $"stateRate={msg.StateRateHz}Hz, disableF10={msg.DisableF10Menu}).");
+            Log.LogInfo($"[Handshake] Established (slot={msg.AssignedSlot}, team={(Team)msg.AssignedTeam}, " +
+                        $"uidBase={msg.ClientUidBase}, stateRate={msg.StateRateHz}Hz, " +
+                        $"disableF10={msg.DisableF10Menu}).");
             ReconnectManager.OnPeerEstablished();
         }
     }

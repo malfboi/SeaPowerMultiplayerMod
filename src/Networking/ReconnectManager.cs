@@ -76,8 +76,27 @@ namespace SeapowerMultiplayer
 
         /// <summary>Peer dropped. <paramref name="wasEstablished"/> is the handshake
         /// state from before NetworkManager reset it.</summary>
-        public static void OnPeerLost(bool wasEstablished)
+        /// <summary>
+        /// A peer dropped.
+        ///
+        /// <paramref name="peersRemain"/> is what stops one player's connection trouble
+        /// stopping the game for everybody. Freezing exists because a two-player session
+        /// minus one player has nobody to play against; a four-player session minus one
+        /// still has three, and holding them all at a frozen screen while one person
+        /// reconnects is a far worse outcome than that player missing a minute. The host
+        /// keeps simulating, the slot is held, and the banner says who is missing.
+        ///
+        /// A GUEST never passes true here: losing the host is losing the simulation, and
+        /// there is nothing left to keep playing.
+        /// </summary>
+        public static void OnPeerLost(bool wasEstablished, bool peersRemain)
         {
+            if (peersRemain)
+            {
+                Plugin.Log.LogInfo("[Reconnect] A player dropped; session continues for the others.");
+                return;
+            }
+
             // Already handling an interruption: a failed reconnect attempt just
             // came back. Keep the freeze and go back to waiting.
             if (IsFrozen)

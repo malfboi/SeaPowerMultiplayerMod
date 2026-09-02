@@ -15,8 +15,19 @@ namespace SeapowerMultiplayer
     /// </summary>
     public static class FlightDeckStreamer
     {
-        private static readonly Dictionary<int, string> _lastSig = new();
-        private static readonly Dictionary<int, float>  _nextSendAt = new();
+        // PER TEAM, for the same reason as UnitStatusManager: one change-detection table
+        // serving two audiences withholds from the second whatever it already sent to
+        // the first, and the symptom is a Flight Ops window that silently stops updating.
+        private static readonly Dictionary<Team, Dictionary<int, string>> _lastSigByTeam = new()
+        {
+            [Team.Blue] = new Dictionary<int, string>(),
+            [Team.Red]  = new Dictionary<int, string>(),
+        };
+        private static readonly Dictionary<Team, Dictionary<int, float>> _nextSendAtByTeam = new()
+        {
+            [Team.Blue] = new Dictionary<int, float>(),
+            [Team.Red]  = new Dictionary<int, float>(),
+        };
         private static readonly StringBuilder _sb = new();
         private static readonly List<FlightDeckStateMessage> _chunks = new();
 
@@ -34,15 +45,22 @@ namespace SeapowerMultiplayer
         {
             if (!CaptureState.HostCaptureActive) return;
 
-            // PvP: only the remote player's own carriers (their taskforce, which is
-            // the host's EnemyTaskforce after the side swap) - never leak the host
-            // player's flight-ops queue to their opponent. Co-op streams all.
-            bool pvp = Plugin.Instance.CfgPvP.Value;
             float now = UnityEngine.Time.unscaledTime;
+            StreamTeam(Team.Blue, now);
+            StreamTeam(Team.Red, now);
+        }
+
+        /// <summary>Send one team the deck state of its OWN carriers. A flight-ops queue
+        /// is the clearest possible statement of what a side is about to do, so it never
+        /// crosses to the other team.</summary>
+        private static void StreamTeam(Team team, float now)
+        {
+            if (PlayerRegistry.CountOnTeam(team) == 0) return;
+            if (team == Team.Blue && PlayerRegistry.TeammateCount(0) == 0) return; // host alone on Blue
 
             var vessels = UnitRegistry.Vessels;
             for (int i = 0; i < vessels.Count; i++)
-                StreamDeck(vessels[i], pvp, now);
+                StreamDeck(vessels[i], team, now);
 
             // Airbases are LandUnits, and they carry flight decks exactly as carriers
             // do. Streaming ships only meant a client-owned airfield got no snapshots at
@@ -52,27 +70,41 @@ namespace SeapowerMultiplayer
             // have always covered land units; this was the one place that did not.
             var landUnits = UnitRegistry.LandUnits;
             for (int i = 0; i < landUnits.Count; i++)
-                StreamDeck(landUnits[i], pvp, now);
+                StreamDeck(landUnits[i], team, now);
         }
 
-        private static void StreamDeck(ObjectBase carrier, bool pvp, float now)
+        /// <summary>Is this carrier on <paramref name="team"/>'s side? Runs on the HOST,
+        /// so Blue is always Globals._playerTaskforce.</summary>
+        private static bool BelongsTo(ObjectBase carrier, Team team)
+        {
+            var tf = carrier._taskforce;
+            if (tf == null) return false;
+            if (team == Team.Red) return tf == Globals._enemyTaskforce;
+            return tf.Side == Taskforce.TfType.Player || tf.Side == Taskforce.TfType.Ally;
+        }
+
+        private static void StreamDeck(ObjectBase carrier, Team team, float now)
         {
             var fd = carrier?._obp?._flightDeck;
             if (fd == null) return;
-            if (pvp && carrier._taskforce != Globals._enemyTaskforce) return;
-            if (_nextSendAt.TryGetValue(carrier.UniqueID, out var next) && now < next) return;
+            if (!BelongsTo(carrier, team)) return;
+
+            var lastSig = _lastSigByTeam[team];
+            var nextSendAt = _nextSendAtByTeam[team];
+
+            if (nextSendAt.TryGetValue(carrier.UniqueID, out var next) && now < next) return;
 
             var msg = BuildSnapshot(carrier, fd);
             string sig = Signature(msg);
-            if (_lastSig.TryGetValue(carrier.UniqueID, out var prev) && sig == prev)
+            if (lastSig.TryGetValue(carrier.UniqueID, out var prev) && sig == prev)
                 return; // unchanged
 
-            _lastSig[carrier.UniqueID] = sig;
-            _nextSendAt[carrier.UniqueID] = now + MinSendIntervalSec;
+            lastSig[carrier.UniqueID] = sig;
+            nextSendAt[carrier.UniqueID] = now + MinSendIntervalSec;
 
             Chunk(msg);
             for (int c = 0; c < _chunks.Count; c++)
-                NetworkManager.Instance.BroadcastToClients(_chunks[c], LiteNetLib.DeliveryMethod.ReliableOrdered);
+                NetworkManager.Instance.SendToTeam(team, _chunks[c], LiteNetLib.DeliveryMethod.ReliableOrdered);
             Telemetry.Count("v2.flightDeckSnapshot");
             _chunks.Clear();
         }
@@ -265,8 +297,8 @@ namespace SeapowerMultiplayer
 
         public static void Reset()
         {
-            _lastSig.Clear();
-            _nextSendAt.Clear();
+            foreach (var t in _lastSigByTeam.Values) t.Clear();
+            foreach (var t in _nextSendAtByTeam.Values) t.Clear();
         }
     }
 }
