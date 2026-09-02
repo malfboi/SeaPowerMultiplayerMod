@@ -699,6 +699,22 @@ namespace SeapowerMultiplayer
             bool isHost = Plugin.Instance.CfgIsHost.Value;
             if (FormationOwnership.BlocksOrdersFor(unit)) return;
 
+            // A unit this client does not own is a host-driven replica, and a waypoint
+            // change on one did not come from the player - it came from our own local
+            // sim, which ticks unit state machines outside the suppressed AI class. This
+            // path never asked, because it bypasses OrderSyncHelper.Prefix (where the
+            // same test has lived all along) and went out under the ownership gate
+            // alone - which is off entirely when LockUnitsToPlayers is false.
+            //
+            // The result was the client re-waypointing the OTHER side's fleet on the
+            // authoritative sim. NotTronic's host log, 0.3.7/protocol 232, with the lock
+            // off and no refusal in the whole file: 53 EditWaypoint orders applied to the
+            // host's own PLAAF/PLAN units (j-20a x21, j-35 x10, y-9lg x7, ss_type_039a
+            // x6, j-15dt x5, kj-600, j-15t) and 14 more to civilian traffic (dc-10, 707,
+            // il-62, ms_mercur, a fishing boat). That is "they decide to move and do
+            // whatever they want" from the other chair.
+            if (Suppression.ClientForeignUnit(unit)) return;
+
             var root = unit._userRoot;
             if (root == null || start < 0 || start >= root.TaskViewModels.Count) return;
             if (!(root.TaskViewModels[start].Task is GoToWaypointTask wp)) return;
@@ -735,6 +751,14 @@ namespace SeapowerMultiplayer
 
         internal static void SendEditWaypoint(ObjectBase unit, int index, GoToWaypointTask wp)
         {
+            // Re-asserted here, not just at the call site above: the throttle defers a
+            // send into _pending, and StateBroadcaster's flush loop calls straight into
+            // this method up to 150 ms later - long enough for ownership to have moved,
+            // and a path that never saw the caller's guards at all.
+            if (unit == null) return;
+            if (FormationOwnership.BlocksOrdersFor(unit)) return;
+            if (Suppression.ClientForeignUnit(unit)) return;
+
             var geo = wp._waypointGeoPos.value;
             var msg = new PlayerOrderMessage
             {
