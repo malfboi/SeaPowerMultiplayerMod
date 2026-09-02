@@ -31,7 +31,12 @@ namespace SeapowerMultiplayer.Net2
         // UID band, and PlayerRoster and UnitOwnership are new. The session-wide
         // PvP/co-op mode is gone - team is a property of each player now, because a 2v1
         // is co-op and PvP at the same time and no single flag could say so.
-        public const ushort ProtocolVersion = 233;
+        // 234: UnitStatus carries each air unit's home base id. The client could never
+        // derive one itself (vanilla's SearchForHomeBase runs only from AI.OnFixedUpdate,
+        // which is suppressed there), and all three of the game's return-to-base entry
+        // points are guarded on _homeBase being non-null - so a guest's RTB order either
+        // never left the machine or arrived with no base attached.
+        public const ushort ProtocolVersion = 234;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

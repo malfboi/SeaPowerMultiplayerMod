@@ -1004,6 +1004,29 @@ namespace SeapowerMultiplayer
                         if (msg.TargetEntityId != 0)
                             homeBase = StateSerializer.FindById(msg.TargetEntityId);
 
+                        // Fall back to the HOST's own answer when the sender had none.
+                        // The guest's T-key path for a helicopter (InputHandler.cs:1731)
+                        // passes getHomeBase() straight through, so it reaches here as 0
+                        // whenever the guest's replica has not been told the base yet -
+                        // and setOrder(ReturnToBase, null) is accepted and then does
+                        // nothing, which is the "aircraft doesn't respond" report. The
+                        // host resolves _homeBase normally (its AI.OnFixedUpdate runs
+                        // SearchForHomeBase), so it is the better answer in every case
+                        // where the two differ.
+                        if (homeBase == null)
+                        {
+                            homeBase = unit.getHomeBase();
+                            if (homeBase != null)
+                                Plugin.Log.LogInfo($"[Order] ReturnToBase for {unit.name} " +
+                                    $"(id={msg.SourceEntityId}) arrived with no base - using the host's " +
+                                    $"{homeBase.getUIDAndName()}");
+                        }
+
+                        if (homeBase == null)
+                            Plugin.Log.LogWarning($"[Order] ReturnToBase for {unit.name} " +
+                                $"(id={msg.SourceEntityId}): neither side knows a home base - " +
+                                "the order will not take.");
+
                         OrderHandler.ApplyingFromNetwork = true;
                         try { unit.setOrder(Order.Type.ReturnToBase, homeBase, displayOrderText: true); }
                         finally { OrderHandler.ApplyingFromNetwork = false; }

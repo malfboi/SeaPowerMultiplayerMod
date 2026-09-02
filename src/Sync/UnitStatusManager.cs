@@ -40,11 +40,11 @@ namespace SeapowerMultiplayer
         // PER TEAM. One delta table with two audiences is silently wrong: whatever it
         // already sent to the first team it then withholds from the second, so the
         // second team's status lines simply stop updating with nothing to indicate why.
-        private static readonly Dictionary<Team, Dictionary<int, (string text, byte[] mounts, float range)>> _lastSentByTeam =
+        private static readonly Dictionary<Team, Dictionary<int, (string text, byte[] mounts, float range, int homeBase)>> _lastSentByTeam =
             new()
             {
-                [Team.Blue] = new Dictionary<int, (string, byte[], float)>(256),
-                [Team.Red]  = new Dictionary<int, (string, byte[], float)>(256),
+                [Team.Blue] = new Dictionary<int, (string, byte[], float, int)>(256),
+                [Team.Red]  = new Dictionary<int, (string, byte[], float, int)>(256),
             };
 
         private static readonly UnitStatusMessage _msg = new();
@@ -111,22 +111,25 @@ namespace SeapowerMultiplayer
                 string text = unit.CurrentOrderText?.Value ?? "";
                 BuildMounts(unit);
                 float range = FuelRangeOf(unit);
+                int homeBaseId = HomeBaseOf(unit);
 
                 int id = unit.UniqueID;
                 _seen.Add(id);
 
                 bool known = lastSent.TryGetValue(id, out var previous);
                 if (!full && known && previous.text == text && SamePacked(previous.mounts)
-                    && Mathf.Abs(previous.range - range) < FuelDeltaKm)
+                    && Mathf.Abs(previous.range - range) < FuelDeltaKm
+                    && previous.homeBase == homeBaseId)
                     continue;
 
-                lastSent[id] = (text, _packed.ToArray(), range);
+                lastSent[id] = (text, _packed.ToArray(), range, homeBaseId);
                 _msg.Entries.Add(new UnitStatusMessage.Entry
                 {
-                    UniqueId  = id,
-                    OrderText = text,
-                    RangeKm   = range,
-                    Mounts    = new List<UnitStatusMessage.Mount>(_scratch),
+                    UniqueId   = id,
+                    OrderText  = text,
+                    RangeKm    = range,
+                    HomeBaseId = homeBaseId,
+                    Mounts     = new List<UnitStatusMessage.Mount>(_scratch),
                 });
 
                 if (_msg.Entries.Count >= MaxEntriesPerPacket) Flush(team);
@@ -156,6 +159,16 @@ namespace SeapowerMultiplayer
             return unit.RangeInKm?.Value ?? 0f;
         }
 
+        /// <summary>The unit's home base id, or 0 for "none" / not an air unit. Part of
+        /// the change signature, so a rebase (or a base being sunk) travels the moment it
+        /// happens rather than waiting for the sweep.</summary>
+        private static int HomeBaseOf(ObjectBase unit)
+        {
+            if (!(unit is Aircraft) && !(unit is Helicopter)) return 0;
+            var home = unit._homeBase;
+            return home != null ? home.UniqueID : 0;
+        }
+
         /// <summary>Client: re-anchor an air unit's tank to the host's, then let the
         /// game recompute everything that hangs off it.
         ///
@@ -174,6 +187,41 @@ namespace SeapowerMultiplayer
 
             if (unit is Aircraft a)        a.UpdateFuelConsumption(0f);
             else if (unit is Helicopter h) h.UpdateFuelConsumption();
+        }
+
+        /// <summary>Impose the host's home base on an air replica. This is what makes a
+        /// guest's return-to-base order work at all - see UnitStatusMessage.Entry
+        /// .HomeBaseId for why the client can never resolve it itself.
+        ///
+        /// Rebase() rather than a raw field write: it also moves the unit between the two
+        /// bases' _childAircraft lists, which is what FlightDeck recovery and the base's
+        /// own aircraft count read. It dereferences its argument, so clearing to null is
+        /// done by hand.</summary>
+        private static void ApplyHomeBase(ObjectBase unit, int homeBaseId)
+        {
+            if (!(unit is Aircraft) && !(unit is Helicopter)) return;
+
+            var current = unit._homeBase;
+            if (homeBaseId == 0)
+            {
+                // The host says "no base". Only act on a real change, and only by
+                // clearing - Rebase(null) would throw.
+                if (current == null) return;
+                if (current._childAircraft.Contains(unit)) current._childAircraft.Remove(unit);
+                unit._homeBase = null;
+                return;
+            }
+
+            if (current != null && current.UniqueID == homeBaseId) return;
+
+            var home = StateSerializer.FindById(homeBaseId);
+            // Not an error: the base's own replica may not be built yet. The next sweep
+            // carries the same value, so this heals on its own.
+            if (home == null || home == unit) return;
+
+            unit.Rebase(home);
+            Telemetry.Count("v2.homeBaseApplied");
+            Plugin.Log.LogInfo($"[Order] Home base for {unit.getUIDAndName()} -> {home.getUIDAndName()}");
         }
 
         /// <summary>Fills _scratch (wire form) and _packed (change-detection form)
@@ -239,7 +287,7 @@ namespace SeapowerMultiplayer
 
         /// <summary>Forget units that are gone, so a re-used id is not mistaken for
         /// unchanged and skipped.</summary>
-        private static void PruneLastSent(Dictionary<int, (string text, byte[] mounts, float range)> lastSent)
+        private static void PruneLastSent(Dictionary<int, (string text, byte[] mounts, float range, int homeBase)> lastSent)
         {
             if (lastSent.Count == _seen.Count) return;
             var stale = new List<int>();
@@ -518,6 +566,11 @@ namespace SeapowerMultiplayer
             // to be. Between anchors the client's own UpdateFuelConsumption keeps the
             // number moving, which is what makes it smooth.
             if (fromNetwork) ApplyFuel(unit, e.RangeKm);
+
+            // Unconditional, unlike fuel: nothing on the client writes _homeBase, so
+            // there is no local value to drag backwards, and re-imposing it is how a
+            // dropped packet heals.
+            ApplyHomeBase(unit, e.HomeBaseId);
 
             var systems = unit._obp?._weaponSystems;
             if (systems == null || e.Mounts == null) return;
