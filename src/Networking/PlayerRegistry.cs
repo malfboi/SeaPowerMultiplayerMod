@@ -269,11 +269,39 @@ namespace SeapowerMultiplayer
             Version++;
         }
 
-        public static void HostSetReady(byte slot, bool ready)
+        /// <summary>Host: record whether this player has loaded the current session.
+        ///
+        /// This is the REPLICATED half of readiness - it rides out on the roster
+        /// (FlagReady), which is what lets a guest's overlay say where the other players
+        /// are. SimSyncManager's _readySlots is the host's own bookkeeping and never
+        /// leaves the machine, nor does it ever contain slot 0, so neither a guest nor
+        /// the host's own row could be read from it.
+        ///
+        /// Returns true when the value actually moved, so the caller can broadcast only
+        /// on a change.</summary>
+        public static bool HostSetReady(byte slot, bool ready)
         {
-            if (!TryGet(slot, out var p) || p.Ready == ready) return;
+            if (!TryGet(slot, out var p) || p.Ready == ready) return false;
             p.Ready = ready;
             Version++;
+            return true;
+        }
+
+        /// <summary>Host: set readiness and publish it if it moved.</summary>
+        public static void HostSetReadyAndPublish(byte slot, bool ready)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (HostSetReady(slot, ready)) HostBroadcastRoster();
+        }
+
+        /// <summary>Host: mark every player not-loaded (a new session, or a teardown).</summary>
+        public static void HostClearAllReady()
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            bool moved = false;
+            for (int i = 0; i < MaxPlayers; i++)
+                if (_slots[i] != null && HostSetReady((byte)i, false)) moved = true;
+            if (moved) HostBroadcastRoster();
         }
 
         /// <summary>Host: publish the whole table. Cheap enough (4 short entries) that

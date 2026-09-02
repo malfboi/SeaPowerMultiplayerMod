@@ -363,12 +363,9 @@ namespace SeapowerMultiplayer.UI
               <StackPanel Visibility=""{Binding ConnectedButtonsVisibility}"">
                 <Button Style=""{StaticResource Btn}"" Content=""Disconnect""
                         Command=""{Binding DisconnectCommand}""/>
-                <Button Style=""{StaticResource Btn}"" Content=""Send State &amp; Wait""
-                        Command=""{Binding SendStateCommand}""
-                        Visibility=""{Binding SendStateVisibility}""/>
                 <TextBlock Style=""{StaticResource Dim}"" Margin=""0,4,0,0"" TextWrapping=""Wrap""
                            Visibility=""{Binding SendStateHintVisibility}""
-                           Text=""Start or load a mission, then send it to the other player.""/>
+                           Text=""Start or load a mission, then Deploy it to a player from the list below.""/>
               </StackPanel>
 
               <StackPanel Visibility=""{Binding LobbyOwnerButtonsVisibility}"">
@@ -413,12 +410,9 @@ namespace SeapowerMultiplayer.UI
               <StackPanel Visibility=""{Binding ConnectedButtonsVisibility}"">
                 <Button Style=""{StaticResource Btn}"" Content=""Disconnect""
                         Command=""{Binding DisconnectCommand}""/>
-                <Button Style=""{StaticResource Btn}"" Content=""Send State &amp; Wait""
-                        Command=""{Binding SendStateCommand}""
-                        Visibility=""{Binding SendStateVisibility}""/>
                 <TextBlock Style=""{StaticResource Dim}"" Margin=""0,4,0,0"" TextWrapping=""Wrap""
                            Visibility=""{Binding SendStateHintVisibility}""
-                           Text=""Start or load a mission, then send it to the other player.""/>
+                           Text=""Start or load a mission, then Deploy it to a player from the list below.""/>
               </StackPanel>
             </StackPanel>
 
@@ -456,6 +450,7 @@ namespace SeapowerMultiplayer.UI
                         <ColumnDefinition Width=""46""/>
                         <ColumnDefinition Width=""Auto""/>
                         <ColumnDefinition Width=""Auto""/>
+                        <ColumnDefinition Width=""Auto""/>
                       </Grid.ColumnDefinitions>
                       <StackPanel Grid.Column=""0"" Orientation=""Horizontal"">
                         <TextBlock Text=""{Binding NameText}"" VerticalAlignment=""Center""/>
@@ -470,6 +465,10 @@ namespace SeapowerMultiplayer.UI
                       <Button Grid.Column=""3"" Style=""{StaticResource Btn}"" Content=""Red"" Width=""46""
                               Visibility=""{Binding HostControlsVisibility}""
                               Command=""{Binding SetRedCommand}""/>
+                      <Button Grid.Column=""4"" Style=""{StaticResource Btn}"" Content=""Deploy"" Width=""56""
+                              Visibility=""{Binding SendVisibility}""
+                              IsEnabled=""{Binding SendEnabled}""
+                              Command=""{Binding SendCommand}""/>
                     </Grid>
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>

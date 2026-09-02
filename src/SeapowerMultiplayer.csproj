@@ -87,6 +87,14 @@
 
 	<PropertyGroup>
     <GameDir2>C:\Users\hughe\Desktop\Sea Power</GameDir2>
+    <!-- Third and fourth local test instances (Run Coop.bat launches all four).
+         Conditioned on existing, unlike the two above: these are only present on a
+         machine set up for 4-player local testing. Missing them silently is right;
+         a stale DLL here is NOT silent - the protocol version is baked into the
+         LiteNetLib connect key, so an out-of-date instance is rejected at connect
+         and simply looks like the Connect button doing nothing. -->
+    <GameDir3>C:\Users\hughe\Desktop\Sea Power Player 3</GameDir3>
+    <GameDir4>C:\Users\hughe\Desktop\Sea Power Player 4</GameDir4>
   </PropertyGroup>
 
   <Target Name="CopyToPlugins" AfterTargets="Build">
@@ -101,6 +109,16 @@
     <Copy SourceFiles="@(PluginDeps)" DestinationFolder="$(GameDir2)\BepInEx\plugins\" />
     <Message Text="Copied plugin + dependencies to $(GameDir)\BepInEx\plugins\" Importance="high" />
     <Message Text="Copied plugin + dependencies to $(GameDir2)\BepInEx\plugins\" Importance="high" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll;@(PluginDeps)"
+          DestinationFolder="$(GameDir3)\BepInEx\plugins\"
+          Condition="Exists('$(GameDir3)\BepInEx\plugins')" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll;@(PluginDeps)"
+          DestinationFolder="$(GameDir4)\BepInEx\plugins\"
+          Condition="Exists('$(GameDir4)\BepInEx\plugins')" />
+    <Message Text="Copied plugin + dependencies to $(GameDir3)\BepInEx\plugins\"
+             Importance="high" Condition="Exists('$(GameDir3)\BepInEx\plugins')" />
+    <Message Text="Copied plugin + dependencies to $(GameDir4)\BepInEx\plugins\"
+             Importance="high" Condition="Exists('$(GameDir4)\BepInEx\plugins')" />
   </Target>
 
   <!-- Bundled scenarios. FileManager builds the mod search path from the folders

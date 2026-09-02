@@ -70,11 +70,19 @@ namespace SeapowerMultiplayer
             }
         }
 
-        public static void ClearAllReady() => _readySlots.Clear();
+        public static void ClearAllReady()
+        {
+            _readySlots.Clear();
+            PlayerRegistry.HostClearAllReady();
+        }
 
         /// <summary>A player is loading a fresh session - they are not ready until they
         /// say so.</summary>
-        public static void OnPeerJoined(byte slot) => _readySlots.Remove(slot);
+        public static void OnPeerJoined(byte slot)
+        {
+            _readySlots.Remove(slot);
+            PlayerRegistry.HostSetReadyAndPublish(slot, false);
+        }
 
         /// <summary>A player left. Drop their readiness so <see cref="AllReady"/> is not
         /// waiting on somebody who will never answer.</summary>
@@ -82,6 +90,7 @@ namespace SeapowerMultiplayer
         {
             if (_readySlots.Remove(slot))
                 Plugin.Log.LogInfo($"[SimSync] Slot {slot} left — readiness dropped.");
+            PlayerRegistry.HostSetReadyAndPublish(slot, false);
         }
 
         // ── Issue banner ──────────────────────────────────────────────────────
@@ -130,6 +139,7 @@ namespace SeapowerMultiplayer
             Plugin.Log.LogInfo("[SimSync] Reset()");
             CurrentState = SimState.Idle;
             _readySlots.Clear();
+            PlayerRegistry.HostClearAllReady();
         }
 
         /// <summary>
@@ -144,6 +154,10 @@ namespace SeapowerMultiplayer
         public static void OnClientReady(byte slot)
         {
             if (slot != PlayerRegistry.NoSender) _readySlots.Add(slot);
+            // The replicated half - see PlayerRegistry.HostSetReady. Published by the
+            // HostBroadcastRoster below rather than immediately, so one report is one
+            // roster packet.
+            PlayerRegistry.HostSetReady(slot, true);
             CurrentState = SimState.Synchronized;
             ClearIssue();
 

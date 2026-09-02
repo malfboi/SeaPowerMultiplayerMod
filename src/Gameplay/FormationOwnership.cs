@@ -63,11 +63,23 @@ namespace SeapowerMultiplayer
         public static bool IsMine(ObjectBase? unit)
             => unit != null && OwnerOf(unit.UniqueID) == PlayerRegistry.LocalSlot;
 
-        /// <summary>Owned, and not by us - the predicate that drives ally rendering.</summary>
+        /// <summary>Owned by another player ON MY TEAM - the predicate that drives ally
+        /// rendering and the "[name]" tag.
+        ///
+        /// The team test is not decoration. The ownership table covers BOTH sides, so
+        /// without it an opponent's units answered this too, and every display built on
+        /// it named them: enemy contacts were labelled with the enemy player's name and
+        /// their right-click menu read "Controlled by &lt;name&gt;". That hands over both
+        /// who is behind a contact and which contacts are the human's, which is exactly
+        /// what an opponent should have to work out.
+        ///
+        /// Semantically it is also what the name says everywhere it is used - an
+        /// opponent's ship is not an ally, so it should not get ally treatment.</summary>
         public static bool IsOwnedByOther(ObjectBase? unit)
         {
             if (unit == null) return false;
             if (!OwnershipRules.LockActive) return false;
+            if (!Teams.IsFriendly(unit)) return false;
             byte o = OwnerOf(unit.UniqueID);
             return o != Unowned && o != PlayerRegistry.LocalSlot;
         }

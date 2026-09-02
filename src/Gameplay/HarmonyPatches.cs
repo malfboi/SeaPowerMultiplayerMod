@@ -964,10 +964,23 @@ namespace SeapowerMultiplayer
     {
         static bool Prefix(FlightDeck __instance, System.Guid uid)
         {
+            var carrier = __instance._baseObject;
+
+            // OWNERSHIP FIRST, above the host/offline early-return. Aborting somebody
+            // else's readied flight is unit control exactly as ordering the carrier is,
+            // and this was the one flight-ops path with no gate on it at all: a client's
+            // press was relayed and refused upstream (silently, with no notice), while
+            // the HOST's press ran natively right here - so the host could cancel any
+            // player's launches. BlocksOrdersFor has no host exemption for that reason.
+            if (FormationOwnership.BlocksOrdersFor(carrier))
+            {
+                OrderRefusalNotice.Note(carrier);
+                return false;
+            }
+
             if (!Suppression.ClientActive) return true;        // host / offline: native
             if (OrderHandler.ApplyingFromNetwork) return true; // (safety - not used client-side)
 
-            var carrier = __instance._baseObject;
             if (carrier == null) return false;
 
             NetworkManager.Instance.SendToServer(new PlayerOrderMessage
@@ -3331,6 +3344,28 @@ namespace SeapowerMultiplayer
         static bool Prefix(FlightDeck __instance)
         {
             var carrier = __instance?._baseObject;
+            if (!FormationOwnership.BlocksOrdersFor(carrier)) return true;
+            OrderRefusalNotice.Note(carrier);
+            return false;
+        }
+    }
+
+    /// <summary>The LAUNCH button on a readied flight, gated the same way.
+    ///
+    /// createLaunchTask above covers READYING an aircraft, but sending it is a separate
+    /// command on the task row and had no gate: on the host AllowLaunchFunc runs
+    /// natively, and on a client FlightDeckStateApplier.SyncLaunchCommand replaces it
+    /// with an upstream AllowLaunch order. So a player who could not ready an aircraft
+    /// on somebody else's carrier could still launch one that was already ready.
+    ///
+    /// Patched at the task rather than at either UI, so both the host's local click and
+    /// the client's relayed one meet the same rule.</summary>
+    [HarmonyPatch(typeof(PendingLaunchTask), nameof(PendingLaunchTask.AllowLaunchFunc))]
+    public static class Patch_PendingLaunchTask_AllowLaunch_Ownership
+    {
+        static bool Prefix(PendingLaunchTask __instance)
+        {
+            var carrier = __instance?._flightDeck?._baseObject;
             if (!FormationOwnership.BlocksOrdersFor(carrier)) return true;
             OrderRefusalNotice.Note(carrier);
             return false;

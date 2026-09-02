@@ -74,7 +74,6 @@ namespace SeapowerMultiplayer.UI
         public DelegateCommand InviteBlueCommand       { get; }
         public DelegateCommand InviteRedCommand        { get; }
         public DelegateCommand LeaveLobbyCommand       { get; }
-        public DelegateCommand SendStateCommand        { get; }
         public DelegateCommand LiteNetPrimaryCommand   { get; }
         public DelegateCommand DisconnectCommand       { get; }
 
@@ -112,7 +111,6 @@ namespace SeapowerMultiplayer.UI
             InviteBlueCommand    = new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(Team.Blue));
             InviteRedCommand     = new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(Team.Red));
             LeaveLobbyCommand    = new DelegateCommand(_ => SteamLobbyManager.LeaveLobby());
-            SendStateCommand     = new DelegateCommand(_ => SessionManager.CaptureAndSend());
 
             CopyCodeCommand = new DelegateCommand(_ =>
             {
@@ -294,9 +292,6 @@ namespace SeapowerMultiplayer.UI
         private Visibility _noLobbyBtns = Visibility.Visible;
         public Visibility NoLobbyButtonsVisibility { get => _noLobbyBtns; private set => Set(ref _noLobbyBtns, value); }
 
-        private Visibility _sendState = Visibility.Collapsed;
-        public Visibility SendStateVisibility { get => _sendState; private set => Set(ref _sendState, value); }
-
         // Shown in the button's place while the host is still in the menu. Swapped
         // rather than disabled: a greyed-out button invites clicking it to find out
         // why, and the answer is a whole sentence.
@@ -445,22 +440,50 @@ namespace SeapowerMultiplayer.UI
             public DelegateCommand SetBlueCommand { get; }
             public DelegateCommand SetRedCommand  { get; }
 
-            public PlayerRowVm(PlayerInfo p, bool isLocal, bool hostControls)
+            /// <summary>Per-player state send. Replaces the single "Send State &amp; Wait"
+            /// button, which was always a session boundary: it reloaded EVERY player and
+            /// left them paused with nothing to resume them, so resyncing one person cost
+            /// everyone else their battle. See SessionManager.HostSendTo.</summary>
+            public Visibility SendVisibility { get; }
+            public DelegateCommand SendCommand { get; }
+
+            /// <summary>False while ANY player is being sent the world - see
+            /// SessionManager.HostSendTo. Bound to IsEnabled rather than swapped for a
+            /// hint, unlike the rest of the panel: the button is about to come back, and
+            /// a row that loses a control mid-operation reads as something going wrong.
+            /// The Btn style already dims a disabled button's text.</summary>
+            public bool SendEnabled { get; }
+
+            public PlayerRowVm(PlayerInfo p, bool isLocal, bool hostControls, bool canSend,
+                               bool loaded, bool sendBusy, bool isSendTarget)
             {
                 NameText   = isLocal ? $"{p.DisplayName} (you)" : p.DisplayName;
                 TeamText   = Teams.Name(p.Team).ToUpperInvariant();
                 TeamBrush  = p.Team == Team.Blue ? TeamBlue : TeamRed;
-                StatusText = !p.Connected   ? "disconnected"
-                           : !p.Established ? "joining"
-                           : p.Ready        ? "ready" : "in game";
+
+                // Where this player is, in the terms the host thinks in: still in the
+                // lobby, on their way into the battle, or in it.
+                StatusText = !p.Connected     ? "disconnected"
+                           : !p.Established   ? "connecting"
+                           : isSendTarget     ? "connecting"   // being sent the world now
+                           : loaded           ? "in mission"
+                                              : "in lobby";
 
                 // Slot 0 is the host and is pinned to Blue - the authoritative sim runs
-                // on its own unswapped save, so it has nowhere else to sit.
-                HostControlsVisibility = Vis(hostControls && p.Slot != 0);
+                // on its own unswapped save, so it has nowhere else to sit. `loaded`
+                // means this player has already taken a side-swapped save; see
+                // RefreshRoster for why it is not PlayerInfo.Ready.
+                HostControlsVisibility = Vis(hostControls && p.Slot != 0 && !loaded);
+
+                // Slot 0 is the host: it already has the world. A player who has not
+                // finished the handshake has nowhere to put a save yet.
+                SendVisibility = Vis(canSend && p.Slot != 0 && p.Connected && p.Established);
+                SendEnabled    = !sendBusy;
 
                 byte slot = p.Slot;
                 SetBlueCommand = new DelegateCommand(_ => HostMove(slot, Team.Blue));
                 SetRedCommand  = new DelegateCommand(_ => HostMove(slot, Team.Red));
+                SendCommand    = new DelegateCommand(_ => SessionManager.HostSendTo(slot));
             }
 
             private static void HostMove(byte slot, Team team)
@@ -488,6 +511,8 @@ namespace SeapowerMultiplayer.UI
         /// roster state - and each row captures the answer at construction, so a change
         /// has to force a rebuild or the buttons stay as they were.</summary>
         private bool _rosterHadTeamButtons;
+        private bool _rosterHadSendButtons;
+        private byte _rosterAwaitingSlot = PlayerRegistry.NoSender;
 
         public Visibility HostTeamControlsVisibility { get; private set; } = Visibility.Collapsed;
         public Visibility RosterVisibility { get; private set; } = Visibility.Collapsed;
@@ -935,7 +960,6 @@ namespace SeapowerMultiplayer.UI
                 LobbyOwnerButtonsVisibility = Vis(!connected && inLobby && isOwner);
                 LobbyGuestButtonsVisibility = Vis(!connected && inLobby && !isOwner);
                 NoLobbyButtonsVisibility    = Vis(!connected && !inLobby);
-                SendStateVisibility         = Vis(connected && nm.IsHost && canSend);
                 SendStateHintVisibility     = Vis(connected && nm.IsHost && !canSend);
             }
             else
@@ -959,7 +983,6 @@ namespace SeapowerMultiplayer.UI
                     : "Connect";
                 LiteNetPrimaryVisibility = Vis(!connected);
                 ConnectedButtonsVisibility = Vis(connected);
-                SendStateVisibility = Vis(connected && isHost && canSend);
                 SendStateHintVisibility = Vis(connected && isHost && !canSend);
             }
         }
@@ -993,7 +1016,7 @@ namespace SeapowerMultiplayer.UI
                 // read as a healthy session. The host gets told to load a mission
                 // rather than to press a button that is not on screen yet.
                 text = !isHost                     ? "Not synced - waiting for host"
-                     : SessionManager.MissionIsLive ? "Not synced - press Send State & Wait"
+                     : SessionManager.MissionIsLive ? "Not synced - press Deploy next to a player"
                                                     : "Not synced - start a mission first";
             }
 
@@ -1053,15 +1076,22 @@ namespace SeapowerMultiplayer.UI
             var vis = Vis(show);
             if (vis != RosterVisibility) { RosterVisibility = vis; Raise(nameof(RosterVisibility)); }
 
-            // Team assignment is the host's call, and only BEFORE the mission is live.
+            // Team assignment is the host's call, and only for a player who has not yet
+            // LOADED this session.
             //
-            // Moving someone between sides mid-mission is not a UI nicety: which team a
-            // player is on decides whether their save was side-swapped, and that is
-            // settled once, when they load. Flipping it afterwards would leave them
+            // Which team a player is on decides whether their save is side-swapped, and
+            // that is settled once, when they load. Flipping it afterwards leaves them
             // commanding a fleet the swap says is not theirs, with the host refusing
-            // every order and nothing on screen to explain it. The correct way to change
-            // sides is to rejoin, so the button simply goes away.
-            bool canAssignTeams = nm.IsHost && show && !SessionManager.MissionIsLive;
+            // every order and nothing on screen to explain it - so for someone already
+            // in the battle the button still goes away and rejoining is still the answer.
+            //
+            // But "the mission is live" was the wrong test for that: with per-player
+            // sends the host loads a mission and then brings people in one at a time, so
+            // everybody still waiting to be sent the world was locked out of a side
+            // change for no reason. Their save does not exist yet - there is nothing to
+            // be inconsistent with. Asked per row (p.Ready) instead of once for the
+            // whole roster.
+            bool canAssignTeams = nm.IsHost && show;
             var hostVis = Vis(canAssignTeams);
             if (hostVis != HostTeamControlsVisibility)
             {
@@ -1075,15 +1105,42 @@ namespace SeapowerMultiplayer.UI
                 return;
             }
 
+            // Sending is the host's, and only once there is a mission to send. Tracked
+            // in the rebuild guard for the same reason canAssignTeams is: the rows carry
+            // live Buttons, so they are rebuilt when what the row OFFERS changes, not on
+            // the 10 Hz tick.
+            bool canSend = nm.IsHost && show && SessionManager.MissionIsLive;
+
+            // Who has loaded this session comes from PlayerInfo.Ready, which the host now
+            // maintains and the roster replicates (PlayerRegistry.HostSetReady). It has
+            // to be the replicated flag rather than SimSyncManager's own set: that set is
+            // host-local and never contains slot 0, so reading it left every row on a
+            // GUEST, and the host's own row everywhere, permanently "in lobby".
+            //
+            // No separate rebuild key needed - HostSetReady bumps PlayerRegistry.Version,
+            // and a guest picks the change up through the roster message, which bumps it
+            // there too.
+            //
+            // Who is mid-send does need one: it drives both the "connecting" status and
+            // every row's enabled state, and it changes without the roster moving.
+            byte awaiting = SessionManager.AwaitingSlot;
+            bool sendBusy = awaiting != PlayerRegistry.NoSender;
+
             if (PlayerRegistry.Version == _rosterVersion
-                && canAssignTeams == _rosterHadTeamButtons) return;
+                && canAssignTeams == _rosterHadTeamButtons
+                && canSend == _rosterHadSendButtons
+                && awaiting == _rosterAwaitingSlot) return;
             _rosterVersion = PlayerRegistry.Version;
             _rosterHadTeamButtons = canAssignTeams;
+            _rosterHadSendButtons = canSend;
+            _rosterAwaitingSlot = awaiting;
 
             Roster.Clear();
             byte localSlot = PlayerRegistry.LocalSlot;
             foreach (var p in PlayerRegistry.All)
-                Roster.Add(new PlayerRowVm(p, p.Slot == localSlot, canAssignTeams));
+                Roster.Add(new PlayerRowVm(p, p.Slot == localSlot, canAssignTeams, canSend,
+                                           p.Ready,
+                                           sendBusy, sendBusy && p.Slot == awaiting));
 
             Raise(nameof(MyTeamText));
         }

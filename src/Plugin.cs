@@ -84,7 +84,10 @@ namespace SeapowerMultiplayer
             CfgHostIP      = Config.Bind("Network", "HostIP",       "127.0.0.1", "Host IP address (used when IsHost=false)");
             CfgPort        = Config.Bind("Network", "Port",         7777,        "UDP port");
             CfgAutoConnect = Config.Bind("Network", "AutoConnect",  false,       "Connect/host automatically on game launch");
-            CfgLockUnits   = Config.Bind("Network", "LockUnitsToPlayers", false,  "Host: each player owns the formations assigned to them and sees teammates' units as allies. Off = free-for-all, any teammate can order any unit.");
+            // Defaults ON. Only a fresh install is affected: Config.Bind takes the
+            // default when the key is absent from the .cfg, so anyone who has already
+            // launched once keeps whatever their file says.
+            CfgLockUnits   = Config.Bind("Network", "LockUnitsToPlayers", true,   "Host: each player owns the formations assigned to them and sees teammates' units as allies. Off = free-for-all, any teammate can order any unit.");
             // The lock rides on every ownership packet, so a mid-session change has to
             // push one - otherwise clients keep enforcing the old rule and one machine
             // silently disagrees with the others about who may command what.

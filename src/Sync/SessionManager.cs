@@ -66,6 +66,22 @@ namespace SeapowerMultiplayer
         /// screen forever, with no way out but a disconnect.</summary>
         private static float _joinDeadline;
 
+        /// <summary>The one slot the deadline above is waiting on, or NoSender.
+        ///
+        /// Not <see cref="SimSyncManager.AllReady"/>: that asks whether EVERY connected
+        /// player is ready, which a unicast can never satisfy. On the first send of a
+        /// mission the other guests have been sent nothing and will never report in, so
+        /// waiting on all of them means sitting out the full timeout before the resume -
+        /// two minutes of everybody paused - and then resuming with a warning about a
+        /// player who was never joining.</summary>
+        private static byte _awaitingSlot = PlayerRegistry.NoSender;
+
+        /// <summary>The slot currently being sent the world, or
+        /// <see cref="PlayerRegistry.NoSender"/> when nothing is in flight. The overlay
+        /// shows this player as "connecting" and disables every Send button while it is
+        /// set - see <see cref="HostSendTo"/> for why only one at a time.</summary>
+        public static byte AwaitingSlot => _awaitingSlot;
+
         private const float JoinTimeoutSec = 180f;
 
         private static string? _pendingSavePath;
@@ -83,6 +99,15 @@ namespace SeapowerMultiplayer
             TickPendingSave();
             TickJoinDeadline();
 
+            // Slot 0's readiness IS "the host's own mission is live", and nothing else
+            // maintains it: SimSyncManager's set is only ever added to for a REMOTE slot
+            // (OnClientReady skips NoSender), so without this the host reads as "in
+            // lobby" for the whole battle - on its own screen and on every guest's.
+            // Cheap: HostSetReadyAndPublish compares before it writes and only sends a
+            // roster on the edge.
+            if (Plugin.Instance.CfgIsHost.Value)
+                PlayerRegistry.HostSetReadyAndPublish(0, MissionIsLive);
+
             if (_retrySendAt <= 0f) return;
             if (Time.unscaledTime < _retrySendAt) return;
             _retrySendAt = 0f;
@@ -98,7 +123,12 @@ namespace SeapowerMultiplayer
         private static void TickJoinDeadline()
         {
             if (_joinDeadline <= 0f) return;
-            if (SimSyncManager.AllReady)
+
+            bool ready = _awaitingSlot != PlayerRegistry.NoSender
+                ? SimSyncManager.IsReady(_awaitingSlot)
+                : SimSyncManager.AllReady;
+
+            if (ready)
             {
                 _joinDeadline = 0f;
                 HostFinishJoin();
@@ -119,6 +149,8 @@ namespace SeapowerMultiplayer
         /// arrived, then let time run again.</summary>
         private static void HostFinishJoin()
         {
+            _awaitingSlot = PlayerRegistry.NoSender;
+
             // Their picture starts empty while every host-side delta table believes it is
             // already up to date, so without this the joiner sits looking at stale or
             // missing UI on several channels until each one's next full sweep.
@@ -217,6 +249,57 @@ namespace SeapowerMultiplayer
             BeginCapture(sessionBoundary: false, onlySlot: slot);
         }
 
+        /// <summary>
+        /// The overlay's per-player Send button. Picks the right kind of send for one
+        /// player, which is not always the same kind.
+        ///
+        /// Once a battle is running, sending to one player must NOT be a session
+        /// boundary: a boundary reloads everybody, and it is the only path with no
+        /// resume of its own - it zeroes _joinDeadline, so nothing ever calls
+        /// HostFinishJoin and the players who never needed a resync sit paused with no
+        /// way back. The per-player path arms that deadline and resumes on AllReady (or
+        /// on timeout), which is why it is the one to use for anybody joining a battle
+        /// in progress.
+        ///
+        /// Before a battle is running there is nothing to preserve, and the boundary is
+        /// REQUIRED rather than merely harmless: its resets (CaptureState.SpawnLedger,
+        /// the census, the engage-task and order-dedup ledgers) are what stop a SECOND
+        /// mission in the same lobby inheriting the first one's ledger and replaying it
+        /// as ghost units. See the reset blocks in BeginCapture.
+        ///
+        /// Same discriminator NetworkManager already uses to decide whether a seated
+        /// player gets a mid-mission join or waits for the host.
+        /// </summary>
+        public static void HostSendTo(byte slot)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (slot == PlayerRegistry.NoSender) return;
+
+            // ONE AT A TIME. A capture pauses the session, writes a save and ships it;
+            // starting a second before the first player is in would overwrite
+            // _pendingOnlySlot mid-flight and send that player's save to the wrong
+            // recipient, and both would then be waited on by a single deadline. The
+            // overlay greys the buttons out for the same reason, but the refusal lives
+            // here so it holds however the call arrives.
+            if (_awaitingSlot != PlayerRegistry.NoSender)
+            {
+                Log.LogWarning($"[Session] Send to slot {slot} refused — already sending to " +
+                    $"slot {_awaitingSlot}. Wait for them to finish loading.");
+                return;
+            }
+
+            // ALWAYS unicast. The two flags are independent and were being conflated:
+            // sessionBoundary says "this is a new battle, run the new-battle resets",
+            // onlySlot says "who gets the world". Deciding the target from the boundary
+            // meant the FIRST send of a mission went to everybody - press Send next to
+            // one player and every connected player started loading.
+            bool battleRunning = MissionIsLive && SimSyncManager.CurrentState == SimState.Synchronized;
+
+            Log.LogInfo($"[Session] Send to slot {slot} " +
+                $"({(battleRunning ? "mid-mission join" : "first sync of this mission")}).");
+            BeginCapture(sessionBoundary: !battleRunning, onlySlot: slot);
+        }
+
         private static void BeginCapture(bool sessionBoundary, byte onlySlot)
         {
             // Checked before anything else, and before any state is touched. The
@@ -261,6 +344,12 @@ namespace SeapowerMultiplayer
 
             _pendingOnlySlot = onlySlot;
             _pendingSessionBoundary = sessionBoundary;
+
+            // Marked HERE rather than when the save actually goes out, so the overlay can
+            // grey out every Send button for the whole operation - the save is written
+            // asynchronously (TickPendingSave), and that gap is long enough to click a
+            // second player in.
+            _awaitingSlot = onlySlot;
 
             // A full re-sync supersedes any join in flight: everyone is about to reload
             // anyway, so the join's own resume must not fire on top of it.
@@ -545,6 +634,20 @@ namespace SeapowerMultiplayer
                 // players already in - and it buys nothing: under unified host authority
                 // the guest's own RNG only drives cosmetics, so host and joiner diverging
                 // there is invisible. The joiner still seeds itself from the message.
+            }
+
+            // Every send aimed at ONE player waits for that player and then resumes
+            // everybody - including a first-sync send, which is a session boundary but
+            // still has exactly one recipient. Tied to onlySlot rather than to
+            // !sessionBoundary because a boundary zeroes this deadline on the way in
+            // (see BeginCapture) and nothing else ever calls HostFinishJoin: that is why
+            // a full send leaves every player paused with no way to resume.
+            //
+            // A broadcast boundary (Ctrl+F10, reconnect recovery) still arms nothing and
+            // is still resumed by hand, exactly as before.
+            if (_pendingOnlySlot != PlayerRegistry.NoSender)
+            {
+                _awaitingSlot = _pendingOnlySlot;
                 _joinDeadline = Time.unscaledTime + JoinTimeoutSec;
                 Log.LogInfo($"[Session] Waiting up to {JoinTimeoutSec:F0}s for slot {_pendingOnlySlot} to load.");
             }
