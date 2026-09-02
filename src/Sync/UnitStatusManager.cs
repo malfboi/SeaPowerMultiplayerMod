@@ -354,22 +354,54 @@ namespace SeapowerMultiplayer
             }
         }
 
-        /// <summary>Mounts whose alignToTarget has thrown, keyed (unit id, mount index).
+        /// <summary>Aim-failure backoff per mount, keyed (unit id, mount index).
         ///
-        /// A mount that throws once throws every frame after it, because the cause does
-        /// not heal: index i names a different WeaponSystem here than it does on the
-        /// host - a ship or aircraft mod enabled on one side only shifts the list, which
-        /// is exactly what the [Mods] mismatch warning is about - or the system it lands
-        /// on carries nothing to rotate. Either way the loop below re-entered it from
-        /// LateUpdate every frame for the rest of the battle, paying a thrown exception
-        /// and an UNTHROTTLED LogWarning each time: a BepInEx disk write per mount per
-        /// frame, on the render path. One PvP client log carried 4,378 of them, 2,709
-        /// from a single pair of F-14s and the rest from two Perrys, over half the lines
-        /// in the file.
+        /// A mount that throws tends to throw every frame after it, and the loop below
+        /// runs from LateUpdate - so an unthrottled failure costs a thrown exception and
+        /// a BepInEx disk write per mount per frame, on the render path. One PvP client
+        /// log carried 4,378 of them, 2,709 from a single pair of F-14s and the rest from
+        /// two Perrys: over half the lines in the file.
         ///
-        /// So the first throw retires that mount for the session and says so once. The
-        /// mount could not aim either way - all this drops is the repeat.</summary>
-        private static readonly HashSet<(int unitId, int mount)> _aimFailed = new();
+        /// THROTTLED, NOT RETIRED. This used to be a permanent per-session blacklist, on
+        /// the reasoning that the cause never heals - index i naming a different
+        /// WeaponSystem than it does on the host, say. But not every cause is permanent:
+        /// a target can be mid-teardown, a mount can be re-seated by a damage or reload
+        /// transition, and a replica's systems list is not fully populated the instant it
+        /// spawns. A blacklist turns any of those into a mount that never aims again for
+        /// the rest of the battle, which is a silent and permanent loss of fidelity for
+        /// a transient fault.
+        ///
+        /// So a throw puts the mount on a cooldown that doubles each time, capped - a
+        /// genuinely broken mount settles at one attempt a minute (negligible), while a
+        /// transient one is retried almost immediately and clears itself on success.</summary>
+        private readonly struct AimBackoff
+        {
+            public readonly float RetryAt;
+            public readonly int   Strikes;
+            public readonly float LastLoggedAt;
+
+            public AimBackoff(float retryAt, int strikes, float lastLoggedAt)
+            {
+                RetryAt = retryAt; Strikes = strikes; LastLoggedAt = lastLoggedAt;
+            }
+        }
+
+        private static readonly Dictionary<(int unitId, int mount), AimBackoff> _aimBackoff = new();
+
+        /// <summary>First retry delay after a throw. Short, so a transient fault costs
+        /// almost nothing in aiming fidelity.</summary>
+        private const float AimRetryBaseSec = 1f;
+
+        /// <summary>Ceiling on the doubling. A permanently broken mount ends up here and
+        /// costs one thrown exception a minute, which is the cost the old blacklist was
+        /// bought to avoid - without giving up on it forever.</summary>
+        private const float AimRetryMaxSec = 60f;
+
+        /// <summary>How often a given mount may put a line in the log, however often it
+        /// throws. The cooldown alone already bounds the throws; this bounds the NOISE
+        /// independently, so the first failure is always visible and a persistent one
+        /// stays visible without ever becoming a flood.</summary>
+        private const float AimLogIntervalSec = 30f;
 
         /// <summary>
         /// CLIENT: train each engaging mount on the target the host says it is engaging.
@@ -427,7 +459,8 @@ namespace SeapowerMultiplayer
                     if (ws == null || ws.Inoperable.Value) continue;
 
                     var aimKey = (e.UniqueId, i);
-                    if (_aimFailed.Contains(aimKey)) continue;
+                    if (_aimBackoff.TryGetValue(aimKey, out var backoff)
+                        && Time.unscaledTime < backoff.RetryAt) continue;
 
                     var target = ReplicaRegistry.Find(m.TargetId) ?? StateSerializer.FindById(m.TargetId);
                     if (target == null || target.IsDestroyed) continue;
@@ -438,12 +471,30 @@ namespace SeapowerMultiplayer
                     bool fixedAngle = ws is WeaponSystemLauncher
                                    && ws._vwp != null && ws._vwp._fixVerticalLaunchAngleForLauncher;
 
-                    try { ws.alignToTarget(target.getUnityPosition(), fixedAngle, 0); }
+                    try
+                    {
+                        ws.alignToTarget(target.getUnityPosition(), fixedAngle, 0);
+                        // Recovered - forget the backoff so the next fault starts from a
+                        // short delay again rather than inheriting an old escalation.
+                        _aimBackoff.Remove(aimKey);
+                    }
                     catch (System.Exception ex)
                     {
-                        _aimFailed.Add(aimKey);
-                        Plugin.Log.LogWarning($"[UnitStatus] {unit.name} mount {i} alignToTarget threw: " +
-                            $"{ex.Message} - not aiming that mount again this session");
+                        float now     = Time.unscaledTime;
+                        int   strikes = backoff.Strikes + 1;
+                        float delay   = Mathf.Min(AimRetryBaseSec * (1 << Mathf.Min(strikes - 1, 6)),
+                                                  AimRetryMaxSec);
+
+                        bool loggable = strikes == 1
+                                     || now - backoff.LastLoggedAt >= AimLogIntervalSec;
+                        if (loggable)
+                        {
+                            Plugin.Log.LogWarning($"[UnitStatus] {unit.name} mount {i} alignToTarget threw: " +
+                                $"{ex.Message} - backing off {delay:0.#}s (attempt {strikes})");
+                        }
+
+                        _aimBackoff[aimKey] = new AimBackoff(
+                            now + delay, strikes, loggable ? now : backoff.LastLoggedAt);
                     }
                 }
             }
@@ -490,7 +541,7 @@ namespace SeapowerMultiplayer
             _seen.Clear();
             _desired.Clear();
             DesiredEngage.Clear();
-            _aimFailed.Clear();
+            _aimBackoff.Clear();
             _scratch.Clear();
             _packed.Clear();
             _nextFullSweep = 0f;

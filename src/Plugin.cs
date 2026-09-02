@@ -407,6 +407,9 @@ namespace SeapowerMultiplayer
             Suppression.EnforceDefenseFlag();
             Suppression.EnforceInterceptSymmetry();
             DebugMenuLock.Tick();
+            // Collect ownerless flight-deck reservations behind a stalled launch, so a
+            // vanilla deck jam does not end that carrier's air ops for the mission.
+            FlightDeckJamGuard.Tick();
             // UnitLockManager's transient selection lock is gone; its refusal-notice
             // half lives on here under its own name.
             OrderRefusalNotice.SampleInput();

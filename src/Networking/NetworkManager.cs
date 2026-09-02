@@ -730,6 +730,7 @@ namespace SeapowerMultiplayer
                 WeaponHatchHandler.Reset();
                 FlightDeckStreamer.Reset();
                 FlightDeckStateApplier.Reset();
+                FlightDeckJamGuard.Reset();
                 RemoteGameplayOptions.Reset();
                 ViewportHintSender.Reset();
                 HostEntityStreamer.ClearAllViewportHints();
