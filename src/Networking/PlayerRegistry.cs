@@ -44,7 +44,7 @@ namespace SeapowerMultiplayer
     /// </summary>
     public static class PlayerRegistry
     {
-        public const int MaxPlayers = 4;
+        public const int MaxPlayers = 8;
 
         private static readonly PlayerInfo?[] _slots = new PlayerInfo?[MaxPlayers];
         private static readonly List<PlayerInfo> _dense = new();
