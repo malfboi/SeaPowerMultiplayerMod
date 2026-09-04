@@ -1666,6 +1666,15 @@ namespace SeapowerMultiplayer
             {
                 var t = kv.Key;
                 if (t == null || t.IsAirUnit) continue;
+                // UNITS only. The stock test lives inside GetPossibleTargetsList's
+                // `if (processedObject.isUnit())` branch; in-flight weapons are added
+                // by a separate pass further down and this option has never governed
+                // them. IsAirUnit is Aircraft||Helicopter, so an inbound ASM read as
+                // "not air" and was being dropped - which took SAM and gun
+                // auto-engagement of incoming missiles away from the remote player's
+                // whole fleet (CIWS and chaff acquire on their own and kept working,
+                // which is exactly how it was reported).
+                if (!t.isUnit()) continue;
                 // An explicitly designated target is not auto-attack, and this option
                 // does not govern it: the stock test lives inside the candidate loop,
                 // while _objectToDestroy is entered separately and at priority 0.
