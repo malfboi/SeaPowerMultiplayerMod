@@ -219,7 +219,11 @@ namespace SeapowerMultiplayer.Transport
             SteamMatchmaking.SetLobbyData(LobbyId, "mod_version", PluginInfo.PLUGIN_VERSION);
             // No mode key any more: there is no session-wide mode to agree on. What a
             // joiner reads instead is "pending_team", the host's most recent invite
-            // intent - see PendingTeamForJoin.
+            // intent - see PendingTeamForJoin. A fresh lobby has no invite behind it
+            // yet, so it opens with the standing default from CfgPvP; InviteToTeam
+            // overwrites this the moment the host invites someone to a named side.
+            SteamMatchmaking.SetLobbyData(LobbyId, "pending_team",
+                (Plugin.Instance.CfgPvP.Value ? Team.Red : Team.Blue).ToString());
 
             // Start transport as host
             NetworkManager.Instance.StartTransport(asHost: true);

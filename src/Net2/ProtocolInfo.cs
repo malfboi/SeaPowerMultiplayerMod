@@ -36,7 +36,11 @@ namespace SeapowerMultiplayer.Net2
         // which is suppressed there), and all three of the game's return-to-base entry
         // points are guarded on _homeBase being non-null - so a guest's RTB order either
         // never left the machine or arrived with no base attached.
-        public const ushort ProtocolVersion = 234;
+        // 235: the session seats 8 players instead of 4. No field changed shape, but the
+        // slot a host may hand out did: a 4-slot build that pairs with an 8-slot host and
+        // is seated at slot 4+ walks off the end of its own roster array, so the two must
+        // not be allowed to meet.
+        public const ushort ProtocolVersion = 235;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices
@@ -63,7 +67,7 @@ namespace SeapowerMultiplayer.Net2
         /// two: both would floor their allocator to the same number and hand out the same
         /// ids for unrelated local objects.
         ///
-        /// Slots 1/2/3 → 100M/200M/300M, comfortably inside int.MaxValue. The wire format
+        /// Slots 1..7 → 100M..700M, comfortably inside int.MaxValue. The wire format
         /// already carried this per-client in Welcome, so nothing else has to change.
         /// </summary>
         public static int UidBaseForSlot(byte slot)

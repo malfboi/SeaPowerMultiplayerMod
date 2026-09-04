@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using BepInEx.Logging;
 using LiteNetLib;
 using LiteNetLib.Utils;
@@ -813,8 +814,24 @@ namespace SeapowerMultiplayer
             });
         }
 
+        /// <summary>
+        /// Compatibility seam for other mods that ride this session's transport with a
+        /// message-type byte of their own (Quick Start claims 200). They Harmony-prefix
+        /// this two-argument overload and return false to swallow their own packets;
+        /// a prefix that skips the original leaves __result at its default of false, so
+        /// the caller below treats that as "claimed" and stops.
+        ///
+        /// It exists only because the real handler grew a PeerId when the session went
+        /// multi-peer, which moved the signature out from under those patches. Keep the
+        /// name and the (byte[], int) shape.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]   // Mono would inline a constant-return body past the patch
+        private bool OnDataReceived(byte[] data, int length) => true;
+
         private void OnDataReceived(PeerId from, byte[] data, int length)
         {
+            if (!OnDataReceived(data, length)) return;
+
             var reader = new NetDataReader(data, 0, length);
             var type = (MessageType)reader.GetByte();
             Telemetry.OnReceive((byte)type, length);

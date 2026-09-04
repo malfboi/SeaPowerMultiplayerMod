@@ -110,6 +110,7 @@ namespace SeapowerMultiplayer
         internal ConfigEntry<bool> CfgAutoConnect = null!;
         internal ConfigEntry<bool> CfgLockUnits = null!;
         internal ConfigEntry<string> CfgDefaultTeam = null!;
+        internal ConfigEntry<bool> CfgPvP = null!;
         internal ConfigEntry<string> CfgUsername = null!;
         internal ConfigEntry<string> CfgTransport = null!;
         internal ConfigEntry<bool> CfgTimeVote = null!;
@@ -178,6 +179,12 @@ namespace SeapowerMultiplayer
             // silently disagrees with the others about who may command what.
             CfgLockUnits.SettingChanged += (_, __) => FormationOwnership.HostSendFull();
             CfgDefaultTeam = Config.Bind("Network", "DefaultTeam",  "Blue",      "Team to request when joining without an invite (Blue or Red). The host decides the final seating.");
+            // Not a session mode - there is no such thing any more. It is the standing
+            // invite intent a lobby opens with, published as "pending_team" so someone
+            // who joins without a per-team invite lands opposite the host instead of
+            // beside them. Kept as a named setting because Quick Start drives versus vs
+            // co-op through it, and it is the only lobby-wide seating default there is.
+            CfgPvP         = Config.Bind("Network", "PvP",          false,       "Seat joiners who arrive without a team invite on the OPPOSITE team (versus) rather than yours (co-op).");
             CfgUsername    = Config.Bind("Network", "Username",     "",          "Name other players see in the roster and the 'send to player' menu. Mainly for LiteNetLib, which has no identity of its own - leave empty there and you show up as \"Player 2\". On Steam this overrides your persona name if set.");
             CfgTransport   = Config.Bind("Network", "Transport",    "LiteNetLib", "Network transport: LiteNetLib (direct IP) or Steam (P2P with invites)");
             CfgTimeVote    = Config.Bind("Network", "TimeVote",     false,       "Time vote mode: both players must agree on time compression changes");
