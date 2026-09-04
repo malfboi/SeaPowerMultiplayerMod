@@ -517,7 +517,36 @@ namespace SeapowerMultiplayer
                 {
                     // Real initializer: _launchTime, parent detach, _proximityRadius,
                     // taskforce/plotting registration, target._incomingWeapons (threat UI)
-                    wb.CommonLaunchSettings(target, aimUnity, null, isSub);
+                    // Resolve the shooter's WeaponSystem for this ammo - needed for
+                    // wire-guided torpedoes so the replica registers as on-wire.
+                    WeaponSystem? weaponSystem = null;
+                    if (shooter != null)
+                    {
+                        var systems = shooter.GetWeaponSystemsForAmmunition(msg.AmmoName, copyList: false);
+                        if (systems != null && systems.Count > 0)
+                            weaponSystem = systems[0];
+                    }
+                    wb.CommonLaunchSettings(target, aimUnity, weaponSystem, isSub);
+
+                    // For wire-guided torpedoes, set wire-state so the replica UI appears.
+                    // The replica is inert (KinematicWeapon) but needs to look like it's
+                    // on-wire so the player can issue wire commands to it.
+                    if (wb is Torpedo && weaponSystem != null)
+                    {
+                        wb._launchPlatform = shooter;
+                        try
+                        {
+                            var onWireField = AccessTools.Field(typeof(WeaponBase), "_onWire");
+                            if (onWireField != null) onWireField.SetValue(wb, true);
+
+                            wb.ConnectionLost.Value = false;
+                            wb.ConnectionLostForever.Value = false;
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[SpawnReplicator] Failed to set wire-state on torpedo replica: {ex.Message}");
+                        }
+                    }
                 }
             }
 

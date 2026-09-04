@@ -40,7 +40,11 @@ namespace SeapowerMultiplayer.Net2
         // slot a host may hand out did: a 4-slot build that pairs with an 8-slot host and
         // is seated at slot 4+ walks off the end of its own roster array, so the two must
         // not be allowed to meet.
-        public const ushort ProtocolVersion = 235;
+        // 236: wire-guided torpedo control. PlayerOrder gains TorpedoWireSpeed/-Depth/
+        // -Cut/-Retarget/-RetargetGeo (36-40) and a new WeaponWireState message (39)
+        // carries the host's authoritative wire state back. A 235 peer has neither, so
+        // a guest's torpedo would steer locally and never on the host.
+        public const ushort ProtocolVersion = 236;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

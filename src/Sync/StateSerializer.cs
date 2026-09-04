@@ -421,6 +421,16 @@ namespace SeapowerMultiplayer
         /// one battle.</summary>
         internal static void ClearRejectThrottle() => _rejectThrottle.Clear();
 
+        /// <summary>True if the order is a wire-guided torpedo control command.
+        /// These orders legitimately address a WeaponBase (the torpedo itself),
+        /// so they must bypass the weapon guard below.</summary>
+        private static bool IsTorpedoWireOrder(Messages.OrderType o) =>
+            o == Messages.OrderType.TorpedoWireSpeed
+            || o == Messages.OrderType.TorpedoWireDepth
+            || o == Messages.OrderType.TorpedoWireCut
+            || o == Messages.OrderType.TorpedoWireRetarget
+            || o == Messages.OrderType.TorpedoWireRetargetGeo;
+
         private static void LogRejectedOrder(PlayerOrderMessage msg, ObjectBase unit, string reason)
         {
             var key = (msg.SourceEntityId, msg.Order, reason);
@@ -461,7 +471,7 @@ namespace SeapowerMultiplayer
             // A weapon is never a legitimate target for a player order in either
             // direction - OrderSyncHelper refuses to ORIGINATE one for a WeaponBase at
             // both ends, so anything arriving for one is misresolved by definition.
-            if (unit is WeaponBase)
+            if (unit is WeaponBase && !IsTorpedoWireOrder(msg.Order))
             {
                 LogRejectedOrder(msg, unit, "resolved onto a weapon");
                 return;
@@ -474,7 +484,7 @@ namespace SeapowerMultiplayer
             // method does guard its OWN _obp eleven lines earlier. That throw is the
             // first of playtest 28's two client NRE stacks, 18 a battle, and every one
             // abandoned the rest of that order's application.
-            if (unit._obp == null)
+            if (unit._obp == null && !IsTorpedoWireOrder(msg.Order))
             {
                 LogRejectedOrder(msg, unit, "recycled object with no parameters");
                 return;
@@ -1114,6 +1124,67 @@ namespace SeapowerMultiplayer
                         {
                             Plugin.Log.LogWarning($"[Order] ClassifyContact: No Vehicle found for {unit.name} (id={msg.SourceEntityId}), " +
                                                  $"classification={classification}");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireSpeed:
+                    {
+                        if (unit is Torpedo torpSpeed)
+                        {
+                            torpSpeed.SetWireSpeedSetting((int)msg.Speed);
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireSpeed applied: torpedo={unit.UniqueID} speed={msg.Speed}");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireDepth:
+                    {
+                        if (unit is Torpedo torpDepth)
+                        {
+                            torpDepth.OrderWireDepth(msg.Speed);
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireDepth applied: torpedo={unit.UniqueID} depth={msg.Speed}");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireCut:
+                    {
+                        if (unit is WeaponBase wbCut)
+                        {
+                            wbCut.BreakWire();
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireCut applied: torpedo={unit.UniqueID}");
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireRetarget:
+                    {
+                        if (unit is WeaponBase wbRetarget)
+                        {
+                            ObjectBase? newTarget = msg.TargetEntityId > 0
+                                ? StateSerializer.FindById(msg.TargetEntityId) : null;
+                            if (newTarget != null)
+                            {
+                                wbRetarget.RetargetWeapon(newTarget);
+                                Plugin.Log.LogInfo($"[Order] TorpedoWireRetarget applied: torpedo={unit.UniqueID} target={newTarget.UniqueID}");
+                            }
+                        }
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoWireRetargetGeo:
+                    {
+                        if (unit is WeaponBase wbRetargetGeo)
+                        {
+                            var geo = new GeoPosition
+                            {
+                                _longitude = msg.TargetX,
+                                _latitude = msg.TargetZ,
+                                _height = msg.TargetY,
+                            };
+                            wbRetargetGeo.RetargetWeaponToGeoPosition(geo);
+                            Plugin.Log.LogInfo($"[Order] TorpedoWireRetargetGeo applied: torpedo={unit.UniqueID} geo={geo._longitude},{geo._latitude}");
                         }
                         break;
                     }

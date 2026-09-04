@@ -41,6 +41,11 @@ namespace SeapowerMultiplayer.Messages
         AttackTarget    = 33,  // "attack that contact" designation (TargetEntityId, 0 = clear)
         DropFuelTanks   = 34,  // aircraft/helicopter fuel-tank jettison (Speed = combatDrop flag)
         JamSystem       = 35,  // offensive ECM jam order (TargetEntityId, or TargetX/Y/Z geo for a bearing jam)
+        TorpedoWireSpeed     = 36, // wire-guided torpedo speed setting (SourceEntityId=torpedo, Speed=setting)
+        TorpedoWireDepth     = 37, // wire-guided torpedo depth order (SourceEntityId=torpedo, Speed=depth)
+        TorpedoWireCut       = 38, // cut wire guidance (SourceEntityId=torpedo)
+        TorpedoWireRetarget  = 39, // retarget wire-guided torpedo to entity (SourceEntityId=torpedo, TargetEntityId=target)
+        TorpedoWireRetargetGeo = 40, // retarget wire-guided torpedo to geo position (SourceEntityId=torpedo, TargetX/Y/Z=geo)
     }
 
     /// <summary>

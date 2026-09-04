@@ -1248,6 +1248,17 @@ namespace SeapowerMultiplayer
 
             SendClientFireOrder(__instance, ammoId, targetObject, targetPosition, shotsToFire);
 
+            // Play launch voiceover locally on guest (host plays its own in the real launch path)
+            if (__instance.IsPlayerObject)
+            {
+                float interval = Globals._weaponLaunchReportInterval;
+                if (GameTime.time - Globals._weaponLaunchReportTime >= interval)
+                {
+                    Globals._weaponLaunchReportTime = GameTime.time;
+                    Singleton<VoiceMessage>.Instance.PlayVoiceMessage("WeaponAway", __instance.getNation());
+                }
+            }
+
             // The postfix removes the local enqueue - the host owns execution; the
             // weapon returns as a replica via EntitySpawn.
             __state = true;
@@ -3420,4 +3431,113 @@ namespace SeapowerMultiplayer
     // (Patch_InputHandler_NoisemakerUpstream); the host's manual key press is a residual
     // hole, and an acceptable one: this is a coordination aid between people who chose
     // to play together, not anti-cheat.
+
+    // ── Wire-guided torpedo control forwarding ─────────────────────────────
+    //
+    // Wire-guided torpedoes are controlled by the player after launch: speed,
+    // depth, retarget, cut wire. These commands must be forwarded to the host,
+    // which applies them authoritatively. The replica torpedo on the client
+    // is inert (KinematicWeapon policy) - only the host's torpedo actually
+    // responds to these commands.
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.SetWireSpeedSetting))]
+    public static class Patch_Torpedo_SetWireSpeedSetting
+    {
+        static bool Prefix(Torpedo __instance, int index)
+        {
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (Authority.IsAllowed) return true;
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireSpeed,
+                Speed = index,
+            });
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.OrderWireDepth))]
+    public static class Patch_Torpedo_OrderWireDepth
+    {
+        static bool Prefix(Torpedo __instance, float depthInFeet)
+        {
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (Authority.IsAllowed) return true;
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireDepth,
+                Speed = depthInFeet,
+            });
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.BreakWire))]
+    public static class Patch_WeaponBase_BreakWire
+    {
+        static bool Prefix(WeaponBase __instance)
+        {
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (Authority.IsAllowed) return true;
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireCut,
+            });
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeapon))]
+    public static class Patch_WeaponBase_RetargetWeapon
+    {
+        static bool Prefix(WeaponBase __instance, ObjectBase targetObject)
+        {
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (Authority.IsAllowed) return true;
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireRetarget,
+                TargetEntityId = targetObject != null ? targetObject.UniqueID : 0,
+            });
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeaponToGeoPosition))]
+    public static class Patch_WeaponBase_RetargetWeaponToGeoPosition
+    {
+        static bool Prefix(WeaponBase __instance, GeoPosition targetGeoPosition)
+        {
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (Authority.IsAllowed) return true;
+
+            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order = OrderType.TorpedoWireRetargetGeo,
+                TargetX = (float)targetGeoPosition._longitude,
+                TargetY = (float)targetGeoPosition._height,
+                TargetZ = (float)targetGeoPosition._latitude,
+            });
+            return false;
+        }
+    }
 }
