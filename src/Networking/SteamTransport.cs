@@ -11,7 +11,24 @@ namespace SeapowerMultiplayer.Transport
     {
         private HSteamListenSocket _listenSocket;
         private HSteamNetConnection _connectionToHost;
-        private readonly List<HSteamNetConnection> _clientConnections = new();
+
+        /// <summary>Host: connected clients, keyed by the id the rest of the mod
+        /// addresses them by. Unused on a client, which has exactly one peer
+        /// (<see cref="PeerId.Host"/>, held in <see cref="_connectionToHost"/>).</summary>
+        private readonly PeerTable<HSteamNetConnection> _peers = new();
+
+        /// <summary>Latest ping per peer id, refreshed each Poll. Entries are
+        /// dropped on disconnect so a stale number can't outlive its link.</summary>
+        private readonly Dictionary<int, int> _rttOf = new();
+
+        /// <summary>Snapshot of the ids to poll. Receiving can run a Steam callback
+        /// that adds or removes a peer, and mutating the table mid-iteration would
+        /// throw.</summary>
+        private readonly List<int> _pollIds = new();
+
+        private static readonly int[] HostOnly = { PeerId.Host };
+        private static readonly int[] NoPeers = new int[0];
+
         private bool _isHost;
         private bool _running;
 
@@ -52,7 +69,17 @@ namespace SeapowerMultiplayer.Transport
         /// <summary>Result of the most recent SendMessageToConnection, for error reporting.</summary>
         private EResult _lastResult = EResult.k_EResultOK;
 
-        private readonly Dictionary<uint, FragmentBuffer> _pendingFragments = new();
+        /// <summary>
+        /// In-flight reassembly buffers, keyed by SENDER as well as fragment id.
+        ///
+        /// The fragment id is only unique within one sender: every peer runs its own
+        /// _nextFragmentId counter starting at 0. Keyed on the id alone, two clients
+        /// uploading a session sync at the same time would both write into one
+        /// buffer, and it would "complete" as an interleaved mixture of two saves.
+        /// The peer id makes the key globally unique, which is what the counter was
+        /// always assuming.
+        /// </summary>
+        private readonly Dictionary<(int PeerId, uint FragmentId), FragmentBuffer> _pendingFragments = new();
         private long _lastCleanupTicks;
 
         private class FragmentBuffer
@@ -79,14 +106,38 @@ namespace SeapowerMultiplayer.Transport
         /// <summary>Host SteamID is read from SteamLobbyManager when connecting as client.</summary>
 
         public bool IsConnected => _isHost
-            ? _clientConnections.Count > 0
+            ? _peers.Count > 0
             : _connectionToHost != HSteamNetConnection.Invalid;
 
-        public int RttMs { get; private set; }
+        public IReadOnlyList<int> ConnectedPeers => _isHost
+            ? _peers.Ids
+            : (IsConnected ? HostOnly : NoPeers);
+
+        /// <summary>Worst RTT across connected peers on a host, the host link on a
+        /// client. See ITransport.RttMs for why worst rather than first.</summary>
+        public int RttMs
+        {
+            get
+            {
+                if (!_isHost) return RttMsFor(PeerId.Host);
+
+                int worst = 0;
+                var ids = _peers.Ids;
+                for (int i = 0; i < ids.Count; i++)
+                {
+                    int rtt = RttMsFor(ids[i]);
+                    if (rtt > worst) worst = rtt;
+                }
+                return worst;
+            }
+        }
+
+        public int RttMsFor(int peerId) => _rttOf.TryGetValue(peerId, out int rtt) ? rtt : 0;
+
         public bool LastSendFailed { get; private set; }
         public string? LastSendError { get; private set; }
 
-        public bool TryGetPacketStats(out long packetsSent, out long packetsLost)
+        public bool TryGetPacketStats(int peerId, out long packetsSent, out long packetsLost)
         {
             // Steam Networking Sockets exposes a smoothed quality metric, not raw
             // packet counters - the overlay shows n/a on this transport.
@@ -95,10 +146,27 @@ namespace SeapowerMultiplayer.Transport
             return false;
         }
 
-        public event Action<byte[], int>? OnDataReceived;
-        public event Action? OnPeerConnected;
-        public event Action? OnPeerDisconnected;
-        public event Action<string>? OnReceiveFailed;
+        public event Action<int, byte[], int>? OnDataReceived;
+        public event Action<int>? OnPeerConnected;
+        public event Action<int>? OnPeerDisconnected;
+        public event Action<int, string>? OnReceiveFailed;
+
+        /// <summary>Resolve a peer id to its connection, or Invalid if it is not one
+        /// of ours. On a client only PeerId.Host resolves.</summary>
+        private HSteamNetConnection ConnFor(int peerId)
+        {
+            if (!_isHost)
+                return peerId == PeerId.Host ? _connectionToHost : HSteamNetConnection.Invalid;
+            return _peers.TryGetConn(peerId, out var conn) ? conn : HSteamNetConnection.Invalid;
+        }
+
+        /// <summary>Resolve a connection to its peer id, or PeerId.None if it is not
+        /// tracked.</summary>
+        private int IdFor(HSteamNetConnection conn)
+        {
+            if (!_isHost) return PeerId.Host;
+            return _peers.TryGetId(conn, out int id) ? id : PeerId.None;
+        }
 
         public void Start(bool asHost)
         {
@@ -194,9 +262,12 @@ namespace SeapowerMultiplayer.Transport
 
             if (_isHost)
             {
-                foreach (var conn in _clientConnections)
-                    SteamNetworkingSockets.CloseConnection(conn, 0, "Host shutting down", false);
-                _clientConnections.Clear();
+                foreach (var id in _peers.Ids)
+                {
+                    if (_peers.TryGetConn(id, out var conn))
+                        SteamNetworkingSockets.CloseConnection(conn, 0, "Host shutting down", false);
+                }
+                _peers.Clear();
 
                 if (_listenSocket != HSteamListenSocket.Invalid)
                 {
@@ -216,6 +287,7 @@ namespace SeapowerMultiplayer.Transport
             _connectionStatusCallback?.Dispose();
             _connectionStatusCallback = null;
             _pendingFragments.Clear();
+            _rttOf.Clear();
             _running = false;
             Log.LogInfo("[SteamTransport] Stopped.");
         }
@@ -226,9 +298,12 @@ namespace SeapowerMultiplayer.Transport
 
             if (_isHost)
             {
-                foreach (var conn in _clientConnections)
-                    SteamNetworkingSockets.CloseConnection(conn, 0, "Refused by host", false);
-                _clientConnections.Clear();
+                foreach (var id in _peers.Ids)
+                {
+                    if (_peers.TryGetConn(id, out var conn))
+                        SteamNetworkingSockets.CloseConnection(conn, 0, "Refused by host", false);
+                }
+                _peers.Clear();
                 // Listen socket stays open - host remains joinable
             }
             else if (_connectionToHost != HSteamNetConnection.Invalid)
@@ -237,7 +312,25 @@ namespace SeapowerMultiplayer.Transport
                 _connectionToHost = HSteamNetConnection.Invalid;
             }
             _pendingFragments.Clear();
+            _rttOf.Clear();
             Log.LogInfo("[SteamTransport] Disconnected peers (transport stays up).");
+        }
+
+        public void DisconnectPeer(int peerId, string reason)
+        {
+            if (!_running) return;
+
+            var conn = ConnFor(peerId);
+            if (conn == HSteamNetConnection.Invalid) return;
+
+            SteamNetworkingSockets.CloseConnection(conn, 0, reason, false);
+
+            if (_isHost) _peers.Remove(conn);
+            else _connectionToHost = HSteamNetConnection.Invalid;
+
+            DropFragmentsFor(peerId);
+            _rttOf.Remove(peerId);
+            Log.LogInfo($"[SteamTransport] Disconnected peer {peerId}: {reason}");
         }
 
         public void Poll()
@@ -246,12 +339,20 @@ namespace SeapowerMultiplayer.Transport
 
             if (_isHost)
             {
-                foreach (var conn in _clientConnections)
-                    ReceiveMessages(conn);
+                // Snapshot: ReceiveMessages can run a status callback that mutates
+                // the peer table, and iterating it live would throw.
+                _pollIds.Clear();
+                _pollIds.AddRange(_peers.Ids);
+                for (int i = 0; i < _pollIds.Count; i++)
+                {
+                    int id = _pollIds[i];
+                    if (_peers.TryGetConn(id, out var conn))
+                        ReceiveMessages(id, conn);
+                }
             }
             else if (_connectionToHost != HSteamNetConnection.Invalid)
             {
-                ReceiveMessages(_connectionToHost);
+                ReceiveMessages(PeerId.Host, _connectionToHost);
             }
 
             CleanupStaleFragments();
@@ -264,10 +365,21 @@ namespace SeapowerMultiplayer.Transport
             SendMessage(_connectionToHost, data, length, delivery);
         }
 
+        public void SendToPeer(int peerId, byte[] data, int length, TransportDelivery delivery)
+        {
+            var conn = ConnFor(peerId);
+            if (conn == HSteamNetConnection.Invalid) return;
+            SendMessage(conn, data, length, delivery);
+        }
+
         public void BroadcastToClients(byte[] data, int length, TransportDelivery delivery)
         {
-            foreach (var conn in _clientConnections)
-                SendMessage(conn, data, length, delivery);
+            var ids = _peers.Ids;
+            for (int i = 0; i < ids.Count; i++)
+            {
+                if (_peers.TryGetConn(ids[i], out var conn))
+                    SendMessage(conn, data, length, delivery);
+            }
         }
 
         private void SendMessage(HSteamNetConnection conn, byte[] data, int length, TransportDelivery delivery)
@@ -386,7 +498,7 @@ namespace SeapowerMultiplayer.Transport
             _                               => result.ToString(),
         };
 
-        private void ReceiveMessages(HSteamNetConnection conn)
+        private void ReceiveMessages(int peerId, HSteamNetConnection conn)
         {
             int count = SteamNetworkingSockets.ReceiveMessagesOnConnection(conn, _messagePointers, MaxMessages);
 
@@ -411,16 +523,16 @@ namespace SeapowerMultiplayer.Transport
                 // Check for fragment marker
                 if (length >= FragmentHeaderSize && data[0] == FragmentMarker)
                 {
-                    HandleFragment(data, length);
+                    HandleFragment(peerId, data, length);
                 }
                 else
                 {
-                    OnDataReceived?.Invoke(data, length);
+                    OnDataReceived?.Invoke(peerId, data, length);
                 }
             }
         }
 
-        private void HandleFragment(byte[] data, int length)
+        private void HandleFragment(int peerId, byte[] data, int length)
         {
             uint fragmentId = (uint)(data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24));
             int chunkIndex  = data[5] | (data[6] << 8);
@@ -428,14 +540,15 @@ namespace SeapowerMultiplayer.Transport
 
             if (totalChunks <= 0 || chunkIndex < 0 || chunkIndex >= totalChunks)
             {
-                Log.LogWarning($"[SteamTransport] Invalid fragment header: id={fragmentId} chunk={chunkIndex}/{totalChunks}");
+                Log.LogWarning($"[SteamTransport] Invalid fragment header from peer {peerId}: id={fragmentId} chunk={chunkIndex}/{totalChunks}");
                 return;
             }
 
-            if (!_pendingFragments.TryGetValue(fragmentId, out var buffer))
+            var key = (peerId, fragmentId);
+            if (!_pendingFragments.TryGetValue(key, out var buffer))
             {
                 buffer = new FragmentBuffer(totalChunks);
-                _pendingFragments[fragmentId] = buffer;
+                _pendingFragments[key] = buffer;
             }
 
             // Stamp before the duplicate guard: a resent chunk still proves the
@@ -464,10 +577,34 @@ namespace SeapowerMultiplayer.Transport
                     offset += buffer.ChunkLengths[i];
                 }
 
-                _pendingFragments.Remove(fragmentId);
-                Log.LogInfo($"[SteamTransport] Reassembled fragment id={fragmentId}: {totalChunks} chunks → {buffer.TotalLength} bytes");
-                OnDataReceived?.Invoke(reassembled, buffer.TotalLength);
+                _pendingFragments.Remove(key);
+                Log.LogInfo($"[SteamTransport] Reassembled fragment id={fragmentId} from peer {peerId}: {totalChunks} chunks → {buffer.TotalLength} bytes");
+                OnDataReceived?.Invoke(peerId, reassembled, buffer.TotalLength);
             }
+        }
+
+        /// <summary>Discard every in-flight reassembly belonging to one peer. Used
+        /// when that peer goes away: anything half-received is dead with the
+        /// connection, and leaving it would make the idle sweep report a stalled
+        /// transfer on top of the disconnect the player is already being told
+        /// about. Other peers' transfers are untouched.</summary>
+        private void DropFragmentsFor(int peerId)
+        {
+            if (_pendingFragments.Count == 0) return;
+
+            List<(int, uint)>? doomed = null;
+            foreach (var kvp in _pendingFragments)
+            {
+                if (kvp.Key.PeerId == peerId)
+                {
+                    doomed ??= new List<(int, uint)>();
+                    doomed.Add(kvp.Key);
+                }
+            }
+
+            if (doomed == null) return;
+            foreach (var key in doomed)
+                _pendingFragments.Remove(key);
         }
 
         /// <summary>
@@ -492,35 +629,36 @@ namespace SeapowerMultiplayer.Transport
             _lastCleanupTicks = now;
 
             long idleThreshold = Plugin.Instance.CfgDisconnectTimeoutSec.Value * TimeSpan.TicksPerSecond;
-            List<uint>? staleIds = null;
+            List<(int PeerId, uint FragmentId)>? staleKeys = null;
 
             foreach (var kvp in _pendingFragments)
             {
                 if (now - kvp.Value.LastChunkTicks > idleThreshold)
                 {
-                    staleIds ??= new List<uint>();
-                    staleIds.Add(kvp.Key);
+                    staleKeys ??= new List<(int, uint)>();
+                    staleKeys.Add(kvp.Key);
                 }
             }
 
-            if (staleIds == null) return;
+            if (staleKeys == null) return;
 
-            foreach (var id in staleIds)
+            foreach (var key in staleKeys)
             {
-                var buf = _pendingFragments[id];
-                _pendingFragments.Remove(id);
+                var buf = _pendingFragments[key];
+                _pendingFragments.Remove(key);
 
                 int idleSec  = (int)((now - buf.LastChunkTicks) / TimeSpan.TicksPerSecond);
                 int totalSec = (int)((now - buf.CreatedTicks)   / TimeSpan.TicksPerSecond);
                 int gotKb    = buf.TotalLength / 1024;
 
-                Log.LogError($"[SteamTransport] Fragment id={id} stalled: {buf.ReceivedCount}/{buf.Chunks.Length} chunks " +
+                Log.LogError($"[SteamTransport] Fragment id={key.FragmentId} from peer {key.PeerId} stalled: " +
+                             $"{buf.ReceivedCount}/{buf.Chunks.Length} chunks " +
                              $"({gotKb} KB) after {totalSec}s, no data for {idleSec}s — discarding");
 
                 // The sender got an OK from Steam and will never resend, so this
                 // message is simply gone. Say so rather than leaving the player
                 // staring at a screen that never loads.
-                OnReceiveFailed?.Invoke(
+                OnReceiveFailed?.Invoke(key.PeerId,
                     $"A large transfer stopped {idleSec}s short of completing " +
                     $"({buf.ReceivedCount} of {buf.Chunks.Length} parts, {gotKb} KB received).");
             }
@@ -528,19 +666,34 @@ namespace SeapowerMultiplayer.Transport
 
         private void UpdateRtt()
         {
-            HSteamNetConnection conn = _isHost
-                ? (_clientConnections.Count > 0 ? _clientConnections[0] : HSteamNetConnection.Invalid)
-                : _connectionToHost;
+            if (_isHost)
+            {
+                var ids = _peers.Ids;
+                for (int i = 0; i < ids.Count; i++)
+                {
+                    if (_peers.TryGetConn(ids[i], out var conn) && TryGetPing(conn, out int ping))
+                        _rttOf[ids[i]] = ping;
+                }
+                return;
+            }
 
-            if (conn == HSteamNetConnection.Invalid) return;
+            if (_connectionToHost == HSteamNetConnection.Invalid) return;
+            if (TryGetPing(_connectionToHost, out int hostPing))
+                _rttOf[PeerId.Host] = hostPing;
+        }
+
+        private static bool TryGetPing(HSteamNetConnection conn, out int pingMs)
+        {
+            pingMs = 0;
+            if (conn == HSteamNetConnection.Invalid) return false;
 
             SteamNetConnectionRealTimeStatus_t status = default;
             SteamNetConnectionRealTimeLaneStatus_t laneStatus = default;
             var result = SteamNetworkingSockets.GetConnectionRealTimeStatus(conn, ref status, 0, ref laneStatus);
-            if (result == EResult.k_EResultOK)
-            {
-                RttMs = status.m_nPing;
-            }
+            if (result != EResult.k_EResultOK) return false;
+
+            pingMs = status.m_nPing;
+            return true;
         }
 
         private void OnConnectionStatusChanged(SteamNetConnectionStatusChangedCallback_t callback)
@@ -563,39 +716,55 @@ namespace SeapowerMultiplayer.Transport
                     break;
 
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected:
+                {
+                    int id;
                     if (_isHost)
                     {
-                        _clientConnections.Add(conn);
-                        Log.LogInfo($"[SteamTransport] Client connected ({_clientConnections.Count} peers)");
+                        id = _peers.Add(conn);
+                        Log.LogInfo($"[SteamTransport] Client connected as peer {id} ({_peers.Count} peers)");
                     }
                     else
                     {
+                        id = PeerId.Host;
                         Log.LogInfo("[SteamTransport] Connected to host");
                     }
-                    OnPeerConnected?.Invoke();
+                    OnPeerConnected?.Invoke(id);
                     break;
+                }
 
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ClosedByPeer:
                 case ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
+                {
                     Log.LogInfo($"[SteamTransport] Connection closed: {info.m_szEndDebug}");
 
+                    int id;
                     if (_isHost)
                     {
-                        _clientConnections.Remove(conn);
+                        id = _peers.Remove(conn);
                     }
                     else
                     {
+                        id = PeerId.Host;
                         _connectionToHost = HSteamNetConnection.Invalid;
                     }
 
-                    // Anything half-received is dead with the connection. Drop it
-                    // now so the idle sweep doesn't report a stalled transfer on
-                    // top of the disconnect the player is already being told about.
-                    _pendingFragments.Clear();
+                    // Only this peer's half-received transfers die with it - the
+                    // others are still arriving.
+                    if (id != PeerId.None)
+                    {
+                        DropFragmentsFor(id);
+                        _rttOf.Remove(id);
+                    }
 
                     SteamNetworkingSockets.CloseConnection(conn, 0, null, false);
-                    OnPeerDisconnected?.Invoke();
+
+                    // A peer that was never registered was never announced as
+                    // connected either, so announcing its departure would leave
+                    // listeners unbalanced.
+                    if (id != PeerId.None)
+                        OnPeerDisconnected?.Invoke(id);
                     break;
+                }
             }
         }
     }

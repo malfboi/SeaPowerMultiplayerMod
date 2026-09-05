@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace SeapowerMultiplayer.Transport
 {
@@ -7,13 +8,27 @@ namespace SeapowerMultiplayer.Transport
     public interface ITransport
     {
         bool IsConnected { get; }
+
+        /// <summary>Representative round-trip time. On a client that is the link to
+        /// the host; on a host it is the WORST of the connected peers, so a single
+        /// readout stays meaningful once there is more than one of them. Use
+        /// <see cref="RttMsFor"/> when a specific link is meant.</summary>
         int RttMs { get; }
+
         bool LastSendFailed { get; }
 
-        /// <summary>Cumulative send-side packet counters for the active peer, used
-        /// by the overlay's rolling packet-loss indicator. Returns false when the
-        /// transport doesn't expose them (Steam) or no peer is connected.</summary>
-        bool TryGetPacketStats(out long packetsSent, out long packetsLost);
+        /// <summary>Ids of the peers currently connected. On a client this is the
+        /// single entry <see cref="PeerId.Host"/> while connected, and empty
+        /// otherwise.</summary>
+        IReadOnlyList<int> ConnectedPeers { get; }
+
+        /// <summary>Round-trip time to one peer, or 0 if it is unknown or gone.</summary>
+        int RttMsFor(int peerId);
+
+        /// <summary>Cumulative send-side packet counters for one peer, used by the
+        /// overlay's rolling packet-loss indicator. Returns false when the transport
+        /// doesn't expose them (Steam) or that peer isn't connected.</summary>
+        bool TryGetPacketStats(int peerId, out long packetsSent, out long packetsLost);
 
         /// <summary>Human-readable reason for the most recent send failure, or null if none.</summary>
         string? LastSendError { get; }
@@ -23,20 +38,32 @@ namespace SeapowerMultiplayer.Transport
         void Poll();
 
         /// <summary>Disconnect all connected peers but keep the transport alive
-        /// (host keeps listening). Used to refuse incompatible peers.</summary>
+        /// (host keeps listening). Used to tear a session down.</summary>
         void DisconnectPeers();
+
+        /// <summary>Disconnect one peer and leave the rest of the session alone.
+        /// Used to refuse a single incompatible client. A no-op for an id that is
+        /// not connected.</summary>
+        void DisconnectPeer(int peerId, string reason);
 
         void SendToServer(byte[] data, int length, TransportDelivery delivery);
         void BroadcastToClients(byte[] data, int length, TransportDelivery delivery);
 
-        event Action<byte[], int> OnDataReceived;
-        event Action OnPeerConnected;
-        event Action OnPeerDisconnected;
+        /// <summary>Send to one peer. On a host that addresses one client; on a
+        /// client the only valid target is <see cref="PeerId.Host"/>. A no-op for
+        /// an id that is not connected.</summary>
+        void SendToPeer(int peerId, byte[] data, int length, TransportDelivery delivery);
+
+        /// <summary>Payload received, tagged with the peer it came from.</summary>
+        event Action<int, byte[], int> OnDataReceived;
+
+        event Action<int> OnPeerConnected;
+        event Action<int> OnPeerDisconnected;
 
         /// <summary>Raised when an inbound message was partially received and then
         /// abandoned, so the peer believes it was delivered and nothing will retry.
         /// The string is a human-readable reason. Transports that reassemble
         /// internally never raise it.</summary>
-        event Action<string> OnReceiveFailed;
+        event Action<int, string> OnReceiveFailed;
     }
 }

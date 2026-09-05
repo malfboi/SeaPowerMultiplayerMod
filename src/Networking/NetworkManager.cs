@@ -38,6 +38,17 @@ namespace SeapowerMultiplayer
         private float _refuseDisconnectAt = -1f;   // give the refusal Welcome time to flush
         private const float HandshakeTimeoutSec = 5f;
 
+        /// <summary>The peer this manager's single session is with: on a client
+        /// always <see cref="PeerId.Host"/>, on a host the one connected client.
+        /// The session state above is still one set of fields for one peer - making
+        /// it per-peer is the next step, and this is the handle that step will
+        /// hang off.</summary>
+        private int _primaryPeerId = PeerId.None;
+
+        /// <summary>Peer that was sent a refusal and is about to be dropped, so the
+        /// deferred disconnect hits only them.</summary>
+        private int _refusedPeerId = PeerId.None;
+
         public HandshakeState Handshake => _handshake;
 
         /// <summary>True once the v2 Hello/Welcome handshake completed. All gameplay
@@ -73,7 +84,7 @@ namespace SeapowerMultiplayer
             if (now < _nextLossSampleAt) return;
             _nextLossSampleAt = now + LossSampleIntervalSec;
 
-            if (_transport == null || !_transport.TryGetPacketStats(out long sent, out long lost))
+            if (_transport == null || !_transport.TryGetPacketStats(_primaryPeerId, out long sent, out long lost))
             {
                 _lossSamples.Clear();
                 PacketLossPct = -1f;
@@ -153,6 +164,8 @@ namespace SeapowerMultiplayer
             _handshake = HandshakeState.Disconnected;
             _handshakeDeadline = -1f;
             _refuseDisconnectAt = -1f;
+            _primaryPeerId = PeerId.None;
+            _refusedPeerId = PeerId.None;
             SessionParams = null;
             Log.LogInfo("[Net] Stopped.");
         }
@@ -190,11 +203,16 @@ namespace SeapowerMultiplayer
                 _transport?.DisconnectPeers();
             }
 
-            // Deferred disconnect after sending a refusal Welcome (lets it flush)
+            // Deferred disconnect after sending a refusal Welcome (lets it flush).
+            // Drops only the refused peer - anyone else stays connected.
             if (_refuseDisconnectAt > 0f && Time.realtimeSinceStartup > _refuseDisconnectAt)
             {
                 _refuseDisconnectAt = -1f;
-                _transport?.DisconnectPeers();
+                if (_refusedPeerId != PeerId.None)
+                    _transport?.DisconnectPeer(_refusedPeerId, "Refused by host");
+                else
+                    _transport?.DisconnectPeers();
+                _refusedPeerId = PeerId.None;
             }
         }
 
@@ -221,6 +239,23 @@ namespace SeapowerMultiplayer
             _writer.Put((byte)msg.Type);
             msg.Serialize(_writer);
             _transport.BroadcastToClients(_writer.Data, _writer.Length, MapDelivery(delivery));
+            Telemetry.OnSend((byte)msg.Type, _writer.Length);
+        }
+
+        /// <summary>Send to one peer rather than every client. Used for anything
+        /// that is about a specific client rather than the session - today the
+        /// Welcome (and the refusal that replaces it), which carry that client's
+        /// own parameters.</summary>
+        public void SendToPeer(int peerId, INetMessage msg, DeliveryMethod delivery = DeliveryMethod.ReliableOrdered)
+        {
+            if (_transport == null) return;
+            if (peerId == PeerId.None) return;
+            if (BlockedPreHandshake(msg.Type)) return;
+            if (BlockedByAllyLock(msg)) return;
+            _writer.Reset();
+            _writer.Put((byte)msg.Type);
+            msg.Serialize(_writer);
+            _transport.SendToPeer(peerId, _writer.Data, _writer.Length, MapDelivery(delivery));
             Telemetry.OnSend((byte)msg.Type, _writer.Length);
         }
 
@@ -302,11 +337,13 @@ namespace SeapowerMultiplayer
 
         // ── Transport event handlers ────────────────────────────────────────────
 
-        private void OnPeerConnected()
+        private void OnPeerConnected(int peerId)
         {
-            Log.LogInfo("[Net] Peer connected");
+            Log.LogInfo($"[Net] Peer {peerId} connected");
             _mainThreadQueue.Enqueue(() =>
             {
+                _primaryPeerId = peerId;
+
                 // A new peer means a new attempt - don't carry a stale failure
                 // banner from the previous session into this one.
                 SimSyncManager.ClearIssue();
@@ -338,14 +375,17 @@ namespace SeapowerMultiplayer
             });
         }
 
-        private void OnPeerDisconnected()
+        private void OnPeerDisconnected(int peerId)
         {
-            Log.LogInfo("[Net] Peer disconnected");
+            Log.LogInfo($"[Net] Peer {peerId} disconnected");
             _mainThreadQueue.Enqueue(() =>
             {
                 // Captured before the reset below: only a peer that got as far as
                 // Established was in a session worth freezing for.
                 bool wasEstablished = _handshake == HandshakeState.Established;
+
+                if (_primaryPeerId == peerId) _primaryPeerId = PeerId.None;
+                _refusedPeerId = PeerId.None;
 
                 _handshake = HandshakeState.Disconnected;
                 _handshakeDeadline = -1f;
@@ -405,9 +445,9 @@ namespace SeapowerMultiplayer
         /// successful send and will not retry, so the only recovery is a fresh
         /// Send from the host — surface that instead of failing silently.
         /// </summary>
-        private void OnReceiveFailed(string reason)
+        private void OnReceiveFailed(int peerId, string reason)
         {
-            Log.LogError($"[Net] Inbound message lost: {reason}");
+            Log.LogError($"[Net] Inbound message from peer {peerId} lost: {reason}");
             _mainThreadQueue.Enqueue(() =>
             {
                 SimSyncManager.ReportIssue(
@@ -417,7 +457,7 @@ namespace SeapowerMultiplayer
             });
         }
 
-        private void OnDataReceived(byte[] data, int length)
+        private void OnDataReceived(int peerId, byte[] data, int length)
         {
             var reader = new NetDataReader(data, 0, length);
             var type = (MessageType)reader.GetByte();
@@ -427,7 +467,7 @@ namespace SeapowerMultiplayer
             // are processed; everything else is dropped.
             if (_handshake != HandshakeState.Established)
             {
-                HandlePreHandshake(type, reader);
+                HandlePreHandshake(peerId, type, reader);
                 return;
             }
 
@@ -646,7 +686,7 @@ namespace SeapowerMultiplayer
 
         // ── v2 handshake ──────────────────────────────────────────────────────────
 
-        private void HandlePreHandshake(MessageType type, NetDataReader reader)
+        private void HandlePreHandshake(int peerId, MessageType type, NetDataReader reader)
         {
             // No synchronous _handshake check here: OnPeerConnected QUEUES the
             // AwaitingHello/AwaitingWelcome transition, so when the peer's Hello
@@ -659,7 +699,7 @@ namespace SeapowerMultiplayer
             if (type == MessageType.Hello && _isHost)
             {
                 var msg = HelloMessage.Deserialize(reader);
-                _mainThreadQueue.Enqueue(() => HandleHello(msg));
+                _mainThreadQueue.Enqueue(() => HandleHello(peerId, msg));
             }
             else if (type == MessageType.Welcome && !_isHost)
             {
@@ -673,7 +713,7 @@ namespace SeapowerMultiplayer
             }
         }
 
-        private void HandleHello(HelloMessage msg)
+        private void HandleHello(int peerId, HelloMessage msg)
         {
             if (_handshake != HandshakeState.AwaitingHello) return;
 
@@ -701,9 +741,13 @@ namespace SeapowerMultiplayer
             {
                 Log.LogError($"[Handshake] Refusing client (plugin {msg.PluginVersion}, game {msg.GameVersion}): {refusal}");
                 Telemetry.Count("handshake.refused");
-                BroadcastToClients(new WelcomeMessage { Accepted = false, RefusalReason = refusal });
+                // Addressed to the peer that was actually refused, not broadcast:
+                // a refusal is about one client's build, and nobody else's session
+                // should hear about it.
+                SendToPeer(peerId, new WelcomeMessage { Accepted = false, RefusalReason = refusal });
                 _handshake = HandshakeState.Refused;
                 _handshakeDeadline = -1f;
+                _refusedPeerId = peerId;
                 _refuseDisconnectAt = Time.realtimeSinceStartup + 0.75f;
                 return;
             }
@@ -717,7 +761,10 @@ namespace SeapowerMultiplayer
             // this build thinks it does.
             RemoteGameplayOptions.Apply(msg.GameplayOptions);
 
-            BroadcastToClients(new WelcomeMessage
+            // Per-client, not broadcast: Welcome carries that client's own session
+            // parameters (its UID band above all), so it is addressed to the peer
+            // whose Hello prompted it.
+            SendToPeer(peerId, new WelcomeMessage
             {
                 Accepted        = true,
                 IsPvP           = Plugin.Instance.CfgPvP.Value,
