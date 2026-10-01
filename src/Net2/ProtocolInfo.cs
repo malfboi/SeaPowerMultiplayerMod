@@ -40,11 +40,13 @@ namespace SeapowerMultiplayer.Net2
         // slot a host may hand out did: a 4-slot build that pairs with an 8-slot host and
         // is seated at slot 4+ walks off the end of its own roster array, so the two must
         // not be allowed to meet.
-        // 236: wire-guided torpedo control. PlayerOrder gains TorpedoWireSpeed/-Depth/
-        // -Cut/-Retarget/-RetargetGeo (36-40) and a new WeaponWireState message (39)
-        // carries the host's authoritative wire state back. A 235 peer has neither, so
-        // a guest's torpedo would steer locally and never on the host.
-        public const ushort ProtocolVersion = 237;
+        // 236 (steam): wire-guided torpedo control and the WeaponWireState message (39).
+        // 236 (1.0.2): the game update that introduced Standing Orders - DoctrineSync,
+        // Hello/Welcome's GameplayOptions byte reserved (always 0), new PlayerOrder types.
+        // 238 is both branches merged: DoctrineSync moved to 40 to clear WeaponWireState,
+        // and PR #18's TorpedoWire* orders (36-40) gave way to WeaponCommand/WeaponOp (36).
+        // Neither 236 nor 237 is safe to pair with this layout.
+        public const ushort ProtocolVersion = 238;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

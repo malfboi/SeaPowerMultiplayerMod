@@ -11,7 +11,7 @@ namespace SeapowerMultiplayer.Messages
         public bool IsSinking;
 
         /// <summary>Seconds the host's copy has been sinking. Compartments drives the
-        /// whole descent off _sinkTime - depth is (GameTime.time - _sinkTime) / 3 and
+        /// whole descent off _sinkTime - depth is (GameTime.missionElapsedTime - _sinkTime) / 3 and
         /// the rigidbody's velocity cap is 0.01 * that - so a client that stamped its
         /// own _sinkTime sits at a permanently different point on the curve. Sent as
         /// ELAPSED rather than absolute so it survives any clock offset between the

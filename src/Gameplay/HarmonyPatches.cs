@@ -260,7 +260,8 @@ namespace SeapowerMultiplayer
 
             if (Suppression.HostSuppressesRemoteTfAi(__instance)
                 && _remoteCommanded.TryGetValue(__instance.UniqueID, out int cmd)
-                && telegraph != cmd)
+                && telegraph != cmd
+                && !DoctrineCycle.Drives(__instance)) // the owner's standing order, not host AI
             {
                 __state = false;
                 return false;
@@ -322,7 +323,8 @@ namespace SeapowerMultiplayer
             // logic may re-assert it but never change it.
             if (Suppression.HostSuppressesRemoteTfAi(__instance)
                 && _remoteCommanded.TryGetValue(__instance.UniqueID, out int cmd)
-                && telegraph != cmd)
+                && telegraph != cmd
+                && !DoctrineCycle.Drives(__instance)) // the owner's standing order, not host AI
             {
                 __state = false;
                 return false;
@@ -354,6 +356,8 @@ namespace SeapowerMultiplayer
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (!Suppression.HostSuppressesRemoteTfAi(__instance)
                 && !Suppression.ClientForeignUnit(__instance)) return true;
+            // Host: the remote player's own Sprint-and-Drift / Baffle-Clearing order.
+            if (!Suppression.ClientForeignUnit(__instance) && DoctrineCycle.Drives(__instance)) return true;
             __result = __instance._currentPresetDepth;
             return false;
         }
@@ -860,13 +864,45 @@ namespace SeapowerMultiplayer
                     yield return m;
         }
 
-        static bool Prefix(ObjectBase __instance, ref bool __result)
+        static bool Prefix(ObjectBase __instance, ref bool __result, object[] __args)
         {
             if (!NetworkManager.Instance.IsEstablished) return true;
             if (!AutoAirOps.IsHumanTaskforce(__instance._taskforce)) return true;
+            // Mission Editor "Air Operations" (CivilianRoute with a home base) launch
+            // through FlightDeckLaunchUnit(string, ltp, ...) with ltp._civRoute set. That
+            // is the scenario's schedule, not AI autonomy, and the player's own decks run
+            // it in single player - left blocked, the route counted 50 failed launches
+            // and disabled itself. Host only: CivilianRoute.OnUpdate never runs on a client.
+            if (Plugin.Instance.CfgIsHost.Value && IsScenarioRoute(__args)) return true;
             __result = false; // "nothing launched" - callers stop or retry harmlessly
             return false;
         }
+
+        private static bool IsScenarioRoute(object[] args)
+        {
+            for (int i = 0; i < args.Length; i++)
+                if (args[i] is LaunchTaskParameters ltp) return ltp._civRoute != null;
+            return false;
+        }
+    }
+
+    /// <summary>The automation that DOES run for a human side now launches through
+    /// createLaunchTask on the host - Mission Editor Air Operations (CivilianRoute) and
+    /// the new patrol zones (PatrolZone.ProcessCAP / ProcessSAR ready, launch and RTB
+    /// aircraft for the zone's attached airbases, which may be a client's carrier). The
+    /// ownership gates on createLaunchTask and the order relays are written for player
+    /// clicks, so on a deck somebody else commands they refused the host's own
+    /// simulation - and put a refusal notice on the host's screen every retry. Both
+    /// run under Authority on the host, like any other host-authoritative replay;
+    /// their order side effects then broadcast to the owner as usual.</summary>
+    [HarmonyPatch(typeof(PatrolZone), nameof(PatrolZone.OnFixedUpdate))]
+    public static class Patch_PatrolZone_HostAuthority
+    {
+        static void Prefix(out IDisposable? __state) =>
+            __state = Plugin.Instance.CfgIsHost.Value && NetworkManager.Instance.IsEstablished
+                ? Authority.Allowed() : null;
+
+        static void Finalizer(IDisposable? __state) => __state?.Dispose();
     }
 
     [HarmonyPatch]
@@ -963,6 +999,7 @@ namespace SeapowerMultiplayer
                     DestZ          = ltp?._launchCount ?? 1,
                     ShotsToFire    = ltp != null ? (int)ltp._missionType : 0,
                     TargetEntityId = allowLaunch ? 1 : 0,
+                    TargetX        = LaunchWeaponState.Pack(),
                 });
                 Telemetry.Count("v2.clientLaunchUpstream");
                 Plugin.Log.LogInfo($"[FlightOps] Upstream launch intent: carrier={v2vessel.UniqueID} vehicle={vehicleIdx} count={ltp?._launchCount ?? 1}");
@@ -986,6 +1023,83 @@ namespace SeapowerMultiplayer
                 return Plugin.Instance.CfgIsHost.Value;
 
             return true;
+        }
+    }
+
+    /// <summary>Options → Gameplay "launch player aircraft on Weapons Free/Tight/Hold"
+    /// (OptionsManager.AircraftDefaultWeaponState). FlightDeck.launchVehicle reads it on
+    /// the machine running the deck - always the host - and only under
+    /// <c>_baseObject.IsPlayerObject</c>, so a client's launch came up on the HOST's
+    /// setting in co-op and on the remote-fleet fallback in PvP.
+    ///
+    /// The launching player's own setting rides the LaunchAircraft order (TargetX =
+    /// status + 1, 0 = none sent), is pinned to that launch's LaunchTaskParameters - the
+    /// very object the pending task later hands launchVehicle, so it survives the
+    /// ready-up wait - and is written after the game's own stamp (and after the PvP
+    /// fallback in Patch_V2_RemoteTf_LaunchWeaponStatus). A task restored from a save
+    /// has a fresh ltp and keeps the fallback.
+    ///
+    /// The client stamps its deck-phase replica with the same value: the doctrine sweep
+    /// (WeaponStatusSync) relays a replica's status upstream on first sight, so a
+    /// replica left at the field default would overwrite the host's correct value.</summary>
+    internal static class LaunchWeaponState
+    {
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+            LaunchTaskParameters, System.Runtime.CompilerServices.StrongBox<ObjectBase.WeaponStatus>> _requested = new();
+
+        /// <summary>This machine's option, mapped the way launchVehicle maps it.</summary>
+        internal static ObjectBase.WeaponStatus Local()
+        {
+            var opts = Singleton<OptionsManager>.InstanceExists(false)
+                ? Singleton<OptionsManager>.Instance : null;
+            if (opts == null) return ObjectBase.WeaponStatus.Tight;
+            return opts.AircraftDefaultWeaponState switch
+            {
+                AircraftWeaponState.Free => ObjectBase.WeaponStatus.Free,
+                AircraftWeaponState.Hold => ObjectBase.WeaponStatus.Hold,
+                _                        => ObjectBase.WeaponStatus.Tight,
+            };
+        }
+
+        internal static float Pack() => (int)Local() + 1;
+
+        /// <summary>Host: remember the sender's status for this launch.</summary>
+        internal static void Request(LaunchTaskParameters ltp, float packed)
+        {
+            if (ltp == null || packed < 1f) return;
+            _requested.Remove(ltp);
+            _requested.Add(ltp, new System.Runtime.CompilerServices.StrongBox<ObjectBase.WeaponStatus>(
+                (ObjectBase.WeaponStatus)((int)packed - 1)));
+        }
+
+        internal static bool TryGet(LaunchTaskParameters? ltp, out ObjectBase.WeaponStatus status)
+        {
+            status = default;
+            if (ltp == null || !_requested.TryGetValue(ltp, out var box)) return false;
+            status = box.Value;
+            return true;
+        }
+
+        /// <summary>Client: a deck-phase replica off a deck this player commands starts on
+        /// this player's launch setting, as it did on the host.</summary>
+        internal static void StampOwnDeckReplica(ObjectBase unit, ObjectBase homeBase)
+        {
+            if (unit == null || homeBase == null) return;
+            if (homeBase._taskforce != Globals._playerTaskforce) return;
+            if (FormationOwnership.IsOwnedByOther(homeBase)) return;
+            unit._weaponStatus = Local();
+        }
+    }
+
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.launchVehicle))]
+    public static class Patch_FlightDeck_LaunchVehicle_RequestedWeaponStatus
+    {
+        [HarmonyPriority(Priority.Last)]
+        static void Postfix(ObjectBase __result, LaunchTaskParameters ltp)
+        {
+            if (__result == null) return;
+            if (!LaunchWeaponState.TryGet(ltp, out var status)) return;
+            __result._weaponStatus = status;
         }
     }
 
@@ -1252,9 +1366,9 @@ namespace SeapowerMultiplayer
             if (__instance.IsPlayerObject)
             {
                 float interval = Globals._weaponLaunchReportInterval;
-                if (GameTime.time - Globals._weaponLaunchReportTime >= interval)
+                if (GameTime.missionElapsedTime - Globals._weaponLaunchReportTime >= interval)
                 {
-                    Globals._weaponLaunchReportTime = GameTime.time;
+                    Globals._weaponLaunchReportTime = GameTime.missionElapsedTime;
                     Singleton<VoiceMessage>.Instance.PlayVoiceMessage("WeaponAway", __instance.getNation());
                 }
             }
@@ -1479,6 +1593,15 @@ namespace SeapowerMultiplayer
             if (FormationOwnership.BlocksOrdersFor(__instance))
                 return false;
 
+            // Standing-order depth cycle: derived on both machines, so execute without
+            // sending - and on the host, past the remote-player lock below, which exists
+            // to stop host AI, not the owner's own doctrine. See DoctrineCycle.
+            if (DoctrineCycle.Drives(__instance))
+            {
+                _lockedDepth[__instance.UniqueID] = depth;
+                return true;
+            }
+
             // Host: the remote player owns the depth - the sub's own AI/state logic
             // may maintain the commanded depth, but never change it. (Without this,
             // the AI re-commanded its old depth as soon as the 1 s grace expired -
@@ -1669,6 +1792,8 @@ namespace SeapowerMultiplayer
             // not send. Asked AFTER the ownership gates on purpose: those refusals must
             // still stand, so the client never mutates a unit it does not own.
             if (FormationInternal.Active) return true;
+            // Standing-order speed/depth cycle - same reasoning, see DoctrineCycle.
+            if (DoctrineCycle.Drives(unit)) return true;
             if (Plugin.Instance.CfgIsHost.Value) return true;
             if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate - skip send, still execute locally
             NetworkManager.Instance.SendToServer(msg);
@@ -1716,6 +1841,7 @@ namespace SeapowerMultiplayer
             }
 
             if (FormationInternal.Active) return; // derived formation state - see FormationInternal
+            if (DoctrineCycle.Drives(unit)) return; // derived standing-order cycle - see DoctrineCycle
             if (!Plugin.Instance.CfgIsHost.Value) return;
             if (!NetworkManager.Instance.IsConnected) return;
             if (OrderHandler.ApplyingFromNetwork) return;
@@ -1868,7 +1994,16 @@ namespace SeapowerMultiplayer
             int group = GetRadarGroup(sensor, unit);
             if (group >= 0) return SensorMsg(unit, group, enable);
 
-            if (!(sensor is SensorSystemSonar)) return null;
+            // ECM rides the same per-sensor form. Switching a jammer off is a real
+            // decision since defensive noise jamming and home-on-jam: a radiating suite
+            // is what a HOJ seeker homes on (ObjectBase.HasNoiseJammer requireRadiating).
+            // Without this the client's switch was reverted by the sensor reassert.
+            // Client only: on the host the sim itself switches jammers on when a missile
+            // comes in (Missile terminal approach → sysECM.Enable()), and running that
+            // through the ownership gate would refuse it for every teammate-owned ship.
+            // The host's IsOn reaches clients through SensorStateManager regardless.
+            if (sensor is SensorSystemECM && Plugin.Instance.CfgIsHost.Value) return null;
+            if (!(sensor is SensorSystemSonar) && !(sensor is SensorSystemECM)) return null;
             var sensors = unit._obp?._sensorSystems;
             if (sensors == null) return null;
 
@@ -1966,6 +2101,14 @@ namespace SeapowerMultiplayer
                 // re-pointing a jammer from one contact to another fingerprints
                 // identically to the first order and would be dropped as a duplicate.
                 case OrderType.JamSystem:
+                // A reload is a one-shot click, and reloading the same mount twice is
+                // two reloads - its fingerprint (the mount index) never changes.
+                case OrderType.ForceReload:
+                // Weapon commands and launch settings carry their meaning in fields the
+                // default fingerprint does not read (op, weapon id, ammo) - two different
+                // commands to two different rounds would fingerprint the same.
+                case OrderType.WeaponCommand:
+                case OrderType.TorpedoLaunchSettings:
                     return true;
             }
 
@@ -3127,6 +3270,198 @@ namespace SeapowerMultiplayer
         }
     }
 
+    // ── In-flight weapon commands (client → host) ───────────────────────────
+    //
+    // A wire-guided torpedo (or a datalinked missile / command-guided bomb) is steered
+    // from its own panel and from map clicks while it runs: cut wire, self-destruct,
+    // wire speed and depth, retarget onto a contact or a point. Every one of those is a
+    // public method on the weapon, and on a client the weapon is a host-driven replica
+    // - so each ran on the local copy and went nowhere. Nothing even refused it:
+    // OrderSyncHelper waves weapons through, because no order may be ADDRESSED to one
+    // (both ends treat a weapon id as misresolved). So the round is addressed through
+    // its launch platform instead, which is also the right thing to ask the ownership
+    // gates about.
+    //
+    // Client only. The host's own commands run natively on the real round, and the
+    // result streams back like any other weapon state; the wire itself comes back as
+    // WeaponWireLost (WireStateCapture).
+    public static class WeaponCommandSync
+    {
+        /// <summary>True when this call is a player's command to a client replica and
+        /// has been claimed for the host. <paramref name="allowed"/> is the ownership
+        /// verdict - false means it was refused and must not run locally either.</summary>
+        internal static bool TryForward(WeaponBase wb, WeaponOp op, out bool allowed,
+            float arg = 0f, ObjectBase? target = null, GeoPosition geo = default)
+        {
+            allowed = true;
+            if (OrderHandler.ApplyingFromNetwork) return false;
+            if (!NetworkManager.Instance.IsEstablished) return false;
+            if (Plugin.Instance.CfgIsHost.Value) return false;
+            if (SessionManager.SceneLoading) return false; // Torpedo.RestoreSavedState replays these
+            if (ReplicaRegistry.PolicyOf(wb) != ReplicaPolicy.KinematicWeapon) return false;
+
+            var platform = StateSerializer.GetLaunchPlatform(wb);
+            if (platform == null || platform.UniqueID == 0)
+            {
+                Plugin.Log.LogWarning($"[Weapon] {op} on {wb.name} (id={wb.UniqueID}) dropped - " +
+                    "launch platform unknown here, nothing to address it through");
+                allowed = false;
+                return true;
+            }
+
+            allowed = OrderSyncHelper.Prefix(platform, new PlayerOrderMessage
+            {
+                SourceEntityId = platform.UniqueID,
+                Order          = OrderType.WeaponCommand,
+                ShotsToFire    = wb.UniqueID,
+                Heading        = (float)op,
+                Speed          = arg,
+                TargetEntityId = target != null ? target.UniqueID : 0,
+                TargetX        = (float)geo._longitude,
+                TargetY        = (float)geo._height,
+                TargetZ        = (float)geo._latitude,
+            });
+            if (allowed)
+                Plugin.Log.LogInfo($"[Weapon] Upstream {op}: weapon={wb.UniqueID} platform={platform.UniqueID} " +
+                    $"arg={arg} target={target?.UniqueID ?? 0}");
+            return true;
+        }
+    }
+
+    // The cut also runs on the replica: BreakWire is pure state (_onWire and the two
+    // ConnectionLost flags), and it is what takes the button and the wire controls
+    // off the panel at once instead of a round trip later.
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.CommandCutWire))]
+    public static class Patch_V2_WeaponCutWire_Upstream
+    {
+        static bool Prefix(WeaponBase __instance)
+            => !WeaponCommandSync.TryForward(__instance, WeaponOp.CutWire, out bool allowed) || allowed;
+    }
+
+    // Never locally: the replica may only be destroyed by the host's impact/despawn.
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.CommandSelfDestruct))]
+    public static class Patch_V2_WeaponSelfDestruct_Upstream
+    {
+        static bool Prefix(WeaponBase __instance)
+            => !WeaponCommandSync.TryForward(__instance, WeaponOp.SelfDestruct, out _);
+    }
+
+    // Speed and depth also run locally - both only set the values the torpedo control
+    // panel reads back (SpeedSetting, OrderedWireDepthFeet); the replica's sim is off.
+    // The AI's TorpedoWireController calls the same two methods, which is why the
+    // ownership gate in TryForward matters: it refuses them for a boat we do not own.
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.SetWireSpeedSetting))]
+    public static class Patch_V2_TorpedoWireSpeed_Upstream
+    {
+        static bool Prefix(Torpedo __instance, int index)
+            => !WeaponCommandSync.TryForward(__instance, WeaponOp.WireSpeed, out bool allowed, index) || allowed;
+    }
+
+    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.OrderWireDepth))]
+    public static class Patch_V2_TorpedoWireDepth_Upstream
+    {
+        static bool Prefix(Torpedo __instance, float depthInFeet)
+            => !WeaponCommandSync.TryForward(__instance, WeaponOp.WireDepth, out bool allowed, depthInFeet) || allowed;
+    }
+
+    // Retargets do not run locally: a missile's SetNewTarget claims and frees guidance
+    // channels on the shooter, which on this machine is a puppet.
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeapon))]
+    public static class Patch_V2_WeaponRetarget_Upstream
+    {
+        static bool Prefix(WeaponBase __instance, ObjectBase targetObject, ref bool __result)
+        {
+            if (!WeaponCommandSync.TryForward(__instance, WeaponOp.Retarget, out bool allowed, target: targetObject))
+                return true;
+            __result = allowed;
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeaponToGeoPosition))]
+    public static class Patch_V2_WeaponRetargetGeo_Upstream
+    {
+        static bool Prefix(WeaponBase __instance, GeoPosition targetGeoPosition)
+            => !WeaponCommandSync.TryForward(__instance, WeaponOp.RetargetGeo, out _, geo: targetGeoPosition);
+    }
+
+    // ── Torpedo launch settings (client → host) ─────────────────────────────
+    //
+    // Seeker selection (Auto / primary / vessel-attack seeker), launch speed, search
+    // depth and search mode are chosen per ammunition in the weapon context menu and
+    // stored on the LAUNCHING UNIT (ObjectBase._launchSeekerModeSettings and its three
+    // siblings), where the launch reads them: WeaponBase.CommonLaunchSettings for the
+    // seeker, Torpedo.TorpedoLaunchSettings for the rest. The launch happens on the
+    // host, so a client's choice made on its own copy of the unit never reached it -
+    // the host fired every torpedo on its defaults.
+    //
+    // The menu items are DelegateCommands built by local functions of
+    // WeaponEntry.GetSalvoCommands, each a bare dictionary write with no method of its
+    // own to hook. So the factory is postfixed and its command wrapped: the ownership
+    // gate runs first, then the original write, and the new value is taken from the
+    // factory's own arguments. (Search mode is behind UNITY_EDITOR in the menu today;
+    // its factory still ships, so it is covered for when the menu opens up.)
+    [HarmonyPatch]
+    public static class Patch_V2_TorpedoLaunchSettings_Upstream
+    {
+        // Factory name fragment → message field it fills (see OrderType.TorpedoLaunchSettings)
+        private static readonly Dictionary<string, int> Settings = new()
+        {
+            ["g__GetSetLaunchSeekerModeCommand"] = 0,
+            ["g__GetSetLaunchSpeedCommand"]      = 1,
+            ["g__GetSetSearchDepthCommand"]      = 2,
+            ["g__GetSetSearchModeCommand"]       = 3,
+        };
+
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            var type = AccessTools.TypeByName("SeapowerUI.ViewModels.WeaponEntry");
+            if (type == null)
+            {
+                Plugin.Log.LogWarning("[Patch] WeaponEntry not found - torpedo launch settings will not sync");
+                yield break;
+            }
+            foreach (var m in AccessTools.GetDeclaredMethods(type))
+            {
+                foreach (var name in Settings.Keys)
+                    if (m.Name.Contains(name)) { yield return m; break; }
+            }
+        }
+
+        static void Postfix(MethodBase __originalMethod, object[] __args,
+                            ref System.Windows.Input.ICommand __result)
+        {
+            if (__result == null || __args.Length < 3) return;
+            if (!(__args[0] is ObjectBase unit) || !(__args[1] is AmmunitionParameters ap)) return;
+
+            int field = -1;
+            foreach (var kv in Settings)
+                if (__originalMethod.Name.Contains(kv.Key)) { field = kv.Value; break; }
+            if (field < 0) return;
+
+            float value = Convert.ToInt32(__args[2]);
+            var inner = __result;
+            __result = new DelegateCommand(p =>
+            {
+                if (NetworkManager.Instance.IsConnected && unit.UniqueID != 0)
+                {
+                    var msg = new PlayerOrderMessage
+                    {
+                        SourceEntityId = unit.UniqueID,
+                        Order          = OrderType.TorpedoLaunchSettings,
+                        AmmoId         = ap._ammunitionFileName,
+                        Speed          = field == 0 ? value : float.NaN,
+                        Heading        = field == 1 ? value : float.NaN,
+                        DestX          = field == 2 ? value : float.NaN,
+                        DestY          = field == 3 ? value : float.NaN,
+                    };
+                    if (!OrderSyncHelper.Prefix(unit, msg)) return;
+                }
+                inner.Execute(p);
+            });
+        }
+    }
+
     [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OverrideRelationship))]
     public static class Patch_Vehicle_OverrideRelationship
     {
@@ -3431,113 +3766,4 @@ namespace SeapowerMultiplayer
     // (Patch_InputHandler_NoisemakerUpstream); the host's manual key press is a residual
     // hole, and an acceptable one: this is a coordination aid between people who chose
     // to play together, not anti-cheat.
-
-    // ── Wire-guided torpedo control forwarding ─────────────────────────────
-    //
-    // Wire-guided torpedoes are controlled by the player after launch: speed,
-    // depth, retarget, cut wire. These commands must be forwarded to the host,
-    // which applies them authoritatively. The replica torpedo on the client
-    // is inert (KinematicWeapon policy) - only the host's torpedo actually
-    // responds to these commands.
-
-    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.SetWireSpeedSetting))]
-    public static class Patch_Torpedo_SetWireSpeedSetting
-    {
-        static bool Prefix(Torpedo __instance, int index)
-        {
-            if (!NetworkManager.Instance.IsEstablished) return true;
-            if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (OrderHandler.ApplyingFromNetwork) return true;
-            if (Authority.IsAllowed) return true;
-
-            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
-            {
-                SourceEntityId = __instance.UniqueID,
-                Order = OrderType.TorpedoWireSpeed,
-                Speed = index,
-            });
-            return false;
-        }
-    }
-
-    [HarmonyPatch(typeof(Torpedo), nameof(Torpedo.OrderWireDepth))]
-    public static class Patch_Torpedo_OrderWireDepth
-    {
-        static bool Prefix(Torpedo __instance, float depthInFeet)
-        {
-            if (!NetworkManager.Instance.IsEstablished) return true;
-            if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (OrderHandler.ApplyingFromNetwork) return true;
-            if (Authority.IsAllowed) return true;
-
-            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
-            {
-                SourceEntityId = __instance.UniqueID,
-                Order = OrderType.TorpedoWireDepth,
-                Speed = depthInFeet,
-            });
-            return false;
-        }
-    }
-
-    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.BreakWire))]
-    public static class Patch_WeaponBase_BreakWire
-    {
-        static bool Prefix(WeaponBase __instance)
-        {
-            if (!NetworkManager.Instance.IsEstablished) return true;
-            if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (OrderHandler.ApplyingFromNetwork) return true;
-            if (Authority.IsAllowed) return true;
-
-            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
-            {
-                SourceEntityId = __instance.UniqueID,
-                Order = OrderType.TorpedoWireCut,
-            });
-            return false;
-        }
-    }
-
-    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeapon))]
-    public static class Patch_WeaponBase_RetargetWeapon
-    {
-        static bool Prefix(WeaponBase __instance, ObjectBase targetObject)
-        {
-            if (!NetworkManager.Instance.IsEstablished) return true;
-            if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (OrderHandler.ApplyingFromNetwork) return true;
-            if (Authority.IsAllowed) return true;
-
-            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
-            {
-                SourceEntityId = __instance.UniqueID,
-                Order = OrderType.TorpedoWireRetarget,
-                TargetEntityId = targetObject != null ? targetObject.UniqueID : 0,
-            });
-            return false;
-        }
-    }
-
-    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.RetargetWeaponToGeoPosition))]
-    public static class Patch_WeaponBase_RetargetWeaponToGeoPosition
-    {
-        static bool Prefix(WeaponBase __instance, GeoPosition targetGeoPosition)
-        {
-            if (!NetworkManager.Instance.IsEstablished) return true;
-            if (Plugin.Instance.CfgIsHost.Value) return true;
-            if (OrderHandler.ApplyingFromNetwork) return true;
-            if (Authority.IsAllowed) return true;
-
-            NetworkManager.Instance.SendToServer(new PlayerOrderMessage
-            {
-                SourceEntityId = __instance.UniqueID,
-                Order = OrderType.TorpedoWireRetargetGeo,
-                TargetX = (float)targetGeoPosition._longitude,
-                TargetY = (float)targetGeoPosition._height,
-                TargetZ = (float)targetGeoPosition._latitude,
-            });
-            return false;
-        }
-    }
 }

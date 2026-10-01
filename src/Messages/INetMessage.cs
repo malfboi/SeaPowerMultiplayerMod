@@ -41,6 +41,7 @@ namespace SeapowerMultiplayer.Messages
         PlayerRoster             = 37,  // host → clients: who is in the session, their team and slot
         UnitOwnership            = 38,  // host → clients: which player commands which units
         WeaponWireState          = 39,  // host → client: wire-guided torpedo state (aim point, target, wire status)
+        DoctrineSync             = 40,  // bidirectional: Standing Orders (TacticalDoctrine) root/formation/unit values
     }
 
     public interface INetMessage

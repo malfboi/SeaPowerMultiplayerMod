@@ -43,6 +43,7 @@ namespace SeapowerMultiplayer
             GameEventType.TaskforceAssigned => RelayAudience.None,
             GameEventType.MissionEnd        => RelayAudience.None,
             GameEventType.TimeVoteMode      => RelayAudience.None,
+            GameEventType.WeaponWireLost    => RelayAudience.None,
 
             _ => RelayAudience.None,
         };

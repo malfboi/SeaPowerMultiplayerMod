@@ -212,6 +212,7 @@ namespace SeapowerMultiplayer
                 // the deck-relative DeckState stream.
                 result._correctAltitudeOnSpawn = false;
                 DeckPuppetDriver.RegisterDeckSpawn(result, homeBase!);
+                LaunchWeaponState.StampOwnDeckReplica(result, homeBase!);
             }
             else
             {
@@ -298,14 +299,20 @@ namespace SeapowerMultiplayer
                 // consumed here, staying 1:1 with the host's launches).
                 var sys = FindChaffSystem(shooter, msg.AmmoName);
                 var attacher = sys != null && _chaffRef != null ? _chaffRef(sys) : null;
-                var clouds = attacher != null && _chaffCloudsRef != null ? _chaffCloudsRef(attacher) : null;
-                if (clouds == null || clouds.Count == 0) { Telemetry.Count("v2.decoyNoAttacher"); return; }
+                if (attacher == null) { Telemetry.Count("v2.decoyNoAttacher"); return; }
 
-                var cloud = clouds[0];
-                if (cloud.isLaunched()) { Telemetry.Count("v2.decoyAttacherStuck"); return; }
-
+                // Since 0.9 the attacher no longer pre-pools a list of clouds: it keeps a
+                // count of pending rounds and creates each cloud from the pool at launch.
+                // The host fired one, so make sure the local count can cover it (reload
+                // bookkeeping is suppressed client-side), then pick the new cloud up from
+                // the launchChaffEffect postfix - launchChaffCloud does not return it.
+                if (attacher.PendingRounds <= 0) attacher.AddChaffAmmo(1);
+                Patch_V2_ChaffLaunch_Capture.LastLaunched = null;
                 using (Authority.Allowed())
-                    attacher!.launchChaffCloud(); // launchChaffEffect + taskforce registration + SetActive
+                    attacher.launchChaffCloud(); // launchChaffEffect + taskforce registration + SetActive
+                var cloud = Patch_V2_ChaffLaunch_Capture.LastLaunched;
+                Patch_V2_ChaffLaunch_Capture.LastLaunched = null;
+                if (cloud == null) { Telemetry.Count("v2.decoyAttacherStuck"); return; }
 
                 // The host's launchChaff() decremented its loaded count before
                 // launching the cloud; mirror that here or the client's chaff
@@ -322,8 +329,6 @@ namespace SeapowerMultiplayer
 
         private static readonly AccessTools.FieldRef<WeaponSystemChaff, ChaffAttacher>? _chaffRef =
             AccessTools.FieldRefAccess<WeaponSystemChaff, ChaffAttacher>("_chaff");
-        private static readonly AccessTools.FieldRef<ChaffAttacher, List<ChaffCloud>>? _chaffCloudsRef =
-            AccessTools.FieldRefAccess<ChaffAttacher, List<ChaffCloud>>("_chaffClouds");
 
         private static WeaponSystemChaff? FindChaffSystem(ObjectBase shooter, string ammoName)
         {
@@ -474,6 +479,12 @@ namespace SeapowerMultiplayer
 
             // DevModeUtils.createAmmunitionObjectInstance recipe
             wb.init(shooter, Vector3.zero, ap);
+            // Weapon failures are rolled once per round, on first launch / first seeker
+            // activation (SeekerBase.setActive), and init() has just re-armed both rolls.
+            // The host already rolled them for the real round; a second roll here could
+            // only invent a malfunction alert and a lost connection the host never had.
+            wb._launchCheckDone = true;
+            wb._seekerCheckDone = true;
             wb.setSensorData(wb.getWeaponInstance()._sensorData);
             wb.setName(ap._displayedName);
             wb.setObjectIniName(ap._ammunitionFileName);
@@ -517,35 +528,17 @@ namespace SeapowerMultiplayer
                 {
                     // Real initializer: _launchTime, parent detach, _proximityRadius,
                     // taskforce/plotting registration, target._incomingWeapons (threat UI)
-                    // Resolve the shooter's WeaponSystem for this ammo - needed for
-                    // wire-guided torpedoes so the replica registers as on-wire.
-                    WeaponSystem? weaponSystem = null;
-                    if (shooter != null)
-                    {
-                        var systems = shooter.GetWeaponSystemsForAmmunition(msg.AmmoName, copyList: false);
-                        if (systems != null && systems.Count > 0)
-                            weaponSystem = systems[0];
-                    }
-                    wb.CommonLaunchSettings(target, aimUnity, weaponSystem, isSub);
+                    wb.CommonLaunchSettings(target, aimUnity, null, isSub);
 
-                    // For wire-guided torpedoes, set wire-state so the replica UI appears.
-                    // The replica is inert (KinematicWeapon) but needs to look like it's
-                    // on-wire so the player can issue wire commands to it.
-                    if (wb is Torpedo && weaponSystem != null)
+                    // The wire is decided against the launching weapon system, which this
+                    // launch does not have, so CommonLaunchSettings left the replica off the
+                    // wire and flagged it ConnectionLostForever - and the weapon panel then
+                    // offered none of the wire commands. Take the host's answer instead.
+                    if ((msg.Flags & EntitySpawnMessage.FlagOnWire) != 0)
                     {
-                        wb._launchPlatform = shooter;
-                        try
-                        {
-                            var onWireField = AccessTools.Field(typeof(WeaponBase), "_onWire");
-                            if (onWireField != null) onWireField.SetValue(wb, true);
-
-                            wb.ConnectionLost.Value = false;
-                            wb.ConnectionLostForever.Value = false;
-                        }
-                        catch (Exception ex)
-                        {
-                            Plugin.Log.LogWarning($"[SpawnReplicator] Failed to set wire-state on torpedo replica: {ex.Message}");
-                        }
+                        wb._onWire = true;
+                        wb.ConnectionLost.Value = false;
+                        wb.ConnectionLostForever.Value = false;
                     }
                 }
             }

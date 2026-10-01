@@ -34,7 +34,7 @@ namespace SeapowerMultiplayer
                 TargetEntityId  = unit.UniqueID,
                 CompartmentCount = (byte)count,
                 IsSinking       = comps._isSinking,
-                SinkElapsed     = comps._isSinking ? GameTime.time - comps._sinkTime : 0f,
+                SinkElapsed     = comps._isSinking ? (float)(GameTime.missionElapsedTime - comps._sinkTime) : 0f,
                 CapSized        = comps._capSized,
                 FloodingData    = new float[count * 2 * 4],
                 SystemData      = new float[count * 2],
@@ -126,7 +126,7 @@ namespace SeapowerMultiplayer
             // a dropped snapshot (this message is unreliable).
             if (comps._isSinking)
             {
-                comps._sinkTime = GameTime.time - msg.SinkElapsed;
+                comps._sinkTime = GameTime.missionElapsedTime - msg.SinkElapsed;
                 comps._capSized = msg.CapSized;
             }
 

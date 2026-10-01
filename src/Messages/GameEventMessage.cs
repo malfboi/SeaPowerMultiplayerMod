@@ -20,6 +20,9 @@ namespace SeapowerMultiplayer.Messages
         /// <summary>Client → host: "give this formation to that player".
         /// SourceEntityId = a unit of the formation, Param = target slot.</summary>
         AssignOwnership      = 13,
+        /// <summary>Host → client: a weapon's guidance wire parted (cut, broken, or
+        /// stolen for a newer launch). SourceEntityId = the weapon.</summary>
+        WeaponWireLost       = 14,
     }
 
     /// <summary>

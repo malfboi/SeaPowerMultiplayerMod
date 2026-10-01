@@ -314,7 +314,12 @@ namespace SeapowerMultiplayer.UI
             // hit, so this is true exactly when the cursor is on the panel or a
             // popup - no screen/DPI maths to get wrong. The root Grid has a null
             // background and does not hit-test, so empty space reads as false.
-            bool over = _view.Content?.IsMouseOver == true;
+            //
+            // Noesis stops feeding mouse moves to a view whose camera is not on the
+            // display under the cursor, so IsMouseOver goes stale once the cursor
+            // leaves for the detached 3D view / second-monitor map - which would keep
+            // the keyboard and the game's mouse handling held by an unseen panel.
+            bool over = !CursorOnOtherDisplay() && _view.Content?.IsMouseOver == true;
 
             // A drag follows the cursor off the panel, and the game must not
             // start panning the camera underneath it halfway through.
@@ -326,6 +331,15 @@ namespace SeapowerMultiplayer.UI
             // nothing on screen to explain it.
             SetTyping(over && _view.Content?.Keyboard?.FocusedElement is TextBox);
             SetKeyboard(over);
+        }
+
+        /// <summary>Same test the game's CameraManager uses for its detached world
+        /// view: RelativeMouseAt reports zero when multi-display is not in use.</summary>
+        private bool CursorOnOtherDisplay()
+        {
+            if (_camera == null || UnityEngine.Display.displays.Length < 2) return false;
+            UnityEngine.Vector3 p = UnityEngine.Display.RelativeMouseAt(Input.mousePosition);
+            return p != UnityEngine.Vector3.zero && (int)p.z != _camera.targetDisplay;
         }
 
         private void SetCapturing(bool on)
