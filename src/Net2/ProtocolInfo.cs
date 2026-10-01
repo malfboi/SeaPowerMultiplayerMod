@@ -44,7 +44,7 @@ namespace SeapowerMultiplayer.Net2
         // -Cut/-Retarget/-RetargetGeo (36-40) and a new WeaponWireState message (39)
         // carries the host's authoritative wire state back. A 235 peer has neither, so
         // a guest's torpedo would steer locally and never on the host.
-        public const ushort ProtocolVersion = 236;
+        public const ushort ProtocolVersion = 237;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

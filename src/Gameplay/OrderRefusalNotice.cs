@@ -60,12 +60,14 @@ namespace SeapowerMultiplayer
         /// <summary>Called when the ownership gate refuses an order. Safe to call every
         /// frame - a waypoint drag fires continuously, so the notice just keeps refreshing
         /// its own expiry and the log line is throttled. Refusals with no recent player
-        /// input are internal sim calls and are refused silently.</summary>
+        /// input are internal sim calls and are refused silently, as is anything on a
+        /// team other than the local player's.</summary>
         public static void Note(ObjectBase? unit)
         {
             if (_lastPointerInputTime < 0f
                 || UnityEngine.Time.unscaledTime - _lastPointerInputTime > InputRecencySec)
-                return;
+                return;            
+            if (!Teams.IsFriendly(unit)) return;
 
             LastRefusedUnitName  = unit == null ? "" : unit.Name?.Value ?? unit.name;
             LastRefusedOwnerName = FormationOwnership.OwnerName(unit);
