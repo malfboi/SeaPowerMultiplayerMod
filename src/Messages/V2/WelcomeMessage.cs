@@ -20,8 +20,7 @@ namespace SeapowerMultiplayer.Messages
         public byte   AssignedSlot;
         public int    ClientUidBase;           // this slot's private UID band start
         public byte   StateRateHz;
-        /// <summary>The host's Options → Gameplay settings, packed - the return half of
-        /// the Hello exchange. See <see cref="RemoteGameplayOptions"/>.</summary>
+        /// <summary>Reserved, always 0 - see HelloMessage.GameplayOptions.</summary>
         public byte   GameplayOptions;
         /// <summary>The host's enabled mod set - see <see cref="ModSetCheck"/>.</summary>
         public uint   ModFingerprint;

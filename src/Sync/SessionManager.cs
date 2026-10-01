@@ -805,6 +805,14 @@ namespace SeapowerMultiplayer
             {
                 patchedSave = SwapTaskforceSides(patchedSave, "save");
 
+                // Saves now carry [Mission] MissionStatus (LoadMetadata restores it),
+                // written from the host's side - its Victory is this guest's Defeat.
+                patchedSave = Regex.Replace(
+                    patchedSave,
+                    @"(?im)^(\s*MissionStatus\s*=\s*)(Victory|Defeat)\s*$",
+                    m => m.Groups[1].Value
+                         + (m.Groups[2].Value.Equals("Victory", System.StringComparison.OrdinalIgnoreCase) ? "Defeat" : "Victory"));
+
                 // Also swap in the mission file so BaseFile reads are consistent
                 if (!string.IsNullOrEmpty(msg.MissionFileContent) && File.Exists(missionPath))
                 {

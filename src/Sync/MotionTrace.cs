@@ -712,7 +712,7 @@ namespace SeapowerMultiplayer
             A(F(GameTime.deltaTime, 5));
             A(F(GameTime.TimeCompression, 2));
             A(D5(double.IsNaN(r.MissionSecOverrideD) ? MissionSeconds() : r.MissionSecOverrideD));
-            A(F(GameTime.time, 5));
+            A(D5(GameTime.missionElapsedTime));
 
             A(r.Id.ToString(CultureInfo.InvariantCulture));
             A(Csv(r.Name));

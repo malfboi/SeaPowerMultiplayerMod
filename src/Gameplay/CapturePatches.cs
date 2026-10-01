@@ -137,7 +137,8 @@ namespace SeapowerMultiplayer
                 AimLonDeg   = aim._longitude,
                 AimLatDeg   = aim._latitude,
                 AimHeightM  = (float)aim._height,
-                Flags       = isSubmunition ? EntitySpawnMessage.FlagSubmunition : (byte)0,
+                Flags       = (byte)((isSubmunition ? EntitySpawnMessage.FlagSubmunition : 0)
+                                     | (wb._onWire ? EntitySpawnMessage.FlagOnWire : 0)),
             };
         }
     }
@@ -223,8 +224,14 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(ChaffCloud), nameof(ChaffCloud.launchChaffEffect))]
     public static class Patch_V2_ChaffLaunch_Capture
     {
+        /// <summary>The cloud most recently launched on this machine. The client's
+        /// SpawnReplicator reads it straight after calling launchChaffCloud, which
+        /// creates the cloud internally and does not return it.</summary>
+        internal static ChaffCloud? LastLaunched;
+
         static void Postfix(ChaffCloud __instance)
         {
+            LastLaunched = __instance;
             if (!CaptureState.HostCaptureActive) return;
             if (__instance._ap == null) return;
 
@@ -347,6 +354,52 @@ namespace SeapowerMultiplayer
             => Patch_V2_WeaponDespawn_Capture.OnDestroyObject(__instance);
     }
 
+    /// <summary>Guidance wire parted → WeaponWireLost. The spawn carries the wire as
+    /// FlagOnWire, but after that the client has nothing that could break it: the
+    /// checks live in WeaponBase.OnUpdateEveryFrame (platform speed, torpedo speed,
+    /// seafloor drag, platform dead), which the replica never runs. Without this the
+    /// client kept showing Cut Wire and the wire controls for a round the host had
+    /// long since let go.
+    ///
+    /// Two hooks because the game has two ways to drop a wire: BreakWire (operator
+    /// cut, an RBU hit, a newer launch stealing the oldest wire) and the bare
+    /// <c>_onWire = false</c> writes inside OnUpdateEveryFrame. Both compare before and
+    /// after, so a call that found no wire sends nothing.</summary>
+    public static class WireStateCapture
+    {
+        internal static void OnWireMaybeLost(WeaponBase wb, bool wasOnWire)
+        {
+            if (!wasOnWire || wb._onWire) return;
+            if (!CaptureState.HostCaptureActive) return;
+            if (CaptureState.WeaponClassOf(wb) == null) return;
+
+            // A census replay must not hand the client a wire that is gone.
+            if (CaptureState.SpawnLedger.TryGetValue(wb.UniqueID, out var spawn))
+                spawn.Flags = (byte)(spawn.Flags & ~EntitySpawnMessage.FlagOnWire);
+
+            NetworkManager.Instance.BroadcastToClients(new GameEventMessage
+            {
+                EventType      = GameEventType.WeaponWireLost,
+                SourceEntityId = wb.UniqueID,
+            });
+            Telemetry.Count("v2.capturedWireLost");
+        }
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.BreakWire))]
+    public static class Patch_V2_BreakWire_Capture
+    {
+        static void Prefix(WeaponBase __instance, out bool __state) => __state = __instance._onWire;
+        static void Postfix(WeaponBase __instance, bool __state) => WireStateCapture.OnWireMaybeLost(__instance, __state);
+    }
+
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.OnUpdateEveryFrame))]
+    public static class Patch_V2_WireCheck_Capture
+    {
+        static void Prefix(WeaponBase __instance, out bool __state) => __state = __instance._onWire;
+        static void Postfix(WeaponBase __instance, bool __state) => WireStateCapture.OnWireMaybeLost(__instance, __state);
+    }
+
     /// <summary>Unit kills → reliable DestroyEvent (the state-stream flags are
     /// unreliable; this guarantees the client sees every kill).</summary>
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setDestroyedFlag))]
@@ -411,7 +464,7 @@ namespace SeapowerMultiplayer
                 TargetId         = gun._targetObject != null ? gun._targetObject.UniqueID : 0,
                 SolutionHeadingQ = GeoCodec.PackHeading(heading),
                 SolutionPitchQ   = GeoCodec.PackAngleCdeg(pitch),
-                ToTargetTime     = gun._projectileToTargetTime,
+                ToTargetTime     = (float)gun._projectileToTargetTime,
                 AimLatDeg        = gun._projectileAimGeoPosition._latitude,
                 AimLonDeg        = gun._projectileAimGeoPosition._longitude,
                 AimHeightM       = (float)gun._projectileAimGeoPosition._height,

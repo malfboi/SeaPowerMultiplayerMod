@@ -56,7 +56,7 @@ namespace SeapowerMultiplayer
         // A LaunchTask that has not changed state in this much SIM time is stalled.
         // Generous on purpose: engine warm-up plus FlightDeck._launchDelay plus a
         // deflector cycle is the longest legitimate single state, and it is nowhere
-        // near this. GameTime.time does not advance while paused.
+        // near this. GameTime.missionElapsedTime does not advance while paused.
         private const float StallSeconds = 90f;
 
         // Real-time cadence of the sweep. The sweep is a no-op on a healthy deck.
@@ -114,7 +114,7 @@ namespace SeapowerMultiplayer
             // HandleAwaitSpawnTask indefinitely by design (it is waiting for the player
             // to press LAUNCH), and a RecoveryTask's Approach is a holding stack.
             _stalled.Clear();
-            float nowSim = GameTime.time;
+            double nowSim = GameTime.missionElapsedTime;
             var tasks = fd.FlightDeckTasks;
             for (int i = 0; i < tasks.Count; i++)
             {
@@ -258,7 +258,7 @@ namespace SeapowerMultiplayer
         /// whether the ship is OnCourse (Spawn, Taxi and every TakeOff state hard-block
         /// on it, and it needs the heading within 2 degrees of the demanded course), and
         /// whether a launch point is obtainable at all.</summary>
-        private static void ReportStalls(FlightDeck fd, ObjectBase carrier, float nowSim, int purged)
+        private static void ReportStalls(FlightDeck fd, ObjectBase carrier, double nowSim, int purged)
         {
             int id = carrier.UniqueID;
             float now = Time.unscaledTime;
@@ -350,7 +350,7 @@ namespace SeapowerMultiplayer
     /// <summary>TaxiToLaunchPoint.TryGetLaunchPoint does:
     ///
     ///     _launchPoint = _elevator.getLaunchPoint(...);
-    ///     _launchPoint._lastAssigned = GameTime.time;   // throws when none was free
+    ///     _launchPoint._lastAssigned = GameTime.missionElapsedTime;   // throws when none was free
     ///     if (_launchPoint == null) return;             // dead code
     ///
     /// so it NREs whenever no launch point is obtainable - which is the normal state of a

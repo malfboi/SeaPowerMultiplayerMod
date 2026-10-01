@@ -669,7 +669,7 @@ namespace SeapowerMultiplayer
                         PluginVersion   = PluginInfo.PLUGIN_VERSION,
                         RequestedTeam   = (byte)requested,
                         GameVersion     = ProtocolInfo.GameVersion,
-                        GameplayOptions = RemoteGameplayOptions.PackLocal(),
+                        GameplayOptions = 0,   // reserved: superseded by DoctrineSync
                         ModFingerprint  = ModSetCheck.LocalFingerprint(),
                         ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
                         DisplayName     = LocalPersonaName(),
@@ -732,7 +732,6 @@ namespace SeapowerMultiplayer
                 FlightDeckStreamer.Reset();
                 FlightDeckStateApplier.Reset();
                 FlightDeckJamGuard.Reset();
-                RemoteGameplayOptions.Reset();
                 ViewportHintSender.Reset();
                 HostEntityStreamer.ClearAllViewportHints();
                 SpawnReplicator.Reset();
@@ -750,6 +749,7 @@ namespace SeapowerMultiplayer
                 ContactSyncManager.Reset();
                 ContactRevealManager.Reset();
                 DrawingSyncManager.Reset();
+                DoctrineSyncManager.Reset();
                 SensorStateManager.Reset();
                 JamStateManager.Reset();
                 UnitStatusManager.Reset();
@@ -1049,6 +1049,16 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.DoctrineSync:
+                {
+                    var msg = DoctrineSyncMessage.Deserialize(reader);
+                    byte slot = SlotOf(from);
+                    // Relayed after applying (DoctrineSyncManager), not here: the host
+                    // may answer an InitialRoot request instead of passing it on.
+                    _mainThreadQueue.Enqueue(() => DoctrineSyncManager.ApplyReceived(msg, slot));
+                    break;
+                }
+
                 case MessageType.SensorState:
                 {
                     var msg = SensorStateMessage.Deserialize(reader);
@@ -1230,17 +1240,6 @@ namespace SeapowerMultiplayer
             session.Slot = seated!.Slot;
             VersionMismatchNotice = null;
 
-            // Only after the refusal checks above: a client that is going to be turned
-            // away has no options worth adopting, and its byte may not even mean what
-            // this build thinks it does.
-            //
-            // FIRST established peer only. These are global gameplay settings, so with
-            // several guests the last one to join would silently overwrite everyone
-            // else's session.
-            if (_establishedCount == 0)
-                RemoteGameplayOptions.Apply(msg.GameplayOptions);
-            else if (msg.GameplayOptions != RemoteGameplayOptions.PackLocal())
-                Log.LogWarning($"[Handshake] {seated.DisplayName} has different gameplay options to the session — the session's own settings stand.");
             _establishedCount++;
 
             // UNICAST: slot, team and UID band are per-recipient and cannot ride a
@@ -1252,7 +1251,7 @@ namespace SeapowerMultiplayer
                 AssignedSlot    = seated.Slot,
                 ClientUidBase   = seated.UidBase,
                 StateRateHz     = 10,
-                GameplayOptions = RemoteGameplayOptions.PackLocal(),
+                GameplayOptions = 0,   // reserved: superseded by DoctrineSync
                 ModFingerprint  = ModSetCheck.LocalFingerprint(),
                 ModCount        = (byte)Mathf.Min(ModSetCheck.LocalMods().Count, 255),
                 DisableF10Menu  = Plugin.Instance.CfgDisableF10Menu.Value,
@@ -1320,7 +1319,6 @@ namespace SeapowerMultiplayer
             // arrive, which BlockedPreHandshake guarantees - because the save swap is
             // decided from it.
             PlayerRegistry.ApplyWelcome(msg);
-            RemoteGameplayOptions.Apply(msg.GameplayOptions);
 
             // See the host half in HandleHello - both ends warn, so whichever player is
             // looking at their own screen when things go strange has the explanation.

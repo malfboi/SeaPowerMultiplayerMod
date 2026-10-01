@@ -17,10 +17,10 @@ namespace SeapowerMultiplayer.Messages
         public byte   RequestedTeam;
         /// <summary>Sea Power build the client is running (added in protocol 221).</summary>
         public string GameVersion = "";
-        /// <summary>The sender's Options → Gameplay settings, packed - see
-        /// <see cref="RemoteGameplayOptions"/>. Here rather than in a stream because
-        /// they are per-machine facts about the PLAYER, which is exactly what the
-        /// handshake is for.</summary>
+        /// <summary>Reserved, always 0. Carried the sender's packed Options → Gameplay
+        /// winchester/auto-attack settings until the game moved them into Standing
+        /// Orders, which DoctrineSyncManager now keeps in step. Kept so the layout of
+        /// the fields after it does not move.</summary>
         public byte GameplayOptions;
         /// <summary>Fingerprint and size of the sender's enabled mod set - see
         /// <see cref="ModSetCheck"/>. A hash rather than the names because the handshake

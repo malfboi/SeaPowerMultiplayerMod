@@ -40,6 +40,7 @@ namespace SeapowerMultiplayer.Messages
         JamState                 = 36,  // host → client: offensive ECM jam assignments (who is jamming what)
         PlayerRoster             = 37,  // host → clients: who is in the session, their team and slot
         UnitOwnership            = 38,  // host → clients: which player commands which units
+        DoctrineSync             = 39,  // bidirectional: Standing Orders (TacticalDoctrine) root/formation/unit values
     }
 
     public interface INetMessage

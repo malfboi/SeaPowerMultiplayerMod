@@ -1,8 +1,55 @@
+using System.Collections.Generic;
+using System.Reflection;
 using HarmonyLib;
 using SeaPower;
+using SeapowerMultiplayer.Messages;
 
 namespace SeapowerMultiplayer
 {
+    /// <summary>
+    /// Manual drum/box reload - the reload icon on the Unit Status window's mount
+    /// ledger (Shift+Y, EngagementMountViewModel.ReloadCommand) and the weapons context
+    /// menu (ObjectEffectorsViewModel). A player-only action: nothing in the sim calls
+    /// ForceReload, so every call reaching here is a click and is forwarded through
+    /// OrderSyncHelper like any other order. WeaponSystemGun overrides it without
+    /// calling base, so both bodies are patched.
+    /// </summary>
+    [HarmonyPatch]
+    public static class Patch_WeaponSystem_ForceReload
+    {
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(WeaponSystem), nameof(WeaponSystem.ForceReload));
+            yield return AccessTools.Method(typeof(WeaponSystemGun), nameof(WeaponSystemGun.ForceReload));
+        }
+
+        private static PlayerOrderMessage? Msg(WeaponSystem ws)
+        {
+            var unit = ws._baseObject;
+            int index = unit?._obp?._weaponSystems?.IndexOf(ws) ?? -1;
+            if (unit == null || unit.UniqueID == 0 || index < 0) return null;
+            return new PlayerOrderMessage
+            {
+                SourceEntityId = unit.UniqueID,
+                Order          = OrderType.ForceReload,
+                Heading        = index,
+            };
+        }
+
+        static bool Prefix(WeaponSystem __instance, out PlayerOrderMessage? __state)
+        {
+            // CanForceReload is read BEFORE the call - the reload itself makes it false.
+            // A refused click is the game's own no-op and has nothing to relay.
+            __state = __instance.CanForceReload() ? Msg(__instance) : null;
+            return __state == null || OrderSyncHelper.Prefix(__instance._baseObject, __state);
+        }
+
+        static void Postfix(WeaponSystem __instance, PlayerOrderMessage? __state)
+        {
+            if (__state != null) OrderSyncHelper.Postfix(__instance._baseObject, __state);
+        }
+    }
+
     /// <summary>
     /// CLIENT-side: render the host's per-mount engagement into the weapons panel
     /// without touching the mount's simulation state.

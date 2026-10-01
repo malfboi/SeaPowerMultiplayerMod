@@ -420,6 +420,8 @@ namespace SeapowerMultiplayer
             // Collect ownerless flight-deck reservations behind a stalled launch, so a
             // vanilla deck jam does not end that carrier's air ops for the mission.
             FlightDeckJamGuard.Tick();
+            // Standing Orders: the sim reads them on the host, so every team's edits go there.
+            DoctrineSyncManager.Tick();
             // UnitLockManager's transient selection lock is gone; its refusal-notice
             // half lives on here under its own name.
             OrderRefusalNotice.SampleInput();

@@ -40,7 +40,10 @@ namespace SeapowerMultiplayer.Net2
         // slot a host may hand out did: a 4-slot build that pairs with an 8-slot host and
         // is seated at slot 4+ walks off the end of its own roster array, so the two must
         // not be allowed to meet.
-        public const ushort ProtocolVersion = 235;
+        // 236: the game update that introduced Standing Orders. DoctrineSync is new;
+        // Hello/Welcome's GameplayOptions byte is now reserved (always 0); new
+        // PlayerOrder types were appended for the update's new player controls.
+        public const ushort ProtocolVersion = 236;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

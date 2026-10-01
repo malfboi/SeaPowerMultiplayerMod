@@ -25,7 +25,7 @@ namespace SeapowerMultiplayer.Messages
         ReturnToBase    = 18,  // Aircraft/Helicopter RTB
         ClassifyContact = 19,  // Radar contact classification (hostile/friendly/neutral)
         ManualGunFire   = 20,  // v2: client gun trigger → host (Heading=mount idx, TargetX/Y/Z=solution dir, AmmoId)
-        LaunchAircraft  = 21,  // v2: client carrier launch intent → host (Speed=vehicle, Heading=loadout, DestX=squadron, DestY=callsign, DestZ=count, ShotsToFire=missionType, TargetEntityId=allowLaunch)
+        LaunchAircraft  = 21,  // v2: client carrier launch intent → host (Speed=vehicle, Heading=loadout, DestX=squadron, DestY=callsign, DestZ=count, ShotsToFire=missionType, TargetEntityId=allowLaunch, TargetX=launch WeaponStatus+1)
         LaunchChaff     = 22,  // v2: client manual chaff → host (clouds replicate back as decoys)
         AbortLaunch     = 23,  // v2: client aborts a pending carrier launch → host (AmmoId = task Guid string)
         LaunchNoisemaker = 24, // v2: client manual noisemaker (Shift+D) → host (decoy replicates back as a spawn)
@@ -41,6 +41,27 @@ namespace SeapowerMultiplayer.Messages
         AttackTarget    = 33,  // "attack that contact" designation (TargetEntityId, 0 = clear)
         DropFuelTanks   = 34,  // aircraft/helicopter fuel-tank jettison (Speed = combatDrop flag)
         JamSystem       = 35,  // offensive ECM jam order (TargetEntityId, or TargetX/Y/Z geo for a bearing jam)
+        WeaponCommand   = 36,  // in-flight weapon command (Source=launch platform, ShotsToFire=weapon id,
+                               // Heading=WeaponOp, Speed=arg, TargetEntityId / TargetX/Y/Z = retarget)
+        TorpedoLaunchSettings = 37, // per-ammo pre-launch settings (AmmoId=ammo; Speed=LaunchSeekerMode,
+                               // Heading=launch speed idx, DestX=SearchDepth, DestY=SearchMode; NaN = unset)
+        ForceReload     = 38,  // manual drum/box reload (Heading = mount index in _obp._weaponSystems)
+    }
+
+    /// <summary>
+    /// Sub-command for <see cref="OrderType.WeaponCommand"/>. A weapon is never the
+    /// SourceEntityId of an order (both ends refuse that as a misresolved id), so the
+    /// round is addressed through its launch platform, which is also what the
+    /// ownership gates are asked about: whoever commands the boat steers its wires.
+    /// </summary>
+    public enum WeaponOp
+    {
+        CutWire      = 0, // WeaponBase.CommandCutWire
+        SelfDestruct = 1, // WeaponBase.CommandSelfDestruct
+        WireSpeed    = 2, // Torpedo.SetWireSpeedSetting (Speed = setting index)
+        WireDepth    = 3, // Torpedo.OrderWireDepth      (Speed = depth in feet)
+        Retarget     = 4, // WeaponBase.RetargetWeapon   (TargetEntityId)
+        RetargetGeo  = 5, // WeaponBase.RetargetWeaponToGeoPosition (TargetX/Y/Z = lon/height/lat)
     }
 
     /// <summary>

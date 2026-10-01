@@ -431,6 +431,15 @@ namespace SeapowerMultiplayer
                                   $"{reason} (unit={unit.name})");
         }
 
+        /// <summary>The weapon menu's own write: create the per-ammo entry on first use,
+        /// otherwise set its Value so anything observing it (the menu's check marks)
+        /// sees the change.</summary>
+        private static void SetLaunchSetting<T>(Dictionary<string, UniRx.ReactiveProperty<T>> settings, string ammo, T value)
+        {
+            if (settings.TryGetValue(ammo, out var setting)) setting.Value = value;
+            else settings[ammo] = new UniRx.ReactiveProperty<T>(value);
+        }
+
         public static void Apply(PlayerOrderMessage msg)
         {
             if (SessionManager.SceneLoading || SimSyncManager.CurrentState != SimState.Synchronized) return;
@@ -549,6 +558,11 @@ namespace SeapowerMultiplayer
                         // Aircraft overrides too. (The old `is Vessel` cast silently
                         // dropped every submarine speed order.)
                         unit.setTelegraph((int)msg.Speed);
+                        // The aircraft speed presets mark the speed as the player's
+                        // (ObjectSpeed sets _speedSetByPlayer), which is what stops the
+                        // combat states overriding it (AllowCombatSpeedControl). That ran
+                        // in the sender's UI, not here.
+                        if (unit.IsAirUnit) unit._speedSetByPlayer = true;
                         break;
 
                     case Messages.OrderType.LaunchChaff:
@@ -577,6 +591,17 @@ namespace SeapowerMultiplayer
                         // this machine worked out for itself makes this a no-op.
                         unit.DropFueltanks(msg.Speed != 0f);
                         break;
+
+                    case Messages.OrderType.ForceReload:
+                    {
+                        // Self-guarding (CanForceReload), so a mount that cannot take
+                        // it here - already reloading, nothing spare - is a no-op.
+                        int mount = (int)msg.Heading;
+                        var mounts = unit._obp?._weaponSystems;
+                        if (mounts != null && mount >= 0 && mount < mounts.Count)
+                            mounts[mount].ForceReload();
+                        break;
+                    }
 
                     case Messages.OrderType.ManualGunFire:
                     {
@@ -631,6 +656,8 @@ namespace SeapowerMultiplayer
                             _launchCount = launchCount,
                             _missionType = (FlightDeckTask.MissionType)msg.ShotsToFire,
                         };
+                        // The sender's own "launch on Weapons X" option - see LaunchWeaponState.
+                        LaunchWeaponState.Request(ltp, msg.TargetX);
                         fd.createLaunchTask(vehicle, loadout, squadron, callsign, ltp, msg.TargetEntityId == 1);
                         Plugin.Log.LogInfo($"[Order] LaunchAircraft: carrier={unit.UniqueID} vehicle={vehicleIdx} count={launchCount}");
                         break;
@@ -738,6 +765,8 @@ namespace SeapowerMultiplayer
                     // through setTelegraph - it replaces the whole speed command.
                     case Messages.OrderType.SetSpeedCustom:
                         StateSerializer.ApplyCustomSpeed(unit, msg.Speed);
+                        // ObjectAirVehicleVelocity.CommitSliderValue's own flag - see SetSpeed.
+                        if (unit.IsAirUnit) unit._speedSetByPlayer = true;
                         if (unit is Submarine spdSub)
                             Patch_Submarine_SetTelegraph.NoteRemoteCustomSpeed(spdSub);
                         else if (unit is Vessel spdVessel)
@@ -1071,6 +1100,75 @@ namespace SeapowerMultiplayer
                             Plugin.Log.LogInfo($"[Order] Applied JamSystem for {unit?.name} " +
                                 $"(id={msg.SourceEntityId}): bearing {msg.TargetZ:F3},{msg.TargetX:F3}");
                         }
+                        break;
+                    }
+
+                    case Messages.OrderType.WeaponCommand:
+                    {
+                        // Host only: the round is the host's, and a teammate's copy
+                        // learns the outcome from the stream (and WeaponWireLost).
+                        if (!Plugin.Instance.CfgIsHost.Value) break;
+
+                        var op = (WeaponOp)(int)msg.Heading;
+                        // Addressed through its platform (see WeaponCommandSync) - the
+                        // ownership checks above were asked about that platform, so the
+                        // round has to actually be its.
+                        if (!(StateSerializer.FindById(msg.ShotsToFire) is WeaponBase cmdWeapon)
+                            || cmdWeapon.IsDestroyed
+                            || StateSerializer.GetLaunchPlatform(cmdWeapon) != unit)
+                        {
+                            LogRejectedOrder(msg, unit, $"{op}: weapon {msg.ShotsToFire} not found or not launched by this unit");
+                            break;
+                        }
+
+                        switch (op)
+                        {
+                            case WeaponOp.CutWire:      cmdWeapon.CommandCutWire(); break;
+                            case WeaponOp.SelfDestruct: cmdWeapon.CommandSelfDestruct(); break;
+                            case WeaponOp.WireSpeed:
+                                if (cmdWeapon is Torpedo speedTorp) speedTorp.SetWireSpeedSetting((int)msg.Speed);
+                                break;
+                            case WeaponOp.WireDepth:
+                                if (cmdWeapon is Torpedo depthTorp) depthTorp.OrderWireDepth(msg.Speed);
+                                break;
+                            case WeaponOp.Retarget:
+                            {
+                                var newTarget = StateSerializer.FindById(msg.TargetEntityId);
+                                if (newTarget != null) cmdWeapon.RetargetWeapon(newTarget);
+                                break;
+                            }
+                            case WeaponOp.RetargetGeo:
+                                // Geo on the wire unconverted, as JamSystem's bearing form.
+                                cmdWeapon.RetargetWeaponToGeoPosition(new GeoPosition
+                                {
+                                    _longitude = msg.TargetX,
+                                    _latitude  = msg.TargetZ,
+                                    _height    = msg.TargetY,
+                                });
+                                break;
+                        }
+                        Plugin.Log.LogInfo($"[Order] Applied WeaponCommand {op}: weapon={cmdWeapon.UniqueID} " +
+                            $"({cmdWeapon.name}) platform={unit.UniqueID} arg={msg.Speed} target={msg.TargetEntityId}");
+                        break;
+                    }
+
+                    case Messages.OrderType.TorpedoLaunchSettings:
+                    {
+                        // Read off the launching unit at launch (CommonLaunchSettings /
+                        // Torpedo.TorpedoLaunchSettings), so the dictionaries are all the
+                        // host needs. NaN = that setting was not part of this change.
+                        string ammo = msg.AmmoId;
+                        if (string.IsNullOrEmpty(ammo)) break;
+                        if (!float.IsNaN(msg.Speed))
+                            SetLaunchSetting(unit._launchSeekerModeSettings, ammo, (AmmunitionParameters.LaunchSeekerMode)(int)msg.Speed);
+                        if (!float.IsNaN(msg.Heading))
+                            SetLaunchSetting(unit._launchSpeedSettings, ammo, (int)msg.Heading);
+                        if (!float.IsNaN(msg.DestX))
+                            SetLaunchSetting(unit._searchDepthSettings, ammo, (AmmunitionParameters.SearchDepth)(int)msg.DestX);
+                        if (!float.IsNaN(msg.DestY))
+                            SetLaunchSetting(unit._searchModeSettings, ammo, (AmmunitionParameters.SearchMode)(int)msg.DestY);
+                        Plugin.Log.LogInfo($"[Order] Applied TorpedoLaunchSettings for {unit.name} (id={msg.SourceEntityId}) " +
+                            $"ammo={ammo}: seeker={msg.Speed} speed={msg.Heading} depth={msg.DestX} mode={msg.DestY}");
                         break;
                     }
 
@@ -1434,6 +1532,15 @@ namespace SeapowerMultiplayer
                 case GameEventType.TimeVoteMode:
                     if (!Plugin.Instance.CfgIsHost.Value)
                         TimeSyncManager.SetHostVoteMode(msg.Param == 1f);
+                    break;
+
+                case GameEventType.WeaponWireLost:
+                    // BreakWire, not CommandCutWire: the host already decided, and the
+                    // operator check in front of the cut is not this machine's to make.
+                    // Its ConnectionLost flags are what the weapon panel reads.
+                    if (!Plugin.Instance.CfgIsHost.Value
+                        && (ReplicaRegistry.Find(msg.SourceEntityId) ?? StateSerializer.FindById(msg.SourceEntityId)) is WeaponBase wiredWeapon)
+                        wiredWeapon.BreakWire();
                     break;
 
                 // RESERVED, not removed. The transient selection lock these drove is

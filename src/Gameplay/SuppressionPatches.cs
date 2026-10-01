@@ -114,6 +114,14 @@ namespace SeapowerMultiplayer
                         float gunsBonus, float gunsReduction,
                         float ciwsBonus, float ciwsReduction)? _interceptHandicap;
 
+        // Same handicap, countermeasure side: the difficulty setting now also scales the
+        // chaff spoof roll (SeekerBase.CheckCountermeasureLock) and the ECM jam roll
+        // (ECM.jamWeapon) - a reduction when the WEAPON is a player object, a bonus when
+        // the defender is - so on the host in PvP it lands on the host's side exactly
+        // as above. Kept separate so the log line above still reads the same.
+        private static (float chaffBonus, float chaffReduction,
+                        float ecmBonus, float ecmReduction)? _countermeasureHandicap;
+
         /// <summary>HOST-side PvP: turn off the difficulty handicap on interception
         /// rolls, which is keyed on IsPlayerObject and therefore lands entirely on the
         /// host's side of the table.
@@ -174,8 +182,37 @@ namespace SeapowerMultiplayer
                 Globals._gunsInterceptChanceReduction = 0f;
                 Globals._ciwsInterceptChanceBonus = 0f;
                 Globals._ciwsInterceptChanceReduction = 0f;
+
+                if (Globals._chaffSpoofChanceBonus != 0f || Globals._chaffSpoofChanceReduction != 0f
+                    || Globals._ecmJamChanceBonus != 0f || Globals._ecmJamChanceReduction != 0f)
+                {
+                    _countermeasureHandicap = (
+                        Globals._chaffSpoofChanceBonus, Globals._chaffSpoofChanceReduction,
+                        Globals._ecmJamChanceBonus, Globals._ecmJamChanceReduction);
+                    Plugin.Log.LogInfo("[Suppression] PvP countermeasure handicap cleared (chaff " +
+                        $"+{_countermeasureHandicap.Value.chaffBonus:0.##}/-{_countermeasureHandicap.Value.chaffReduction:0.##}, " +
+                        $"ECM +{_countermeasureHandicap.Value.ecmBonus:0.##}/-{_countermeasureHandicap.Value.ecmReduction:0.##})");
+                }
+
+                Globals._chaffSpoofChanceBonus = 0f;
+                Globals._chaffSpoofChanceReduction = 0f;
+                Globals._ecmJamChanceBonus = 0f;
+                Globals._ecmJamChanceReduction = 0f;
+                return;
             }
-            else if (_interceptHandicap.HasValue)
+
+            if (_countermeasureHandicap.HasValue)
+            {
+                var savedCm = _countermeasureHandicap.Value;
+                Globals._chaffSpoofChanceBonus = savedCm.chaffBonus;
+                Globals._chaffSpoofChanceReduction = savedCm.chaffReduction;
+                Globals._ecmJamChanceBonus = savedCm.ecmBonus;
+                Globals._ecmJamChanceReduction = savedCm.ecmReduction;
+                _countermeasureHandicap = null;
+                Plugin.Log.LogInfo("[Suppression] PvP countermeasure handicap restored");
+            }
+
+            if (_interceptHandicap.HasValue)
             {
                 var saved = _interceptHandicap.Value;
                 Globals._missileInterceptChanceBonus = saved.missileBonus;
@@ -475,6 +512,23 @@ namespace SeapowerMultiplayer
             !Suppression.HostSuppressesRemoteTfAi(__instance);
     }
 
+    /// <summary>The AI's torpedo-wire pilot, both directions.
+    ///
+    /// TorpedoWireController steers an AI boat's on-wire torpedoes once a second -
+    /// SetWireSpeedSetting, OrderWireDepth, dog-legs - and gates itself on
+    /// <c>!_submarine.IsPlayerObject</c>. HOST, PvP: the remote player's boat is not a
+    /// player object here, so the crew flew their wires for them and every speed or
+    /// depth they sent (OrderType.WeaponCommand) was overwritten within the second.
+    /// Parity, like the wire limits above.
+    ///
+    /// CLIENT: it is AI, and its torpedoes are replicas the host flies.</summary>
+    [HarmonyPatch(typeof(TorpedoWireController), nameof(TorpedoWireController.OnFixedUpdate))]
+    public static class Patch_V2_TorpedoWireController_Suppress
+    {
+        static bool Prefix(Submarine ____submarine) =>
+            !Suppression.ClientActive && !Suppression.HostSuppressesRemoteTfAi(____submarine);
+    }
+
     /// <summary>HOST-side PvP: give the remote player's aircraft the answer their owner
     /// gets. CanUseAIStates reads <c>IsPlayerObject ? Globals.useExperimentalAircraftAI
     /// : true</c>, and it is the sole gate on the two AirborneEarlyWarningLine
@@ -488,6 +542,23 @@ namespace SeapowerMultiplayer
             if (!__result) return;
             if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
             __result = Globals.useExperimentalAircraftAI;
+        }
+    }
+
+    /// <summary>HOST-side PvP: AllowCombatSpeedControl is <c>!(IsPlayerObject &amp;&amp;
+    /// _speedSetByPlayer)</c> - the guard that stops the aircraft combat states
+    /// re-telegraphing a speed the player chose. The remote player's aircraft are not
+    /// player objects here, so it was always true for them and their chosen speed was
+    /// overwritten on the first intercept. (_speedSetByPlayer itself is stamped when
+    /// the speed order is applied - see OrderHandler SetSpeed / SetSpeedCustom.)</summary>
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.AllowCombatSpeedControl), MethodType.Getter)]
+    public static class Patch_V2_RemoteTf_CombatSpeedControl
+    {
+        static void Postfix(ObjectBase __instance, ref bool __result)
+        {
+            if (!__result || !__instance._speedSetByPlayer) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
+            __result = false;
         }
     }
 
@@ -655,18 +726,57 @@ namespace SeapowerMultiplayer
             if (sub == null) return;
 
             var inner = predicate;
-            predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(sub);
+            // The movement cluster is no longer AI-only: the Sprint-and-Drift standing
+            // order lets a player's own boat through the same door (Submarine.cs:171,
+            // "|| SprintAndDriftDoctrine.Value"). Parity is the player's answer, so the
+            // remote boat may enter exactly when its owner has ordered it.
+            if (to is SubmarineStates.SelectMovementType)
+                predicate = () => inner() && (!Suppression.HostSuppressesRemoteTfAi(sub) || sub.SprintAndDriftDoctrine.Value);
+            else
+                predicate = () => inner() && !Suppression.HostSuppressesRemoteTfAi(sub);
         }
 
         internal static void ForceEscape(IState? from, IState? to, ref System.Func<bool> predicate)
         {
-            if (predicate == null || from == null || !(to is SubmarineStates.Default)) return;
+            if (predicate == null || from == null || to == null) return;
+
+            // The Baffle-Clearing standing order's door (Submarine.cs:172) is gated on
+            // IsPlayerObject being TRUE, so the remote boat would never get it. Open it
+            // with the player's own condition.
+            if (from is SubmarineStates.Default && to is SubmarineStates.ClearBafflesTurningBack)
+            {
+                var owner = OwnerOf(to);
+                if (owner == null) return;
+                var innerDoor = predicate;
+                predicate = () => innerDoor() || (Suppression.HostSuppressesRemoteTfAi(owner)
+                    && owner.BafflesClearingDoctrine.Value
+                    && owner.CourseCommand.Value == null && owner.CommandPosition is GeoPosition
+                    && GameTime.missionElapsedTime - owner._lastBafflesClearingTime > Submarine.BafflesClearingDoctrineInterval);
+                return;
+            }
+
+            if (!(to is SubmarineStates.Default)) return;
             if (!MovementCluster.Contains(from.GetType())) return;
             var sub = OwnerOf(from);
             if (sub == null) return;
 
+            // The escapes (:188, :192-196) are the player's own exits, now doctrine-aware:
+            // a boat on Sprint-and-Drift / Baffle-Clearing orders stays in the cycle.
+            // Same condition for every registration on a pair - the game's own ordering
+            // still picks which one fires.
             var inner = predicate;
-            predicate = () => inner() || Suppression.HostSuppressesRemoteTfAi(sub);
+            predicate = () => inner() || (Suppression.HostSuppressesRemoteTfAi(sub) && PlayerEscapes(from, sub));
+        }
+
+        private static bool PlayerEscapes(IState from, Submarine sub)
+        {
+            bool sprintDoctrine = sub.SprintAndDriftDoctrine.Value;
+            bool bafflesDoctrine = sub.BafflesClearingDoctrine.Value;
+            if (from is SubmarineStates.ClearBafflesListening cbl)
+                return !sprintDoctrine && (!bafflesDoctrine || cbl.IsFinished);
+            if (from is SubmarineStates.ClearBafflesTurningBack)
+                return !sprintDoctrine && !bafflesDoctrine;
+            return !sprintDoctrine;
         }
     }
 
@@ -784,6 +894,70 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>The Sprint-and-Drift / Baffle-Clearing standing orders put a PLAYER's
+    /// own ship or boat through the same speed/depth cycle the AI uses (Vessel.cs:137-142,
+    /// Submarine.cs:171-196), and those states issue setTelegraph / setPresetDepth from
+    /// inside the unit's state machine. Both machines run the cycle off the same
+    /// doctrine, so these are derived like FormationInternal - executed, never sent:
+    /// on a guest they would otherwise travel upstream as player speed/depth orders on
+    /// every leg, and on the host the remote-player telegraph/depth locks would refuse
+    /// them and the doctrine would do nothing for the remote player.
+    ///
+    /// "Inside a state-machine tick" is what tells them apart from the player's own
+    /// clicks on the same unit, which arrive from the UI. Frame-scoped like
+    /// FormationUpdate, so a missed Exit costs at most the rest of one frame.</summary>
+    internal static class DoctrineCycle
+    {
+        private static int _depth;
+        private static int _frame = -1;
+
+        private static readonly HashSet<System.Type> CycleStates = new()
+        {
+            typeof(SubmarineStates.SelectMovementType),
+            typeof(SubmarineStates.Sprint),
+            typeof(SubmarineStates.Drift),
+            typeof(SubmarineStates.ClearBafflesTurningBack),
+            typeof(SubmarineStates.ClearBafflesListening),
+            typeof(SubmarineStates.GoingToPeriscopeDepth),
+            typeof(VesselStates.SelectMovementType),
+            typeof(VesselStates.Sprint),
+            typeof(VesselStates.Drift),
+        };
+
+        internal static void Enter()
+        {
+            if (_frame != Time.frameCount) { _frame = Time.frameCount; _depth = 0; }
+            _depth++;
+        }
+
+        internal static void Exit() { if (_depth > 0) _depth--; }
+
+        internal static bool Drives(ObjectBase? unit)
+        {
+            if (_depth <= 0 || _frame != Time.frameCount || unit == null) return false;
+            if (!unit.SprintAndDriftDoctrine.Value && !unit.BafflesClearingDoctrine.Value) return false;
+            var state = unit.StateMachine?.CurrentState;
+            return state != null && CycleStates.Contains(state.GetType());
+        }
+    }
+
+    /// <summary>Prefix/Postfix, not a Finalizer, for the reason Patch_UnitFormation_OnUpdate
+    /// gives: this wraps every unit's state machine, and the frame scope already makes a
+    /// missed Exit self-correcting.</summary>
+    [HarmonyPatch(typeof(StateMachine), nameof(StateMachine.OnFixedUpdate))]
+    public static class Patch_StateMachine_OnFixedUpdate_DoctrineScope
+    {
+        static void Prefix()  => DoctrineCycle.Enter();
+        static void Postfix() => DoctrineCycle.Exit();
+    }
+
+    [HarmonyPatch(typeof(StateMachine), nameof(StateMachine.OnUpdate))]
+    public static class Patch_StateMachine_OnUpdate_DoctrineScope
+    {
+        static void Prefix()  => DoctrineCycle.Enter();
+        static void Postfix() => DoctrineCycle.Exit();
+    }
+
     /// <summary>Mission-level AI (behaviour-tree pump: scripted spawns, third-party
     /// taskforce orders, airstrike scheduling) - host-only.</summary>
     [HarmonyPatch(typeof(AIController), nameof(AIController.OnUpdate))]
@@ -887,6 +1061,64 @@ namespace SeapowerMultiplayer
         }
     }
 
+    /// <summary>HOST-side PvP: Force EMCON is an AI-side mission flag. The editor writes
+    /// <c>ExcludeFromAIRadarRoutine</c> only for non-player-side units, and
+    /// SetAdditionalParameters ends with <c>if (!IsPlayerObject &amp;&amp;
+    /// _excludeFromAIRadarRoutine) setEMCON(true)</c> - so on the host the remote
+    /// player's fleet spawned dark, and the flag kept vetoing the automatic search-radar
+    /// activation for engagements (AI.CanAutomaticallyBreakForcedEmcon) that a player's
+    /// own ships get. On its owner's machine the fleet is the player side and neither
+    /// happens. Clearing the shared data before the method copies it onto the AI stops
+    /// both, and the save then carries the cleared flag to the guest.
+    /// Gated on RemotePlayerFleet: this runs during the mission load.</summary>
+    [HarmonyPatch(typeof(SceneCreator), "SetAdditionalParameters")]
+    public static class Patch_V2_RemoteTf_SpawnForceEmcon
+    {
+        static void Prefix(ObjectBase unit, SharedUnitData unitData)
+        {
+            if (unitData == null || !unitData._excludeFromAIRadarRoutine) return;
+            if (!Suppression.RemotePlayerFleet(unit)) return;
+
+            unitData._excludeFromAIRadarRoutine = false;
+            Plugin.Log.LogInfo($"[Suppression] Remote fleet: {unit.getUIDAndName()} spawn Force EMCON " +
+                               "dropped (AI-side mission flag)");
+        }
+    }
+
+    /// <summary>The same flag from a mission trigger's "Force EMCON" action. The game
+    /// skips IsPlayerObject units, which on the host misses the remote player's fleet
+    /// (and on a guest misses nothing human but its own) - so a scripted trigger could
+    /// switch a human player's radars off mid-battle and lock them out of automatic
+    /// activation. The action is applied here instead, with every human-commanded
+    /// fleet skipped, and the original sees NoChange; the field is restored afterwards
+    /// so the trigger still saves as authored.</summary>
+    [HarmonyPatch(typeof(Trigger), nameof(Trigger.ActionTrigger))]
+    public static class Patch_V2_RemoteTf_TriggerForceEmcon
+    {
+        static void Prefix(Trigger __instance, out ForceEmconAction __state)
+        {
+            __state = __instance._actionForceEmcon;
+            if (__state == ForceEmconAction.NoChange) return;
+            if (!NetworkManager.Instance.IsEstablished && !NetworkManager.Instance.IsHostRunning) return;
+
+            bool force = __state == ForceEmconAction.Force;
+            foreach (var unit in __instance._actionUnits)
+            {
+                if (unit == null || unit.IsDestroyed || unit.IsPlayerObject || unit._ai == null) continue;
+                if (unit._taskforce != Globals._playerTaskforce && Teams.IsHumanControlled(unit)) continue;
+
+                unit._ai._excludeFromAIRadarRoutine = force;
+                unit.setEMCON(force);
+            }
+            __instance._actionForceEmcon = ForceEmconAction.NoChange;
+        }
+
+        static void Postfix(Trigger __instance, ForceEmconAction __state)
+        {
+            __instance._actionForceEmcon = __state;
+        }
+    }
+
     /// <summary>The same stamp, per launch: FlightDeck.launchVehicle writes Free into
     /// every aircraft it puts up under <c>if (!_baseObject.IsPlayerObject)</c>. A
     /// player's own deck launches tight; the deck this trips on is the other player's
@@ -895,7 +1127,11 @@ namespace SeapowerMultiplayer
     /// Tight rather than a recomputed value - a carrier-launched aircraft has no ini
     /// section of its own to read a status from, and tight is where a player's own
     /// launches start. If its owner wants them free they say so, and the SetWeaponStatus
-    /// relay carries that across.</summary>
+    /// relay carries that across.
+    ///
+    /// Only a fallback now: a launch the owner ordered carries their "launch on
+    /// Weapons X" option, which Patch_FlightDeck_LaunchVehicle_RequestedWeaponStatus
+    /// writes after this.</summary>
     [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.launchVehicle))]
     public static class Patch_V2_RemoteTf_LaunchWeaponStatus
     {
@@ -906,6 +1142,73 @@ namespace SeapowerMultiplayer
             if (__result._weaponStatus == ObjectBase.WeaponStatus.Tight) return;
 
             __result._weaponStatus = ObjectBase.WeaponStatus.Tight;
+        }
+    }
+
+    /// <summary>HOST-side PvP: an aircraft heading home off the deck's ReturnToBase state
+    /// (flight-deck recovery, not AircraftStates) is stamped
+    /// <c>IsPlayerObject ? Hold : Tight</c> - player aircraft now return on Weapons Hold.
+    /// The host's copy of the remote player's aircraft took the AI branch. Hold is what
+    /// its owner's machine would have set.</summary>
+    [HarmonyPatch(typeof(SeaPower.ReturnToBase), nameof(SeaPower.ReturnToBase.onEnter))]
+    public static class Patch_V2_RemoteTf_RecoveryWeaponStatus
+    {
+        static void Postfix(ObjectBase ____objectToReturn)
+        {
+            if (____objectToReturn == null) return;
+            if (!Suppression.HostSuppressesRemoteTfAi(____objectToReturn)) return;
+            ____objectToReturn._weaponStatus = ObjectBase.WeaponStatus.Hold;
+        }
+    }
+
+    /// <summary>HOST-side PvP: at bingo fuel a player's aircraft now diverts to the
+    /// nearest compatible tanker of its own taskforce before falling back to RTB -
+    /// Aircraft.TryStartEmergencyRefuel, which opens with
+    /// <c>if (!IsPlayerObject || _taskforce == null) return false;</c>. On the host the
+    /// remote player's aircraft therefore always went straight home. This runs the
+    /// player branch for them, through the game's own tanker test.
+    ///
+    /// KNOWN LIMIT: Order.Type.Refuel, issued by a formation leader, only takes wingmen
+    /// that AcceptsOrdersFromPlayer, which the remote side's are not here - such a flight
+    /// gets no refuel task, the call reports false, and it RTBs as before.</summary>
+    [HarmonyPatch(typeof(Aircraft), "TryStartEmergencyRefuel")]
+    public static class Patch_V2_RemoteTf_EmergencyRefuelParity
+    {
+        private static readonly MethodInfo? _canReach =
+            AccessTools.Method(typeof(Aircraft), "CanReachEmergencyRefuelTanker");
+
+        static bool Prefix(Aircraft __instance, ref bool __result)
+        {
+            if (_canReach == null) return true;
+            if (__instance._taskforce == null) return true;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return true;
+
+            var order = __instance.CurrentOrder.Value;
+            if (order?.OrderType == Order.Type.Refuel
+                && order.TargetUnit is Aircraft ordered
+                && __instance._userRoot?.GetRefuelTask(ordered) != null)
+            {
+                __result = true;
+                return false;
+            }
+
+            Aircraft? nearest = null;
+            float nearestSq = float.MaxValue;
+            foreach (ObjectBase unit in __instance._taskforce._taskforceAircraft)
+            {
+                var tanker = unit as Aircraft;
+                if (!(bool)_canReach.Invoke(__instance, new object?[] { tanker })) continue;
+                float sq = (tanker!.transform.position - __instance.transform.position).sqrMagnitude;
+                if (sq >= nearestSq) continue;
+                nearestSq = sq;
+                nearest = tanker;
+            }
+
+            if (nearest == null) { __result = false; return false; }
+
+            __instance.setOrder(Order.Type.Refuel, nearest, true);
+            __result = __instance._userRoot?.GetRefuelTask(nearest) != null;
+            return false;
         }
     }
 
@@ -1169,6 +1472,24 @@ namespace SeapowerMultiplayer
         static bool Prefix() => !Suppression.ClientActive;
     }
 
+    /// <summary>The ballistics overhaul moved the CIWS hit roll out of the intercept
+    /// and into a per-tick resolver: while a mount is firing (and for one flight time
+    /// after), WeaponSystemCIWS.OnFixedUpdate calls ResolveFireTick, which samples hits
+    /// off Globals._rnd and writes the result onto the TARGET - _ciwsDamageTaken and
+    /// the other tallies, the wounded-missile fire trail (UpdateCiwsDamageState), the
+    /// shot-up aircraft smoke (UpdateGunDamageState) and the hit puffs. The client's
+    /// mounts fire too, replaying the host's bursts, so each machine rolled its own
+    /// outcome: the client's replica could burn while the host's flew on untouched,
+    /// and only the final InterceptAirTarget was being refused above. The host's roll
+    /// is the one that happened; its kill arrives as a despawn.</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_CIWS_ResolveFireTick_Suppress
+    {
+        static System.Reflection.MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(WeaponSystemCIWS), "ResolveFireTick");
+        static bool Prefix() => !Suppression.ClientActive;
+    }
+
     /// <summary>No client auto-chaff decisions (clouds replicate in P5; the
     /// defence-flag switch already gates most of this - belt and braces).</summary>
     [HarmonyPatch]
@@ -1192,6 +1513,29 @@ namespace SeapowerMultiplayer
             if (Authority.IsAllowed) return true;
             if (ReplicaRegistry.PolicyOf(__instance) != ReplicaPolicy.KinematicWeapon) return true;
             Telemetry.Count("v2.blockedLocalDestroy");
+            return false;
+        }
+    }
+
+    /// <summary>The other way a replica gets killed locally. Gun shells the client
+    /// replays from the host's bursts are real Projectiles, and Projectile
+    /// .ProcessCollision now runs the same fragment-damage model against weapons that
+    /// CIWS uses - its own Utils.RandomFloatAdv rolls - and on a kill calls
+    /// notifyOfExternalDestruction directly, not through Blastzone. That latches
+    /// _externalDestructionNotified on the replica: its threat entry, CIWS targeting and
+    /// the defeated-shot checks all treat it as dead while the host's round flies on.
+    /// Network kills never come this way (DestroyFromNetwork skips weapons), so a
+    /// replica refuses it outright.</summary>
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.notifyOfExternalDestruction))]
+    public static class Patch_V2_WeaponExternalDestruction_Guard
+    {
+        static bool Prefix(ObjectBase __instance)
+        {
+            if (!Suppression.ClientActive) return true;
+            if (Authority.IsAllowed) return true;
+            if (!(__instance is WeaponBase wb)) return true;
+            if (ReplicaRegistry.PolicyOf(wb) != ReplicaPolicy.KinematicWeapon) return true;
+            Telemetry.Count("v2.blockedLocalExternalDestruction");
             return false;
         }
     }
@@ -1268,7 +1612,18 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(CivilianRoute), nameof(CivilianRoute.OnUpdate))]
     public static class Patch_V2_CivilianRoute_Suppress
     {
-        static bool Prefix() => !Suppression.ClientActive;
+        // Host: a route can now launch from a client's deck (Mission Editor Air
+        // Operations) - run it under Authority, see Patch_PatrolZone_HostAuthority.
+        static bool Prefix(out System.IDisposable? __state)
+        {
+            __state = null;
+            if (Suppression.ClientActive) return false;
+            if (Plugin.Instance.CfgIsHost.Value && NetworkManager.Instance.IsEstablished)
+                __state = Authority.Allowed();
+            return true;
+        }
+
+        static void Finalizer(System.IDisposable? __state) => __state?.Dispose();
     }
 
     /// <summary>The client never creates units on its own - aircraft arrive as
@@ -1544,18 +1899,21 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>HOST-side PvP: give the remote player's aircraft the winchester rules
-    /// THEIR player set, not this machine's.
+    /// THEIR standing orders set, as their own machine would apply them.
     ///
-    /// Every player option inside CheckWinchester is an escape hatch - each one is a
-    /// <c>return false</c> that keeps the aircraft airborne - and all of them sit behind
-    /// <c>IsPlayerObject</c>, which is false for the remote fleet on the machine that
-    /// simulates it. So their aircraft skipped every exit their owner had chosen and
-    /// went home the moment the stock rules said winchester.
+    /// Since Standing Orders the rules live in the unit's TacticalDoctrine, and
+    /// DoctrineSyncManager keeps this machine's copy of the remote fleet's doctrine
+    /// equal to its owner's - so the values are right here. What is still wrong is
+    /// that most of the exits inside CheckWinchester are each a <c>return false</c>
+    /// ("stay airborne") behind <c>IsPlayerObject</c>, which is false for the remote
+    /// fleet on the machine that simulates it. Their aircraft skipped every exit their
+    /// owner had chosen and went home the moment the stock rules said winchester.
+    /// (The PlanesWinchester/HelicoptersWinchester master switches are NOT gated and
+    /// need nothing.)
     ///
     /// A postfix is enough precisely because of that shape: it runs only when the
     /// engine has already said "winchester", and can only take it back. It can never
-    /// send an aircraft home that the engine was going to keep flying, whatever the
-    /// remote options say or fail to say.
+    /// send an aircraft home that the engine was going to keep flying.
     ///
     /// This is the GATE. Patch_V2_RemoteTf_WinchesterStamp is the other half and stays:
     /// it deals with what happens once the state is legitimately entered (stop
@@ -1567,124 +1925,179 @@ namespace SeapowerMultiplayer
         static void Postfix(Aircraft __instance, ref bool __result)
         {
             if (!__result) return;                       // only ever turns it OFF
-            if (!RemoteGameplayOptions.Known) return;    // pre-handshake: engine stands
             if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
 
             if (StaysAirborne(__instance)) __result = false;
         }
 
-        /// <summary>The exits Aircraft.CheckWinchester would have taken had this been
-        /// the owner's own machine, in the engine's own order and with the engine's own
-        /// conditions - only the option VALUES come from the other player.</summary>
+        /// <summary>The IsPlayerObject-gated exits of Aircraft.CheckWinchester, in the
+        /// engine's own branch order and with the engine's own conditions. Branch
+        /// membership is by INITIAL loadout, so this lands in the same branch whose
+        /// final <c>return true</c> the engine just took.</summary>
         private static bool StaysAirborne(Aircraft a)
         {
-            if (!RemoteGameplayOptions.PlanesWinchester) return true;
-
+            var d = a.TacticalDoctrine;
+            if (d == null) return false;
             var initial = a._initialLoadoutCapabilities;
             var current = a._currentLoadoutCapabilities;
             bool fighter = a.Ap != null
                         && a.Ap._unitRoles.Contains(ObjectBaseParameters.UnitRoles.Fighter);
+            bool aamAndGun = d.FighterRtbCondition.ResolvedValue == TacticalDoctrine.RtbCondition.AllAamAndGunExpended;
+            bool aamOnly   = d.FighterRtbCondition.ResolvedValue == TacticalDoctrine.RtbCondition.AllAamExpended;
 
-            // Strike and ASW share one set of exits; the engine reaches them through
-            // different outer branches but applies the same three tests.
+            // Strike and ASW share the fighter/bomber exits; ASW adds the sonobuoy one.
             if (initial.CanStrike || initial._hasASWTorpedoes)
             {
-                if (initial._hasASWTorpedoes
-                    && RemoteGameplayOptions.ASWBombersStaysWithSonobuoys
+                if (!initial.CanStrike && d.ASWBombersStaysWithSonobuoys.ResolvedValue
                     && current._hasSonobuoys) return true;
 
                 if (fighter)
                 {
-                    if (RemoteGameplayOptions.FighterBombersStaysWithAAM && current.HasAAM) return true;
-                    if (RemoteGameplayOptions.SRFightersStaysWithGuns
+                    if (aamAndGun && (current.HasAAM || current._hasGun)) return true;
+                    if (d.FighterBombersStaysWithAAM.ResolvedValue && current.HasAAM) return true;
+                    if (d.SRFightersStaysWithGuns.ResolvedValue
                         && !initial.HasMLRAAM && current._hasGun) return true;
                 }
-                else if (RemoteGameplayOptions.BombersStaysWithAAM && current.HasAAM) return true;
+                else if (d.BombersStaysWithAAM.ResolvedValue && current.HasAAM) return true;
 
                 return false;
             }
 
             if (initial.HasMLRAAM)
-                return RemoteGameplayOptions.InterceptorsStaysWithAAM && current.HasAAM;
+                return (aamAndGun && (current.HasAAM || current._hasGun))
+                    || (aamOnly && current.HasAAM);
+
+            if (initial.HasAAM)
+                return (aamAndGun && current._hasGun)
+                    || (d.SRFightersStaysWithGuns.ResolvedValue && current._hasGun);
 
             return false;
         }
     }
 
-    /// <summary>The helicopter half. HelicopterStates' CheckWinchester carries exactly
-    /// one player-gated exit - the sonobuoy one - and no _playerPlanesWinchester test at
-    /// all, so this is the whole of it.</summary>
+    /// <summary>The helicopter half. Helicopter.CheckWinchester has no player exits in
+    /// its strike branch; the ASW, interceptor and fighter branches mirror the
+    /// aircraft ones above.</summary>
     [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.CheckWinchester))]
     public static class Patch_V2_RemoteTf_WinchesterParity_Helo
     {
         static void Postfix(Helicopter __instance, ref bool __result)
         {
             if (!__result) return;
-            if (!RemoteGameplayOptions.Known) return;
-            if (!RemoteGameplayOptions.ASWBombersStaysWithSonobuoys) return;
             if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return;
 
-            if (__instance._initialLoadoutCapabilities._hasASWTorpedoes
-                && __instance._currentLoadoutCapabilities._hasSonobuoys)
-                __result = false;
+            var d = __instance.TacticalDoctrine;
+            if (d == null) return;
+            var initial = __instance._initialLoadoutCapabilities;
+            var current = __instance._currentLoadoutCapabilities;
+            bool aamAndGun = d.FighterRtbCondition.ResolvedValue == TacticalDoctrine.RtbCondition.AllAamAndGunExpended;
+            bool aamOnly   = d.FighterRtbCondition.ResolvedValue == TacticalDoctrine.RtbCondition.AllAamExpended;
+
+            bool stay;
+            if (initial.CanStrike) stay = false;
+            else if (initial._hasASWTorpedoes)
+                stay = d.ASWBombersStaysWithSonobuoys.ResolvedValue && current._hasSonobuoys;
+            else if (initial.HasMLRAAM)
+                stay = (aamAndGun && (current.HasAAM || current._hasGun)) || (aamOnly && current.HasAAM);
+            else if (initial.HasAAM)
+                stay = (aamAndGun && current._hasGun) || (d.SRFightersStaysWithGuns.ResolvedValue && current._hasGun);
+            else stay = false;
+
+            if (stay) __result = false;
         }
     }
 
-    /// <summary>HOST-side PvP: the other half of the same item - Options → Gameplay's
-    /// PlayerAutoAttackSurface, read once, in AI.GetPossibleTargetsList.
+    /// <summary>HOST-side PvP: the standing orders AI reads only for a PLAYER's ships
+    /// and fighters - "ships use SAMs / anti-ship missiles against surface targets",
+    /// "ships on weapons tight engage hostile aircraft", "fighters do not engage
+    /// anti-ship missiles". Each helper starts from the doctrine value (synced from
+    /// the owner by DoctrineSyncManager) and then bails on <c>!IsPlayerObject</c>,
+    /// which is false for the remote fleet here - so that fleet fought by AI rules
+    /// whatever its owner ordered.
     ///
-    /// The stock test excludes a surface contact when
-    /// <c>!PlayerAutoAttackSurface &amp;&amp; IsPlayerObject &amp;&amp; !(is LandUnit) &amp;&amp;
-    /// !target.IsAirUnit</c> (AI.cs:3809). IsPlayerObject is false for the remote fleet,
-    /// so with the option OFF a player's own ships hold fire at weapons free while the
-    /// other player's - simulated here - open up regardless.
-    ///
-    /// Same escape-hatch shape as the winchester gate, so the same postfix treatment is
-    /// safe: this only ever REMOVES candidates the engine offered. It cannot make a ship
-    /// engage something the engine had already ruled out.
-    ///
-    /// The method is a private void that fills AI._possibleTargetsWithPriorities, so the
-    /// filtering happens on that dictionary rather than a return value - patched by
-    /// string name for the same reason.</summary>
-    [HarmonyPatch(typeof(AI), "GetPossibleTargetsList")]
-    public static class Patch_V2_RemoteTf_AutoAttackSurfaceParity
+    /// Each postfix recomputes the helper exactly as the owner's machine would, with
+    /// IsPlayerObject replaced by "a human commands this taskforce". The helpers exist
+    /// twice - in AI and in the behaviour-tree ActionTask_CheckForTargets - and both
+    /// are covered. Auto-attack-surface needs nothing: AI no longer gates that test.
+    /// AAW salvo size is still gated, inside larger methods, and is not covered.</summary>
+    [HarmonyPatch]
+    public static class Patch_V2_RemoteTf_DoctrineGateParity
     {
-        private static readonly List<ObjectBase> _drop = new();
-
-        static void Postfix(AI __instance, ObjectBase ____baseObject)
+        private static readonly string[] Helpers =
         {
-            if (!RemoteGameplayOptions.Known) return;
-            if (RemoteGameplayOptions.AutoAttackSurface) return;   // owner allows it
-            if (____baseObject == null || ____baseObject is LandUnit) return;
-            if (!Suppression.HostSuppressesRemoteTfAi(____baseObject)) return;
+            "ShipsOnWeaponsTightCanEngageHostileAircraft",
+            "ShipSAMAntiSurfaceAutoEngagementBlocked",
+            "ShipAntiShipMissileAutoEngagementBlocked",
+            "FighterAntiShipMissileEngagementBlocked",
+        };
 
-            var targets = __instance._possibleTargetsWithPriorities;
-            if (targets == null || targets.Count == 0) return;
-
-            _drop.Clear();
-            foreach (var kv in targets)
+        static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            foreach (var type in new[] { typeof(AI), AccessTools.TypeByName("SeaPower.ActionTask_CheckForTargets") })
             {
-                var t = kv.Key;
-                if (t == null || t.IsAirUnit) continue;
-                // UNITS only. The stock test lives inside GetPossibleTargetsList's
-                // `if (processedObject.isUnit())` branch; in-flight weapons are added
-                // by a separate pass further down and this option has never governed
-                // them. IsAirUnit is Aircraft||Helicopter, so an inbound ASM read as
-                // "not air" and was being dropped - which took SAM and gun
-                // auto-engagement of incoming missiles away from the remote player's
-                // whole fleet (CIWS and chaff acquire on their own and kept working,
-                // which is exactly how it was reported).
-                if (!t.isUnit()) continue;
-                // An explicitly designated target is not auto-attack, and this option
-                // does not govern it: the stock test lives inside the candidate loop,
-                // while _objectToDestroy is entered separately and at priority 0.
-                // Dropping it here would silently cancel the owner's own attack order.
-                if (ReferenceEquals(t, __instance._objectToDestroy)) continue;
-                _drop.Add(t);
+                if (type == null) continue;
+                foreach (var name in Helpers)
+                {
+                    var m = AccessTools.Method(type, name);
+                    if (m != null) yield return m;
+                }
             }
+        }
 
-            for (int i = 0; i < _drop.Count; i++) targets.Remove(_drop[i]);
-            _drop.Clear();
+        static void Postfix(System.Reflection.MethodBase __originalMethod, object[] __args,
+                            ObjectBase ____baseObject, ref bool __result)
+        {
+            var self = ____baseObject;
+            if (self == null || self.IsPlayerObject) return;   // the engine already decided it properly
+            if (!Suppression.HostSuppressesRemoteTfAi(self)) return;
+            var d = self.TacticalDoctrine;
+            if (d == null) return;
+
+            switch (__originalMethod.Name)
+            {
+                case "ShipsOnWeaponsTightCanEngageHostileAircraft":
+                {
+                    var target = __args[0] as ObjectBase;
+                    __result = d.ShipsOnWeaponsTightEngageHostileAircraft.ResolvedValue
+                        && self is Vessel
+                        && (target is Aircraft || target is Helicopter)
+                        && self._taskforce.RelationshipTo(target._taskforce) == RelationsState.Hostile;
+                    break;
+                }
+                case "ShipSAMAntiSurfaceAutoEngagementBlocked":
+                {
+                    var ap = __args[0] as AmmunitionParameters;
+                    var target = __args[1] as ObjectBase;
+                    __result = !d.ShipsAutoUseSAMsAgainstSurfaceTargets.ResolvedValue
+                        && self is Vessel && ap != null
+                        && target != null && !target.IsAirUnit && !(target is Missile) && !(target is Bomb)
+                        && ap._type == Ammunition.Type.Missile
+                        && ap._targetType == Ammunition.Target.AAW
+                        && ap._secondaryTargetType == Ammunition.Target.ASuW;
+                    break;
+                }
+                case "ShipAntiShipMissileAutoEngagementBlocked":
+                {
+                    var ap = __args[0] as AmmunitionParameters;
+                    var target = __args[1] as ObjectBase;
+                    __result = !d.ShipsAutoUseAntiShipMissilesAgainstSurfaceTargets.ResolvedValue
+                        && self is Vessel && ap != null
+                        && target is Vessel && !target.isSubmerged()
+                        && ap._type == Ammunition.Type.Missile
+                        && ap._targetType == Ammunition.Target.ASuW;
+                    break;
+                }
+                case "FighterAntiShipMissileEngagementBlocked":
+                {
+                    var missile = __args[0] as Missile;
+                    __result = self.IsAirUnit
+                        && self._obp != null && self._obp._unitRoles.Contains(ObjectBaseParameters.UnitRoles.Fighter)
+                        && (d.FightersDoNotEngageAntiShipMissiles.ResolvedValue || self.FighterDoNotEngageAntiShipMissilesDoctrine.Value)
+                        && missile != null
+                        && (missile._ap._targetType == Ammunition.Target.ASuW || missile._ap._secondaryTargetType == Ammunition.Target.ASuW);
+                    break;
+                }
+            }
         }
     }
 

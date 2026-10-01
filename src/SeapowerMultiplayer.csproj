@@ -77,6 +77,12 @@
       <HintPath>$(GameDir)\Sea Power_Data\Managed\Noesis.NoesisGUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Standing Orders (TacticalDoctrine) and its settings derive from the toolkit's
+         ObservableObject, so touching them needs the reference. Shipped with the game. -->
+    <Reference Include="CommunityToolkit.Mvvm">
+      <HintPath>$(GameDir)\Sea Power_Data\Managed\CommunityToolkit.Mvvm.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- LiteNetLib — UDP networking -->

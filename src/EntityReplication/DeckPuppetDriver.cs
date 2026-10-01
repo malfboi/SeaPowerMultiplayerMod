@@ -40,7 +40,7 @@ namespace SeapowerMultiplayer
             public bool    Parked;
             public Vector3 ParkedAtLocal;
             public bool    Spooling;
-            public float   SpoolStartTime;
+            public double  SpoolStartTime;
             public bool    RotorsEngaged;
         }
 
@@ -165,13 +165,13 @@ namespace SeapowerMultiplayer
                     < TaxiTriggerMetres * TaxiTriggerMetres) return;
 
                 p.Spooling = true;
-                p.SpoolStartTime = GameTime.time;
+                p.SpoolStartTime = GameTime.missionElapsedTime;
                 h.powerUpEngines();
                 return;
             }
 
             if (p.RotorsEngaged) return;
-            if (GameTime.time - p.SpoolStartTime < (h._hp?._engineWarmUpTime ?? 30f)) return;
+            if (GameTime.missionElapsedTime - p.SpoolStartTime < (h._hp?._engineWarmUpTime ?? 30f)) return;
 
             p.RotorsEngaged = true;
             h.engageRotors();
