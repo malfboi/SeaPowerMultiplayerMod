@@ -27,32 +27,43 @@ namespace SeapowerMultiplayer
         /// AddComponent runs Awake() synchronously and Awake() binds against it.</summary>
         internal static ConfigFile Config = null!;
 
-        private static bool _booted;
+        /// <summary>Marks the process as booted. AppDomain data rather than a static:
+        /// with one copy in BepInEx\plugins and another in the mod folder, each loader
+        /// loads its own copy as a separate assembly with separate statics, and a
+        /// static flag would let both boot - two mods applying every patch twice.</summary>
+        private const string BootedKey = PluginInfo.PLUGIN_GUID + ".booted";
 
         /// <summary>
-        /// Entry point called by Anchor Chain. Creates the persistent host
-        /// GameObject and the logger/config that BepInEx would otherwise provide.
+        /// Entry point for both loaders - AnchorChainEntry and BepInExEntry. Creates the
+        /// persistent host GameObject and the logger/config that BepInEx would
+        /// otherwise provide. Whichever loader gets here first wins.
         /// </summary>
-        internal static void Boot()
+        internal static void Boot(bool fromAnchorChain)
         {
-            if (_booted)
+            string loader = fromAnchorChain ? "Anchor Chain" : "BepInEx";
+            Log ??= BepInEx.Logging.Logger.CreateLogSource(PluginInfo.PLUGIN_NAME);
+
+            if (AppDomain.CurrentDomain.GetData(BootedKey) is string first)
             {
-                Log?.LogWarning("Boot() called twice - ignoring the second load.");
+                Log.LogWarning($"Already loaded by {first} - ignoring the {loader} copy " +
+                               $"at {typeof(Plugin).Assembly.Location}.");
                 return;
             }
-            _booted = true;
-
-            Log = BepInEx.Logging.Logger.CreateLogSource(PluginInfo.PLUGIN_NAME);
 
             // Anchor Chain loads every DLL in every search directory without
             // consulting the game's mod checkboxes, so unticking us in the mod
-            // menu would otherwise do nothing. Honour it ourselves.
-            if (!IsEnabledInModMenu())
+            // menu would otherwise do nothing. Honour it ourselves. Not for a
+            // BepInEx\plugins copy: the mod menu does not list that folder, and
+            // BepInEx starts plugins before the game has built its FileManager -
+            // which Singleton.Instance would create early instead.
+            if (fromAnchorChain && !IsEnabledInModMenu())
             {
                 Log.LogInfo("Disabled in the game's mod menu - not loading. " +
                             "Tick \"Seapower Multiplayer\" there to enable it.");
                 return;
             }
+            AppDomain.CurrentDomain.SetData(BootedKey, $"{loader} ({typeof(Plugin).Assembly.Location})");
+            Log.LogInfo($"Loading via {loader} from {typeof(Plugin).Assembly.Location}");
             // GUID-named, matching what BaseUnityPlugin used to create, so existing
             // installs keep their settings instead of silently reverting to defaults.
             Config = new ConfigFile(

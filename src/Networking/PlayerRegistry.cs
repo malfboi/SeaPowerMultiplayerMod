@@ -6,14 +6,16 @@ using SeapowerMultiplayer.Transport;
 namespace SeapowerMultiplayer
 {
     /// <summary>
-    /// Which side a player commands.
+    /// Which side a player commands: an index into <see cref="SideTable"/>.
     ///
-    /// Blue is always the host's <c>Globals._playerTaskforce</c>; Red is the other
-    /// principal side. This is a property of a PLAYER, not of the session - that is the
-    /// whole point of replacing the old session-wide PvP/co-op toggle. A 2v1 is co-op
-    /// for the pair and PvP for everyone, which no single session flag could express.
+    /// <see cref="Host"/> is always the host's <c>Globals._playerTaskforce</c> and
+    /// <see cref="Enemy"/> the mission's EnemyTaskforce; a mission with more sides
+    /// offers them as 2, 3, ... and they go by the names the mission gives them. This is
+    /// a property of a PLAYER, not of the session - that is the whole point of replacing
+    /// the old session-wide PvP/co-op toggle. A 2v1 is co-op for the pair and PvP for
+    /// everyone, which no single session flag could express.
     /// </summary>
-    public enum Team : byte { Blue = 0, Red = 1 }
+    public enum Team : byte { Host = 0, Enemy = 1 }
 
     public sealed class PlayerInfo
     {
@@ -55,7 +57,7 @@ namespace SeapowerMultiplayer
         public static int Version { get; private set; }
 
         /// <summary>This machine's own entry. Never null once a session starts.</summary>
-        public static PlayerInfo Local { get; private set; } = new PlayerInfo { Slot = 0, Team = Team.Blue, Connected = true };
+        public static PlayerInfo Local { get; private set; } = new PlayerInfo { Slot = 0, Team = Team.Host, Connected = true };
 
         public static byte LocalSlot => Local.Slot;
         public static Team LocalTeam => Local.Team;
@@ -147,9 +149,15 @@ namespace SeapowerMultiplayer
             return null;
         }
 
-        /// <summary>Compact seating label, e.g. "2v1". Used by analytics in place of the
-        /// old pvp/coop mode string, which no longer describes anything.</summary>
-        public static string SeatingLabel() => $"{CountOnTeam(Team.Blue)}v{CountOnTeam(Team.Red)}";
+        /// <summary>Compact seating label, one count per side, e.g. "2v1" or "1v1v1".
+        /// Used by analytics in place of the old pvp/coop mode string, which no longer
+        /// describes anything.</summary>
+        public static string SeatingLabel()
+        {
+            var counts = new List<string>();
+            foreach (var team in SideTable.All) counts.Add(CountOnTeam(team).ToString());
+            return string.Join("v", counts);
+        }
 
         /// <summary>May this slot command this unit at all? Team-level only - per-formation
         /// ownership is a separate, finer gate.</summary>
@@ -163,9 +171,9 @@ namespace SeapowerMultiplayer
 
         // ── Host mutations ────────────────────────────────────────────────────
 
-        /// <summary>Seat the host itself. Slot 0, always Blue - the authoritative sim runs
-        /// on the host's own unswapped save, so Blue IS whatever the mission calls the
-        /// player side.</summary>
+        /// <summary>Seat the host itself. Slot 0, always <see cref="Team.Host"/> - the
+        /// authoritative sim runs on the host's own unchanged save, so the host's side IS
+        /// whatever the mission calls the player side.</summary>
         public static void HostInit(string name)
         {
             Clear();
@@ -174,7 +182,7 @@ namespace SeapowerMultiplayer
                 Slot = 0,
                 Peer = PeerId.None,
                 Name = name,
-                Team = Team.Blue,
+                Team = Team.Host,
                 Connected = true,
                 Established = true,
                 UidBase = 0,
@@ -230,7 +238,7 @@ namespace SeapowerMultiplayer
                 Peer = peer,
                 SteamId = steamId,
                 Name = name,
-                Team = requested,
+                Team = SideTable.IsValid(requested) ? requested : Team.Enemy,
                 Connected = true,
                 Established = true,
                 UidBase = ProtocolInfo.UidBaseForSlot(slot),
@@ -260,6 +268,18 @@ namespace SeapowerMultiplayer
             p.Team = team;
             Version++;
             Plugin.Log.LogInfo($"[Players] {p.DisplayName} moved to {team}.");
+        }
+
+        /// <summary>Host: a mission with fewer sides than the last one has nowhere for a
+        /// player seated past its end - put them on the mission's enemy side, the seat
+        /// the old two-team model would have given them. The host itself never moves.</summary>
+        public static void HostClampTeams(int sideCount)
+        {
+            for (int i = 1; i < MaxPlayers; i++)
+            {
+                var p = _slots[i];
+                if (p != null && (int)p.Team >= sideCount) HostSetTeam(p.Slot, Team.Enemy);
+            }
         }
 
         public static void HostSetName(byte slot, string name)
@@ -309,6 +329,9 @@ namespace SeapowerMultiplayer
         public static void HostBroadcastRoster()
         {
             if (!Plugin.Instance.CfgIsHost.Value) return;
+            // First: it may move players off sides this mission lacks, and the team
+            // bytes below index the table it sends.
+            SideTable.HostPublish();
             var msg = new PlayerRosterMessage();
             foreach (var p in _dense)
             {
@@ -379,7 +402,7 @@ namespace SeapowerMultiplayer
         public static void Reset()
         {
             Clear();
-            Local = new PlayerInfo { Slot = 0, Team = Team.Blue, Connected = true };
+            Local = new PlayerInfo { Slot = 0, Team = Team.Host, Connected = true };
             SenderSlot = NoSender;
         }
 

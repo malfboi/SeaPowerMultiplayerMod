@@ -60,7 +60,7 @@ namespace SeapowerMultiplayer
             && unit != null
             && unit._taskforce != null
             && unit._taskforce != Globals._playerTaskforce
-            && PlayerRegistry.AnyOnTeam(Team.Red);
+            && Teams.IsHumanControlled(unit._taskforce);
 
         /// <summary>CLIENT-side: true for a unit the local player does not own -
         /// the opposing side in PvP, the AI sides in co-op. The per-unit AI class
@@ -485,26 +485,14 @@ namespace SeapowerMultiplayer
             !Suppression.HostSuppressesRemoteTfAi(____baseObject);
     }
 
-    /// <summary>HOST-side PvP: the two submarine crew behaviours that are NOT states.
+    /// <summary>HOST-side PvP: the submarine crew behaviour that is NOT a state.
     ///
-    /// Both are plain calls in Submarine.OnFixedUpdate (:523 and :527), gated on
-    /// <c>!IsPlayerObject</c> - so the game denies them to a player's own boat and runs
-    /// them on the remote player's. Skipping them is parity, not a restriction.
-    ///
-    /// ApplyWirePreservationLimits is the one that hurts: it overwrites SpeedCommand
-    /// with a torpedo-wire speed limit AND raises DesiredAltitude to a minimum safe
-    /// depth, every fixed tick, for as long as the boat has torpedoes on the wire. A
-    /// relayed speed or depth order lands, gets silently overwritten before the player
-    /// sees it move, and reads as "my order did nothing" with no trace on either
-    /// machine. HoldCuedFiringConnection is the same shape, holding the boat shallow to
-    /// keep a cued firing connection.</summary>
-    [HarmonyPatch(typeof(Submarine), "ApplyWirePreservationLimits")]
-    public static class Patch_V2_RemoteTf_WireLimits_Suppress
-    {
-        static bool Prefix(Submarine __instance) =>
-            !Suppression.HostSuppressesRemoteTfAi(__instance);
-    }
-
+    /// HoldCuedFiringConnection is a plain call in Submarine.OnFixedUpdate, holding the
+    /// boat shallow to keep a cued firing connection, and the game runs it on the
+    /// remote player's boat but not a player's own - so a relayed depth order lands and
+    /// is silently overwritten every fixed tick. Skipping it is parity, not a
+    /// restriction. (Torpedo-wire speed and depth limits used to be the same shape;
+    /// the game now applies them to every boat, player or AI, so they need nothing.)</summary>
     [HarmonyPatch(typeof(Submarine), "HoldCuedFiringConnection")]
     public static class Patch_V2_RemoteTf_CuedFiringHold_Suppress
     {
@@ -1091,18 +1079,32 @@ namespace SeapowerMultiplayer
     /// switch a human player's radars off mid-battle and lock them out of automatic
     /// activation. The action is applied here instead, with every human-commanded
     /// fleet skipped, and the original sees NoChange; the field is restored afterwards
-    /// so the trigger still saves as authored.</summary>
-    [HarmonyPatch(typeof(Trigger), nameof(Trigger.ActionTrigger))]
+    /// so the trigger still saves as authored.
+    ///
+    /// Patched on the private TryActionTrigger: condition-fired triggers call it
+    /// directly, and the public ActionTrigger is only a wrapper round it. The units are
+    /// the same snapshot it takes (ResolveActionUnits - condition-matched units when the
+    /// trigger is set to use them), and a firing it abandons for having none is left
+    /// alone.</summary>
+    [HarmonyPatch(typeof(Trigger), "TryActionTrigger")]
     public static class Patch_V2_RemoteTf_TriggerForceEmcon
     {
+        // internal to the game assembly
+        private static readonly MethodInfo? ResolveActionUnits =
+            AccessTools.Method(typeof(Trigger), "ResolveActionUnits");
+
         static void Prefix(Trigger __instance, out ForceEmconAction __state)
         {
             __state = __instance._actionForceEmcon;
             if (__state == ForceEmconAction.NoChange) return;
             if (!NetworkManager.Instance.IsEstablished && !NetworkManager.Instance.IsHostRunning) return;
+            if (Suppression.ClientActive) return;   // triggers act on the host only (TriggerSync)
+
+            var units = ResolveActionUnits?.Invoke(__instance, null) as List<ObjectBase> ?? __instance._actionUnits;
+            if (__instance.UseMatchingConditionUnits && units.Count == 0) return;
 
             bool force = __state == ForceEmconAction.Force;
-            foreach (var unit in __instance._actionUnits)
+            foreach (var unit in units)
             {
                 if (unit == null || unit.IsDestroyed || unit.IsPlayerObject || unit._ai == null) continue;
                 if (unit._taskforce != Globals._playerTaskforce && Teams.IsHumanControlled(unit)) continue;
@@ -2116,9 +2118,8 @@ namespace SeapowerMultiplayer
     /// thrust) is left alone - it only drives local motion, which the replica
     /// driver corrects anyway.
     ///
-    /// Note the speed restore has two cases: the game REPLACES SpeedCommand when it
-    /// is not already a ConstantMach, but MUTATES it in place when it is - so
-    /// holding the reference alone does not preserve the value.</summary>
+    /// The speed is held as the unit's SpeedRequest - the order itself, by value -
+    /// and re-commanded if formation physics replaced it.</summary>
     [HarmonyPatch]
     public static class Patch_V2_Client_FormationFlight_KeepOwnCommand
     {
@@ -2132,25 +2133,30 @@ namespace SeapowerMultiplayer
             return method;
         }
 
-        static void Prefix(ObjectBase ____ac, out (bool held, float alt, ISpeedCommand? cmd, float mach) __state)
+        /// <summary>True while formation physics runs on the client, so the speed-order
+        /// sync does not forward the leader's mach as if the player had ordered it.</summary>
+        [System.ThreadStatic] internal static bool Running;
+
+        static void Prefix(ObjectBase ____ac, out (bool held, float alt, SpeedRequest request) __state)
         {
             __state = default;
             if (!Suppression.ClientActive || ____ac == null) return;
-            var cmd = ____ac.SpeedCommand?.Value;
-            __state = (true, ____ac.DesiredAltitude.Value, cmd, cmd?.SpeedInMach ?? 0f);
+            Running = true;
+            __state = (true, ____ac.DesiredAltitude.Value, ____ac.Speed.Request);
         }
 
-        static void Postfix(ObjectBase ____ac, (bool held, float alt, ISpeedCommand? cmd, float mach) __state)
+        static void Postfix(ObjectBase ____ac, (bool held, float alt, SpeedRequest request) __state)
         {
+            Running = false;
             if (!__state.held || ____ac == null) return;
 
             ____ac.DesiredAltitude.Value = __state.alt;
 
-            if (__state.cmd == null) return;
-            if (!ReferenceEquals(____ac.SpeedCommand.Value, __state.cmd))
-                ____ac.SpeedCommand.Value = __state.cmd;          // ours was swapped out
-            else if (__state.cmd is ConstantMach cm)
-                cm.SetSpeedInMach(__state.mach);                  // ours was mutated in place
+            if (__state.request.Kind == SpeedKind.None || ____ac.Speed.Request.Equals(__state.request)) return;
+            // Restoring, not ordering: the host already holds this value.
+            OrderHandler.ApplyingFromNetwork = true;
+            try { ____ac.SetSpeedCommand(in __state.request); }
+            finally { OrderHandler.ApplyingFromNetwork = false; }
         }
     }
 }

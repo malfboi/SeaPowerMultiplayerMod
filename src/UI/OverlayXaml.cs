@@ -379,10 +379,16 @@ namespace SeapowerMultiplayer.UI
                 </Grid>
                 <Button Style=""{StaticResource Btn}"" Content=""Copy Code""
                         Command=""{Binding CopyCodeCommand}""/>
-                <Button Style=""{StaticResource Btn}"" Content=""Invite player to Blue""
-                        Command=""{Binding InviteBlueCommand}""/>
-                <Button Style=""{StaticResource Btn}"" Content=""Invite player to Red""
-                        Command=""{Binding InviteRedCommand}""/>
+                <!-- One invite per side of the loaded mission, by the mission's name
+                     for it; Blue and Red before any mission is loaded. -->
+                <ItemsControl ItemsSource=""{Binding InviteOptions}"">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Button Style=""{StaticResource Btn}"" Content=""{Binding Label}""
+                              Command=""{Binding Command}""/>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
                 <Button Style=""{StaticResource Btn}"" Content=""Leave Lobby""
                         Command=""{Binding LeaveLobbyCommand}""/>
               </StackPanel>
@@ -447,28 +453,42 @@ namespace SeapowerMultiplayer.UI
                     <Grid Margin=""0,1"">
                       <Grid.ColumnDefinitions>
                         <ColumnDefinition Width=""*""/>
-                        <ColumnDefinition Width=""46""/>
-                        <ColumnDefinition Width=""Auto""/>
                         <ColumnDefinition Width=""Auto""/>
                         <ColumnDefinition Width=""Auto""/>
                       </Grid.ColumnDefinitions>
+                      <Grid.RowDefinitions>
+                        <RowDefinition Height=""Auto""/>
+                        <RowDefinition Height=""Auto""/>
+                      </Grid.RowDefinitions>
                       <StackPanel Grid.Column=""0"" Orientation=""Horizontal"">
                         <TextBlock Text=""{Binding NameText}"" VerticalAlignment=""Center""/>
                         <TextBlock Text=""{Binding StatusText}"" Margin=""6,0,0,0""
                                    VerticalAlignment=""Center"" Style=""{StaticResource Dim}""/>
                       </StackPanel>
-                      <TextBlock Grid.Column=""1"" Text=""{Binding TeamText}"" FontWeight=""Bold""
+                      <TextBlock Grid.Column=""1"" Text=""{Binding TeamText}"" FontWeight=""Bold"" Margin=""6,0""
                                  VerticalAlignment=""Center"" Foreground=""{Binding TeamBrush}""/>
-                      <Button Grid.Column=""2"" Style=""{StaticResource Btn}"" Content=""Blue"" Width=""46""
-                              Visibility=""{Binding HostControlsVisibility}""
-                              Command=""{Binding SetBlueCommand}""/>
-                      <Button Grid.Column=""3"" Style=""{StaticResource Btn}"" Content=""Red"" Width=""46""
-                              Visibility=""{Binding HostControlsVisibility}""
-                              Command=""{Binding SetRedCommand}""/>
-                      <Button Grid.Column=""4"" Style=""{StaticResource Btn}"" Content=""Deploy"" Width=""56""
+                      <Button Grid.Column=""2"" Style=""{StaticResource Btn}"" Content=""Deploy"" Width=""56""
                               Visibility=""{Binding SendVisibility}""
                               IsEnabled=""{Binding SendEnabled}""
                               Command=""{Binding SendCommand}""/>
+                      <!-- The host's seat picker: one button per side of the mission,
+                           named as the mission names it. Wraps, since a mission can
+                           have more sides than fit on one line. -->
+                      <ItemsControl Grid.Row=""1"" Grid.ColumnSpan=""3"" ItemsSource=""{Binding Sides}""
+                                    Visibility=""{Binding HostControlsVisibility}"">
+                        <ItemsControl.ItemsPanel>
+                          <ItemsPanelTemplate>
+                            <WrapPanel/>
+                          </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <Button Style=""{StaticResource Btn}"" Content=""{Binding Label}"" Margin=""0,2,4,0""
+                                    IsEnabled=""{Binding Enabled}""
+                                    Command=""{Binding Command}""/>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
                     </Grid>
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>

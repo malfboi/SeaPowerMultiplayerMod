@@ -46,7 +46,12 @@ namespace SeapowerMultiplayer.Net2
         // 238 is both branches merged: DoctrineSync moved to 40 to clear WeaponWireState,
         // and PR #18's TorpedoWire* orders (36-40) gave way to WeaponCommand/WeaponOp (36).
         // Neither 236 nor 237 is safe to pair with this layout.
-        public const ushort ProtocolVersion = 238;
+        // 239: the game's multi-side missions. A team byte is now an index into the
+        // host's SideTable (41), runtime relation changes ride SideRelation (42), and
+        // EntitySpawn names its taskforce instead of carrying a TfType byte. FlightDeckState
+        // carries the carrier's embarked ground cargo (game 0.9 transport launches).
+        // Mission triggers fire on the host only: TriggerFired (43) / TriggerRequest (44).
+        public const ushort ProtocolVersion = 239;
 
         /// <summary>
         /// The Sea Power build both players are running. Save files embed indices

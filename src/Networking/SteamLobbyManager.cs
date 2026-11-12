@@ -135,8 +135,10 @@ namespace SeapowerMultiplayer.Transport
         public static void InviteToTeam(Team team)
         {
             if (!InLobby || !IsLobbyOwner) return;
-            SteamMatchmaking.SetLobbyData(LobbyId, "pending_team", team.ToString());
-            Log.LogInfo($"[SteamLobby] Inviting to {team}.");
+            // The side index, not a name: names belong to whichever mission is loaded,
+            // and the joiner reads this before it knows what that is. Teams.Parse.
+            SteamMatchmaking.SetLobbyData(LobbyId, "pending_team", ((byte)team).ToString());
+            Log.LogInfo($"[SteamLobby] Inviting to {Teams.Name(team)} (side {(byte)team}).");
             SteamFriends.ActivateGameOverlayInviteDialog(LobbyId);
         }
 
@@ -223,7 +225,7 @@ namespace SeapowerMultiplayer.Transport
             // yet, so it opens with the standing default from CfgPvP; InviteToTeam
             // overwrites this the moment the host invites someone to a named side.
             SteamMatchmaking.SetLobbyData(LobbyId, "pending_team",
-                (Plugin.Instance.CfgPvP.Value ? Team.Red : Team.Blue).ToString());
+                ((byte)(Plugin.Instance.CfgPvP.Value ? Team.Enemy : Team.Host)).ToString());
 
             // Start transport as host
             NetworkManager.Instance.StartTransport(asHost: true);
@@ -275,14 +277,12 @@ namespace SeapowerMultiplayer.Transport
             string teamStr = SteamMatchmaking.GetLobbyData(LobbyId, "pending_team");
             if (!string.IsNullOrEmpty(teamStr))
             {
-                PendingTeamForJoin = teamStr.Equals("Red", StringComparison.OrdinalIgnoreCase)
-                    ? Team.Red : Team.Blue;
-                Log.LogInfo($"[SteamLobby] Host invited us to {PendingTeamForJoin}.");
+                PendingTeamForJoin = Teams.Parse(teamStr);
+                Log.LogInfo($"[SteamLobby] Host invited us to side {(byte)PendingTeamForJoin}.");
             }
             else
             {
-                PendingTeamForJoin = Plugin.Instance.CfgDefaultTeam.Value
-                    .Equals("Red", StringComparison.OrdinalIgnoreCase) ? Team.Red : Team.Blue;
+                PendingTeamForJoin = Teams.Parse(Plugin.Instance.CfgDefaultTeam.Value);
             }
 
             NetworkManager.Instance.StartTransport(asHost: false);

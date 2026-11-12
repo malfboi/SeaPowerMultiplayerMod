@@ -50,8 +50,13 @@ namespace SeapowerMultiplayer
             if (_resolved) return _writeDrawingData != null && _loadDrawingData != null;
             _resolved = true;
 
-            _writeDrawingData = AccessTools.Method(typeof(SaveLoadManager), "WriteDrawingData");
-            _loadDrawingData  = AccessTools.Method(typeof(SaveLoadManager), "LoadDrawingData");
+            // Both by exact signature: each now has an overload, and a by-name lookup
+            // would pick whichever it liked. The writer takes the layer to write; the
+            // parameterless loader reads [DrawingLayer] from the live mission ini.
+            var layerType = AccessTools.TypeByName("SeapowerUI.ViewModels.MapDrawingLayer");
+            _writeDrawingData = layerType == null ? null
+                : AccessTools.Method(typeof(SaveLoadManager), "WriteDrawingData", new[] { typeof(IniHandler), layerType });
+            _loadDrawingData  = AccessTools.Method(typeof(SaveLoadManager), "LoadDrawingData", Type.EmptyTypes);
 
             if (_writeDrawingData == null || _loadDrawingData == null)
             {
@@ -78,10 +83,11 @@ namespace SeapowerMultiplayer
         private static Dictionary<string, string>? Capture()
         {
             if (!Resolve()) return null;
-            if (Globals._mainGameViewModel?.Map?.DrawingLayer?.Graphics == null) return null;
+            var layer = Globals._mainGameViewModel?.Map?.DrawingLayer;
+            if (layer?.Graphics == null) return null;
 
             var scratch = new IniHandler(ScratchIni);
-            _writeDrawingData!.Invoke(null, new object[] { scratch });
+            _writeDrawingData!.Invoke(null, new object[] { scratch, layer });
 
             return scratch.doesSectionExist(Section)
                 ? new Dictionary<string, string>(scratch.GetSectionKeyValues(Section))

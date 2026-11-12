@@ -98,7 +98,7 @@ namespace SeapowerMultiplayer
         public static float CustomCommandKnots(ObjectBase unit)
         {
             var cmd = unit?.SpeedCommand?.Value;
-            if (cmd == null || cmd is TelegraphSpeed) return float.NaN;
+            if (cmd == null || cmd.Kind == SpeedKind.Telegraph || cmd.Kind == SpeedKind.None) return float.NaN;
             // ConstantSpeed knows its raw commanded knots; ConstantMach reports NaN
             // there and has to be re-derived from mach at the unit's current height.
             float kts = cmd.CommandSpeedInKnots;
@@ -275,13 +275,13 @@ namespace SeapowerMultiplayer
         {
             var reassignments = new List<(ObjectBase obj, int hostId)>();
 
-            // On a swapped (Red) guest the opposing units land in our EnemyTaskforce
-            // locally. Only match against those to prevent accidentally remapping our
-            // own aircraft to remote IDs (which would make our aircraft invisible to
-            // the other side). A Blue guest shares the host's taskforce, so it has no
-            // such split and needs no filter.
+            // On a reseated guest the host's units are on other sides than ours locally.
+            // Never match against our own taskforce, to prevent accidentally remapping
+            // our own aircraft to remote IDs (which would make our aircraft invisible to
+            // the other side). A guest on the host's side shares the host's taskforce,
+            // so it has no such split and needs no filter.
             bool swapped = Teams.LocalSaveSwapped;
-            Taskforce alignFilter = swapped ? GetEnemyTaskforce() : null;
+            Taskforce alignExclude = swapped ? Globals._playerTaskforce : null;
 
             foreach (var state in units)
             {
@@ -297,7 +297,7 @@ namespace SeapowerMultiplayer
                 Vector2 local = Utils.longLatToLocal(geo, Globals._currentCenterTile);
                 Vector3 worldPos = new Vector3(local.x, state.Y, local.y);
 
-                var best = FindLocalByPosition(worldPos, state.Kind, alignFilter);
+                var best = FindLocalByPosition(worldPos, state.Kind, alignExclude);
                 if (best != null && best.UniqueID != state.EntityId)
                     reassignments.Add((best, state.EntityId));
             }
@@ -326,27 +326,8 @@ namespace SeapowerMultiplayer
             Plugin.Log.LogInfo($"[StateApplier] Alignment: {reassignments.Count} units remapped from first state update");
         }
 
-        /// <summary>
-        /// Returns the enemy taskforce (the remote player's taskforce).
-        /// In PvP, the state update contains the remote player's units,
-        /// which are in our local EnemyTaskforce after the PvP swap.
-        /// </summary>
-        private static Taskforce GetEnemyTaskforce()
-        {
-            var playerTf = Globals._playerTaskforce;
-            if (playerTf == null || !Singleton<TaskforceManager>.InstanceExists(false))
-                return null;
-
-            foreach (var tf in Singleton<TaskforceManager>.Instance._taskForces)
-            {
-                if (tf != playerTf)
-                    return tf;
-            }
-            return null;
-        }
-
         private static ObjectBase FindLocalByPosition(Vector3 worldPos, UnitType kind,
-            Taskforce taskforceFilter = null)
+            Taskforce excludeTaskforce = null)
         {
             ObjectBase best = null;
             float bestDist = float.MaxValue;
@@ -356,7 +337,7 @@ namespace SeapowerMultiplayer
                 var obj = all[i];
                 if (obj == null || obj.IsDestroyed) continue;
                 if (!KindMatches(obj, kind)) continue;
-                if (taskforceFilter != null && obj._taskforce != taskforceFilter) continue;
+                if (excludeTaskforce != null && obj._taskforce == excludeTaskforce) continue;
                 float d = (obj.transform.position - worldPos).sqrMagnitude;
                 if (d < bestDist) { bestDist = d; best = obj; }
             }
@@ -656,6 +637,9 @@ namespace SeapowerMultiplayer
                             _launchCount = launchCount,
                             _missionType = (FlightDeckTask.MissionType)msg.ShotsToFire,
                         };
+                        // Troops the sender picked for a transport launch; createLaunchTask
+                        // validates them against this carrier and takes them aboard.
+                        ltp._groundCargo.AddRange(GroundCargoWire.Decode(msg.AmmoId));
                         // The sender's own "launch on Weapons X" option - see LaunchWeaponState.
                         LaunchWeaponState.Request(ltp, msg.TargetX);
                         fd.createLaunchTask(vehicle, loadout, squadron, callsign, ltp, msg.TargetEntityId == 1);

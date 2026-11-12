@@ -29,6 +29,11 @@ namespace SeapowerMultiplayer.Messages
         public byte  ChunkCount = 1;
         public float CurrentAmmo;
 
+        /// <summary>Troops embarked on the carrier (GroundCargoWire), which the Flight
+        /// Ops transport launch offers. Only the host's deck takes them off, so the
+        /// client's copy would otherwise never move. Carried on every chunk.</summary>
+        public string GroundCargo = "";
+
         // Authoritative availability the UI shows for "aircraft to prepare".
         public readonly List<VehicleCount>  VehicleNumbers  = new();
         public readonly List<SquadronCount> SquadronNumbers = new();
@@ -80,6 +85,7 @@ namespace SeapowerMultiplayer.Messages
             writer.Put(ChunkIdx);
             writer.Put(ChunkCount);
             writer.Put(CurrentAmmo);
+            writer.Put(GroundCargo ?? "");
 
             writer.Put((byte)VehicleNumbers.Count);
             for (int i = 0; i < VehicleNumbers.Count; i++)
@@ -141,6 +147,7 @@ namespace SeapowerMultiplayer.Messages
                 ChunkIdx    = reader.GetByte(),
                 ChunkCount  = reader.GetByte(),
                 CurrentAmmo = reader.GetFloat(),
+                GroundCargo = reader.GetString(),
             };
 
             int vCount = reader.GetByte();

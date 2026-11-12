@@ -10,7 +10,7 @@ namespace SeapowerMultiplayer.Messages
     {
         public ushort ProtocolVersion;
         public string PluginVersion = "";
-        /// <summary>Which team the joiner is asking for (0=Blue, 1=Red). A REQUEST, not a
+        /// <summary>Which side the joiner is asking for (a SideTable index). A REQUEST, not a
         /// decision: it comes from the lobby's pending-invite key, which two people
         /// accepting the same invite would both read. The host seats them.
         /// Occupies the wire slot the old session-wide IsPvP flag had.</summary>

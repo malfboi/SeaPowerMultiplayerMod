@@ -845,7 +845,7 @@ namespace SeapowerMultiplayer
                 LoadoutVariant = loadoutVariant,
                 UnitNumber     = (byte)Mathf.Clamp(number, 0, 255),
                 HomeBaseId     = homeBase != null ? homeBase.UniqueID : 0,
-                TaskforceSide  = taskForce != null ? (byte)taskForce.Side : (byte)0,
+                TaskforceName  = taskForce?._nameInMissionFile ?? "",
                 Nation         = nationOverride ?? "",
                 UnitFlags      = deckLaunch ? EntitySpawnMessage.UnitFlagDeckPhase : (byte)0,
                 UnitName       = result._obp?._objectName ?? "",
@@ -1010,7 +1010,9 @@ namespace SeapowerMultiplayer
     }
 
     /// <summary>Aircraft removal that is NOT a kill (recovery → stored, scripted
-    /// removal) - the universal removal registry call.</summary>
+    /// removal) - the universal removal registry call. Also any unit that left the
+    /// mission through ObjectBase.despawnObject (a trigger action, a carrier departing),
+    /// which removes ships and submarines the same way.</summary>
     [HarmonyPatch(typeof(ObjectsManager), nameof(ObjectsManager.removeObject))]
     public static class Patch_V2_UnitRemove_Capture
     {
@@ -1018,7 +1020,8 @@ namespace SeapowerMultiplayer
         {
             if (!CaptureState.HostCaptureActive) return;
             if (obj == null) return;
-            if (!(obj is Aircraft) && !(obj is Helicopter)) return;
+            bool departed = obj.IsDespawned;
+            if (!departed && !(obj is Aircraft) && !(obj is Helicopter)) return;
             if (!CaptureState.DespawnSent.Add(obj.UniqueID)) return; // kills already sent DestroyEvent
 
             var geo = Utils.worldPositionFromUnityToLongLat(
@@ -1026,7 +1029,7 @@ namespace SeapowerMultiplayer
             NetworkManager.Instance.BroadcastToClients(new EntityDespawnMessage
             {
                 EntityId = obj.UniqueID,
-                Cause    = DespawnCause.Landed,
+                Cause    = departed ? DespawnCause.Departed : DespawnCause.Landed,
                 LonDeg   = geo._longitude,
                 LatDeg   = geo._latitude,
                 HeightM  = (float)geo._height,

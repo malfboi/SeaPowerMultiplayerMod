@@ -10,7 +10,7 @@ namespace SeapowerMultiplayer.Messages
     {
         public bool   Accepted;
         public string RefusalReason = "";
-        /// <summary>Which team the host seated this player on (0=Blue, 1=Red). This is
+        /// <summary>Which side the host seated this player on (a SideTable index). This is
         /// the field formerly reserved as AssignedTaskforce - same wire position, finally
         /// used. It is what the guest's save swap is decided from, which is why it must
         /// arrive before any SessionSync (BlockedPreHandshake guarantees that).</summary>

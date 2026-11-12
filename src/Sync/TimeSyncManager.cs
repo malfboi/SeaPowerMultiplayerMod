@@ -651,5 +651,21 @@ namespace SeapowerMultiplayer
                 });
             }
         }
+
+        /// <summary>The game's Rolling Replay (0.9) is not offered during a session.
+        /// Entering it calls GameTime.Pause(), which the patch above turns into a pause
+        /// for everyone, but leaving it calls only GameTime.UnPause(), which nothing here
+        /// relays - so whoever left replay would run on while the others stayed paused.</summary>
+        [HarmonyPatch(typeof(SeaPower.RollingReplay.RollingReplayManager), nameof(SeaPower.RollingReplay.RollingReplayManager.Enter))]
+        public static class Patch_RollingReplay_Enter_BlockInSession
+        {
+            static bool Prefix(ref bool __result)
+            {
+                if (!NetworkManager.Instance.IsConnected) return true;
+                Plugin.Log.LogInfo("[TimeSync] Rolling Replay is not available during a multiplayer session");
+                __result = false;
+                return false;
+            }
+        }
     }
 }

@@ -48,8 +48,10 @@ namespace SeapowerMultiplayer
     internal static class ModSetCheck
     {
         /// <summary>The enabled mod directories, by name, excluding the base-game
-        /// entries. Mirrors FileManager's own ModsEnabled test (FileManager.cs:55) so
-        /// this counts exactly what the game counts as "a mod is on".</summary>
+        /// entries and runtime mounts (a loaded mission's own data and briefing folders
+        /// are mounted as checked directories too). Mirrors FileManager's own
+        /// ModsEnabled test - IsChecked &amp;&amp; IsSettingsMod - so this counts exactly
+        /// what the game counts as "a mod is on".</summary>
         internal static List<string> LocalMods()
         {
             var names = new List<string>();
@@ -62,9 +64,7 @@ namespace SeapowerMultiplayer
             for (int i = 0; i < dirs.Count; i++)
             {
                 var d = dirs[i];
-                if (d == null || !d.IsChecked || d.DirectoryInfo == null) continue;
-                if (fm!.specialDirectories != null
-                    && System.Array.IndexOf(fm.specialDirectories, d.DirectoryInfo) >= 0) continue;
+                if (d == null || !d.IsChecked || !d.IsSettingsMod || d.DirectoryInfo == null) continue;
 
                 names.Add(d.DirectoryInfo.Name);
             }

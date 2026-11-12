@@ -12,6 +12,7 @@ namespace SeapowerMultiplayer.Messages
         Stored      = 5,
         Expired     = 6,
         Removed     = 7, // generic/scripted removal - silent
+        Departed    = 8, // a unit left the mission (ObjectBase.despawnObject: trigger, departing carrier)
     }
 
     /// <summary>Host → client, ReliableOrdered: entity left the world.</summary>

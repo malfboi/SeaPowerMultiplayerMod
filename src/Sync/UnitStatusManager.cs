@@ -40,12 +40,9 @@ namespace SeapowerMultiplayer
         // PER TEAM. One delta table with two audiences is silently wrong: whatever it
         // already sent to the first team it then withholds from the second, so the
         // second team's status lines simply stop updating with nothing to indicate why.
+        // Filled per side on first use - a mission can have any number of them.
         private static readonly Dictionary<Team, Dictionary<int, (string text, byte[] mounts, float range, int homeBase)>> _lastSentByTeam =
-            new()
-            {
-                [Team.Blue] = new Dictionary<int, (string, byte[], float, int)>(256),
-                [Team.Red]  = new Dictionary<int, (string, byte[], float, int)>(256),
-            };
+            new();
 
         private static readonly UnitStatusMessage _msg = new();
         private static readonly HashSet<int> _seen = new(256);
@@ -62,16 +59,9 @@ namespace SeapowerMultiplayer
         /// different ways (co-op: the friendly side; PvP: the enemy taskforce, which was
         /// that player's own side after the swap); stating it once per team covers every
         /// seating, including two players sharing one side.
-        ///
-        /// Runs on the HOST, so Blue is always Globals._playerTaskforce.
         /// </summary>
         private static bool IsVisibleTo(ObjectBase unit, Team team)
-        {
-            var tf = unit._taskforce;
-            if (tf == null) return false;
-            if (team == Team.Red) return tf == Globals._enemyTaskforce;
-            return tf.Side == Taskforce.TfType.Player || tf.Side == Taskforce.TfType.Ally;
-        }
+            => Teams.TeamOf(unit._taskforce) == team;
 
         /// <summary>Host: sweep each team's own units and send that team what changed.</summary>
         public static void HostBroadcast()
@@ -84,16 +74,17 @@ namespace SeapowerMultiplayer
 
             // Slot 0 is the host and needs nothing sent to it, so only teams with a
             // GUEST on them are worth sweeping.
-            SweepTeam(Team.Blue, full);
-            SweepTeam(Team.Red, full);
+            foreach (var team in SideTable.All)
+                SweepTeam(team, full);
         }
 
         private static void SweepTeam(Team team, bool full)
         {
             if (PlayerRegistry.CountOnTeam(team) == 0) return;
-            if (team == Team.Blue && PlayerRegistry.TeammateCount(0) == 0) return; // host alone on Blue
+            if (team == Team.Host && PlayerRegistry.TeammateCount(0) == 0) return; // host alone on its side
 
-            var lastSent = _lastSentByTeam[team];
+            if (!_lastSentByTeam.TryGetValue(team, out var lastSent))
+                _lastSentByTeam[team] = lastSent = new Dictionary<int, (string, byte[], float, int)>(256);
 
             _msg.Reset();
             _msg.IsFull = full;
@@ -174,8 +165,8 @@ namespace SeapowerMultiplayer
         ///
         /// UpdateFuelConsumption is the game's own re-derivation - Aircraft's load path
         /// calls exactly this pair, RangeInKm followed by UpdateFuelConsumption(0f)
-        /// (Aircraft.cs:1801-1802) - so ActualRangeInKm, RangeOnMap, EnduranceInSec and
-        /// the endurance ring all fall out of it rather than being set by hand here.
+        /// (Aircraft.LoadStateFromFile) - so ActualRangeInKm, RangeOnMap, EnduranceInSec
+        /// and the endurance ring all fall out of it rather than being set by hand here.
         /// The two overloads differ only in signature.</summary>
         private static void ApplyFuel(ObjectBase unit, float rangeKm)
         {

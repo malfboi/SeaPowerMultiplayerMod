@@ -296,6 +296,7 @@ namespace SeapowerMultiplayer
             _peers.Clear();
             _clientHandshake = HandshakeState.Disconnected;
             PlayerRegistry.Reset();
+            SideTable.Reset();
             SessionParams = null;
             Log.LogInfo("[Net] Stopped.");
         }
@@ -660,7 +661,7 @@ namespace SeapowerMultiplayer
                 }
                 else
                 {
-                    var requested = SteamLobbyManager.PendingTeamForJoin ?? Team.Blue;
+                    var requested = SteamLobbyManager.PendingTeamForJoin ?? Team.Host;
                     PlayerRegistry.GuestInit(LocalPersonaName(), requested);
 
                     var hello = new HelloMessage
@@ -1087,6 +1088,35 @@ namespace SeapowerMultiplayer
                     break;
                 }
 
+                case MessageType.SideTable:
+                {
+                    var msg = SideTableMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SideTable.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.SideRelation:
+                {
+                    var msg = SideRelationMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => SideRelationSync.ApplyReceived(msg));
+                    break;
+                }
+
+                case MessageType.TriggerFired:
+                {
+                    var msg = TriggerFiredMessage.Deserialize(reader);
+                    _mainThreadQueue.Enqueue(() => TriggerSync.ApplyFired(msg));
+                    break;
+                }
+
+                case MessageType.TriggerRequest:
+                {
+                    var msg = TriggerRequestMessage.Deserialize(reader);
+                    byte slot = SlotOf(from);
+                    _mainThreadQueue.Enqueue(() => TriggerSync.ApplyRequest(slot, msg));
+                    break;
+                }
+
                 case MessageType.UnitOwnership:
                 {
                     var msg = UnitOwnershipMessage.Deserialize(reader);
@@ -1215,7 +1245,9 @@ namespace SeapowerMultiplayer
             // a joiner asks for a team and the host seats them, so there is nothing left
             // to disagree about.
 
-            var requestedTeam = msg.RequestedTeam == (byte)Team.Red ? Team.Red : Team.Blue;
+            // Any side index; HostTryAdd seats a request this mission has no side for on
+            // the enemy side instead.
+            var requestedTeam = (Team)msg.RequestedTeam;
             PlayerInfo? seated = null;
             // Sanitized on RECEIPT, not just where it was typed: this arrived off the
             // wire, and the name goes straight into every other player's roster row and

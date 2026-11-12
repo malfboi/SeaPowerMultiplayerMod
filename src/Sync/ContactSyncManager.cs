@@ -63,10 +63,12 @@ namespace SeapowerMultiplayer
         // ── Client track-number collision guard ───────────────────────────────
 
         /// <summary>Where the client parks track numbers for foreign contacts the
-        /// host has not numbered yet. Comfortably above the game's own foreign
-        /// range (PlottingTable._maxForeignTrackId starts at 7001), so a number the
-        /// client invents can never equal one the host issues.</summary>
-        private const int PrivateTrackBase = 20001;
+        /// host has not numbered yet. Inside the game's foreign series - the plotting
+        /// table now renumbers any foreign track whose number does not start with 7
+        /// (PlottingTable.RefreshTrackNumber, on every update) - but in a block it only
+        /// widens into after exhausting 7001-7999, 70001-79999 and 700001-799999, so
+        /// a number the client invents can never equal one the host issues.</summary>
+        private const int PrivateTrackBase = 7_000_001;
 
         private static readonly Dictionary<int, int> _privateTrackIds = new(32);
         private static int _nextPrivateTrackId = PrivateTrackBase;

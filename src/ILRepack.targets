@@ -1,0 +1,5 @@
+<!-- Intentionally empty. ILRepack.Lib.MSBuild.Task adds its own merge target to every
+     Release build unless this file exists; that target merges every DLL in the output
+     folder, cannot resolve BepInEx's 0Harmony, and fails the build. The merge this
+     project needs is the ILRepackMerge target in SeapowerMultiplayer.csproj. -->
+<Project />

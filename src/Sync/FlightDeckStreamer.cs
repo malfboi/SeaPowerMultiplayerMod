@@ -18,16 +18,9 @@ namespace SeapowerMultiplayer
         // PER TEAM, for the same reason as UnitStatusManager: one change-detection table
         // serving two audiences withholds from the second whatever it already sent to
         // the first, and the symptom is a Flight Ops window that silently stops updating.
-        private static readonly Dictionary<Team, Dictionary<int, string>> _lastSigByTeam = new()
-        {
-            [Team.Blue] = new Dictionary<int, string>(),
-            [Team.Red]  = new Dictionary<int, string>(),
-        };
-        private static readonly Dictionary<Team, Dictionary<int, float>> _nextSendAtByTeam = new()
-        {
-            [Team.Blue] = new Dictionary<int, float>(),
-            [Team.Red]  = new Dictionary<int, float>(),
-        };
+        // Filled per side on first use - a mission can have any number of them.
+        private static readonly Dictionary<Team, Dictionary<int, string>> _lastSigByTeam = new();
+        private static readonly Dictionary<Team, Dictionary<int, float>> _nextSendAtByTeam = new();
         private static readonly StringBuilder _sb = new();
         private static readonly List<FlightDeckStateMessage> _chunks = new();
 
@@ -46,8 +39,8 @@ namespace SeapowerMultiplayer
             if (!CaptureState.HostCaptureActive) return;
 
             float now = UnityEngine.Time.unscaledTime;
-            StreamTeam(Team.Blue, now);
-            StreamTeam(Team.Red, now);
+            foreach (var team in SideTable.All)
+                StreamTeam(team, now);
         }
 
         /// <summary>Send one team the deck state of its OWN carriers. A flight-ops queue
@@ -56,7 +49,7 @@ namespace SeapowerMultiplayer
         private static void StreamTeam(Team team, float now)
         {
             if (PlayerRegistry.CountOnTeam(team) == 0) return;
-            if (team == Team.Blue && PlayerRegistry.TeammateCount(0) == 0) return; // host alone on Blue
+            if (team == Team.Host && PlayerRegistry.TeammateCount(0) == 0) return; // host alone on its side
 
             var vessels = UnitRegistry.Vessels;
             for (int i = 0; i < vessels.Count; i++)
@@ -73,15 +66,9 @@ namespace SeapowerMultiplayer
                 StreamDeck(landUnits[i], team, now);
         }
 
-        /// <summary>Is this carrier on <paramref name="team"/>'s side? Runs on the HOST,
-        /// so Blue is always Globals._playerTaskforce.</summary>
+        /// <summary>Is this carrier on <paramref name="team"/>'s side?</summary>
         private static bool BelongsTo(ObjectBase carrier, Team team)
-        {
-            var tf = carrier._taskforce;
-            if (tf == null) return false;
-            if (team == Team.Red) return tf == Globals._enemyTaskforce;
-            return tf.Side == Taskforce.TfType.Player || tf.Side == Taskforce.TfType.Ally;
-        }
+            => Teams.TeamOf(carrier._taskforce) == team;
 
         private static void StreamDeck(ObjectBase carrier, Team team, float now)
         {
@@ -89,8 +76,10 @@ namespace SeapowerMultiplayer
             if (fd == null) return;
             if (!BelongsTo(carrier, team)) return;
 
-            var lastSig = _lastSigByTeam[team];
-            var nextSendAt = _nextSendAtByTeam[team];
+            if (!_lastSigByTeam.TryGetValue(team, out var lastSig))
+                _lastSigByTeam[team] = lastSig = new Dictionary<int, string>();
+            if (!_nextSendAtByTeam.TryGetValue(team, out var nextSendAt))
+                _nextSendAtByTeam[team] = nextSendAt = new Dictionary<int, float>();
 
             if (nextSendAt.TryGetValue(carrier.UniqueID, out var next) && now < next) return;
 
@@ -121,14 +110,15 @@ namespace SeapowerMultiplayer
         private static void Chunk(FlightDeckStateMessage full)
         {
             var cur = NewChunk(full);
-            int size = 20;
+            int header = 20 + StrBytes(full.GroundCargo); // repeated on every chunk
+            int size = header;
 
             void CutIfNeeded(int itemBytes)
             {
                 if (size + itemBytes <= ChunkBudgetBytes) return;
                 _chunks.Add(cur);
                 cur = NewChunk(full);
-                size = 20;
+                size = header;
             }
 
             for (int i = 0; i < full.VehicleNumbers.Count; i++)
@@ -167,7 +157,7 @@ namespace SeapowerMultiplayer
         }
 
         private static FlightDeckStateMessage NewChunk(FlightDeckStateMessage full) =>
-            new FlightDeckStateMessage { CarrierId = full.CarrierId, CurrentAmmo = full.CurrentAmmo };
+            new FlightDeckStateMessage { CarrierId = full.CarrierId, CurrentAmmo = full.CurrentAmmo, GroundCargo = full.GroundCargo };
 
         // FlightDeckTask.CrewSkill does not exist in every game build; a direct call
         // MissingMethodExceptions the whole streamer tick there (no snapshot ever
@@ -188,6 +178,7 @@ namespace SeapowerMultiplayer
             {
                 CarrierId   = carrier.UniqueID,
                 CurrentAmmo = fd._currentAmmo,
+                GroundCargo = GroundCargoWire.Encode(carrier.GroundCargoManifest),
             };
 
             var vob = fd._vehiclesOnBoard;
@@ -267,6 +258,7 @@ namespace SeapowerMultiplayer
         {
             _sb.Clear();
             _sb.Append(m.CurrentAmmo.ToString("F0")).Append('|');
+            _sb.Append(m.GroundCargo).Append('|');
             for (int i = 0; i < m.VehicleNumbers.Count; i++)
                 _sb.Append(m.VehicleNumbers[i].VehicleIdx).Append(':')
                    .Append(m.VehicleNumbers[i].Numbers).Append(';');

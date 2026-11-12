@@ -174,6 +174,26 @@
              Importance="high" Condition="Exists('$(GameDir4)')" />
   </Target>
 
+  <!-- Stopgap while Anchor Chain does not load on the current game build: the same
+       DLL also carries a BepInEx entry (BepInExEntry), so a copy in BepInEx\plugins
+       runs without it. Plugin.Boot lets only one copy boot when both are present, but
+       the plugins copy starts first and ignores the mod menu checkbox - set this to
+       false (and delete those copies) once Anchor Chain works again. -->
+  <PropertyGroup>
+    <DeployToBepInExPlugins Condition="'$(DeployToBepInExPlugins)' == ''">true</DeployToBepInExPlugins>
+  </PropertyGroup>
+  <Target Name="CopyToBepInExPlugins" AfterTargets="ILRepackMerge"
+          Condition="'$(SkipDeploy)' != 'true' And '$(DeployToBepInExPlugins)' == 'true'">
+    <ItemGroup>
+      <PluginDll Include="$(OutputPath)merged\$(AssemblyName).dll" />
+      <PluginDirs Include="$(GameDir);$(GameDir2);$(GameDir3);$(GameDir4)" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PluginDll)" DestinationFolder="%(PluginDirs.Identity)\BepInEx\plugins\"
+          Condition="Exists('%(PluginDirs.Identity)\BepInEx\plugins')" />
+    <Message Text="Copied plugin to %(PluginDirs.Identity)\BepInEx\plugins\" Importance="high"
+             Condition="Exists('%(PluginDirs.Identity)\BepInEx\plugins')" />
+  </Target>
+
   <!-- Bundled scenarios. FileManager builds the mod search path from the folders
        under StreamingAssets and merges every CHECKED one's "missions" tree into a
        single list, which is what the scenario menu walks (ScenarioMenuViewModel

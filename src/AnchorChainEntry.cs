@@ -14,6 +14,6 @@ namespace SeapowerMultiplayer
     [ACPlugin(PluginInfo.PLUGIN_GUID, PluginInfo.PLUGIN_NAME, PluginInfo.PLUGIN_VERSION)]
     public class AnchorChainEntry : IAnchorChainMod
     {
-        public void TriggerEntryPoint() => Plugin.Boot();
+        public void TriggerEntryPoint() => Plugin.Boot(fromAnchorChain: true);
     }
 }

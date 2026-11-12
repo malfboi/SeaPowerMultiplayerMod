@@ -474,7 +474,7 @@ namespace SeapowerMultiplayer
     [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetAttackAtWaypointTask),
         new[] { typeof(string), typeof(ObjectBase), typeof(GeoPosition), typeof(GeoPosition),
                 typeof(int), typeof(VisualActionTask), typeof(EngageTask.SalvoType),
-                typeof(float), typeof(bool), typeof(bool) })]
+                typeof(float), typeof(bool), typeof(bool), typeof(string), typeof(string) })]
     public static class Patch_ObjectBase_SetAttackAtWaypointTask
     {
         /// <summary>Index of the `after` task in the unit's task list, captured in the
@@ -1000,6 +1000,9 @@ namespace SeapowerMultiplayer
                     ShotsToFire    = ltp != null ? (int)ltp._missionType : 0,
                     TargetEntityId = allowLaunch ? 1 : 0,
                     TargetX        = LaunchWeaponState.Pack(),
+                    // Troops picked for a transport launch. The host's deck takes
+                    // them off the carrier when it creates the task.
+                    AmmoId         = GroundCargoWire.Encode(ltp?._groundCargo),
                 });
                 Telemetry.Count("v2.clientLaunchUpstream");
                 Plugin.Log.LogInfo($"[FlightOps] Upstream launch intent: carrier={v2vessel.UniqueID} vehicle={vehicleIdx} count={ltp?._launchCount ?? 1}");
@@ -2904,9 +2907,9 @@ namespace SeapowerMultiplayer
             if (__instance is WeaponBase) return;
 
             // Setting IsControllable false is what gets the game's OWN ally treatment
-            // for free - MapUnitViewModel.UpdateContactDisplay already picks
-            // TM_AlliedColor_Brush over TM_FriendlyColor_Brush from exactly this flag,
-            // and Order.setOrder refuses order entry on it.
+            // for free - MapContactVisuals.Classify already picks the Allied palette
+            // over Friendly from exactly this flag, and Order.setOrder refuses order
+            // entry on it.
             if (FormationOwnership.IsOwnedByOther(__instance))
                 __result = false;
         }
@@ -2919,33 +2922,28 @@ namespace SeapowerMultiplayer
     /// the machine that runs the simulation is destructive well beyond colour: engage
     /// tasks queued mid-tick are dropped (Order.setOrder), AcceptOrdersFromAI goes false,
     /// UnitFormation station-keeping skips the unit, and the taskforce air sweeps skip it
-    /// too. So the host colours the marker directly instead and leaves the sim alone.
+    /// too. So the host recolours the marker instead and leaves the sim alone - at the one
+    /// place that decides it, MapContactVisuals.Classify, which both the contact and its
+    /// wake mark go through.
     ///
-    /// Only the FRIENDLY brush is intercepted. Dormancy, destroyed, unknown and enemy all
-    /// produce different brushes and pass straight through, so none of their meanings are
+    /// Only the FRIENDLY palette is intercepted. Dormancy, destroyed, unknown and enemy
+    /// all classify differently and pass straight through, so none of their meanings are
     /// overwritten.
     /// </summary>
-    [HarmonyPatch(typeof(MapUnitViewModel), "set_UnitColorBrush")]
-    public static class Patch_MapUnitViewModel_AllyColour
+    [HarmonyPatch(typeof(MapContactVisuals), nameof(MapContactVisuals.Classify))]
+    public static class Patch_MapContactVisuals_AllyColour
     {
-        // Fully qualified: this file imports UnityEngine, which has its own colour types,
-        // and a bare `using Noesis` here would make several names ambiguous.
-        static void Prefix(MapUnitViewModel __instance, ref Noesis.SolidColorBrush value)
+        static void Postfix(IUnit unit, ref (MapVisualPosture Posture, MapUnitPalette Palette) __result)
         {
             if (!Plugin.Instance.CfgIsHost.Value) return;   // clients get it from IsControllable
             if (!NetworkManager.Instance.IsConnected) return;
-            if (value == null) return;
+            if (__result.Palette != MapUnitPalette.Friendly) return;
 
-            bool day   = value == UI_Parameters.TM_FriendlyColor_Brush;
-            bool night = value == UI_Parameters.TM_Night_FriendlyColor_Brush;
-            if (!day && !night) return;
-
-            var obj = __instance.Unit?.BaseObject as ObjectBase;
+            var obj = unit?.BaseObject as ObjectBase;
             if (obj == null) return;
             if (!FormationOwnership.IsOwnedByOther(obj)) return;
 
-            value = day ? UI_Parameters.TM_AlliedColor_Brush
-                        : UI_Parameters.TM_Night_AlliedColor_Brush;
+            __result.Palette = MapUnitPalette.Allied;
         }
     }
 
@@ -2957,7 +2955,8 @@ namespace SeapowerMultiplayer
     // PropertyChanged and make Noesis re-read ContactInfoLine2.
 
     [HarmonyPatch(typeof(MapUnitViewModel), MethodType.Constructor,
-        new[] { typeof(Taskforce), typeof(Vehicle), typeof(ReactiveProperty<ISelectableObject>), typeof(bool) })]
+        new[] { typeof(SeapowerUI.MapViewModel), typeof(Taskforce), typeof(Vehicle),
+                typeof(ReactiveProperty<ISelectableObject>), typeof(bool), typeof(MapLabelRegistry) })]
     public static class Patch_MapUnitViewModel_Ctor
     {
         static void Postfix(MapUnitViewModel __instance) =>
@@ -3041,22 +3040,29 @@ namespace SeapowerMultiplayer
     // Client-only: on the host the player's change flows back to the client through
     // the 10 Hz entity stream (Telegraph/velocity), so no host broadcast is needed -
     // and the host's AI calls SetSpeedCommand every tick, which we must not echo.
-    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetSpeedCommand))]
+    //
+    // Speed orders are value structs now; the generic SetSpeedCommand<T> overload only
+    // converts to a SpeedRequest and forwards here, so this one overload sees them all.
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetSpeedCommand),
+        new[] { typeof(SpeedRequest) }, new[] { ArgumentType.Ref })]
     public static class Patch_Aircraft_SetSpeedCommand
     {
-        static bool Prefix(ObjectBase __instance, ISpeedCommand speedCommand)
+        static bool Prefix(ObjectBase __instance, ref SpeedRequest request)
         {
             if (OrderHandler.ApplyingFromNetwork) return true;
             if (!NetworkManager.Instance.IsConnected) return true;
             if (Plugin.Instance.CfgIsHost.Value) return true; // host: stream carries aircraft speed
             if (SessionManager.SceneLoading) return true;
+            // Formation physics re-commands every wingman to the leader's mach each
+            // tick - the leader's order, not the player's.
+            if (Patch_V2_Client_FormationFlight_KeepOwnCommand.Running) return true;
             if (!(__instance is Aircraft ac)) return true;
-            if (!(speedCommand is ConstantMach cm)) return true;
+            if (request.Kind != SpeedKind.Mach) return true;
 
             var speeds = ac.Ap?._speedValuesInMach;
             if (speeds == null) return true;
 
-            int idx = Array.IndexOf(speeds, cm.SpeedInMach);
+            int idx = Array.IndexOf(speeds, request.Value);
             if (idx < 0) return true; // not a player preset (AI/continuous value) - don't sync
 
             // Host applies via setTelegraph((int)Speed); Aircraft.setTelegraph does

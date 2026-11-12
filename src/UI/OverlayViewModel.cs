@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -71,8 +72,6 @@ namespace SeapowerMultiplayer.UI
         public DelegateCommand JoinClipboardCommand    { get; }
         public DelegateCommand CopyCodeCommand         { get; }
         public DelegateCommand InviteFriendCommand     { get; }
-        public DelegateCommand InviteBlueCommand       { get; }
-        public DelegateCommand InviteRedCommand        { get; }
         public DelegateCommand LeaveLobbyCommand       { get; }
         public DelegateCommand LiteNetPrimaryCommand   { get; }
         public DelegateCommand DisconnectCommand       { get; }
@@ -108,8 +107,6 @@ namespace SeapowerMultiplayer.UI
 
             HostLobbyCommand     = new DelegateCommand(_ => SteamLobbyManager.CreateLobby());
             InviteFriendCommand  = new DelegateCommand(_ => SteamLobbyManager.InviteFriend());
-            InviteBlueCommand    = new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(Team.Blue));
-            InviteRedCommand     = new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(Team.Red));
             LeaveLobbyCommand    = new DelegateCommand(_ => SteamLobbyManager.LeaveLobby());
 
             CopyCodeCommand = new DelegateCommand(_ =>
@@ -437,8 +434,10 @@ namespace SeapowerMultiplayer.UI
             public Brush  TeamBrush  { get; }
             public string StatusText { get; }
             public Visibility HostControlsVisibility { get; }
-            public DelegateCommand SetBlueCommand { get; }
-            public DelegateCommand SetRedCommand  { get; }
+
+            /// <summary>One button per side of the mission, by name - the host's seat
+            /// picker for this player.</summary>
+            public List<SideButtonVm> Sides { get; } = new();
 
             /// <summary>Per-player state send. Replaces the single "Send State &amp; Wait"
             /// button, which was always a session boundary: it reloaded EVERY player and
@@ -459,7 +458,7 @@ namespace SeapowerMultiplayer.UI
             {
                 NameText   = isLocal ? $"{p.DisplayName} (you)" : p.DisplayName;
                 TeamText   = Teams.Name(p.Team).ToUpperInvariant();
-                TeamBrush  = p.Team == Team.Blue ? TeamBlue : TeamRed;
+                TeamBrush  = BrushFor(p.Team);
 
                 // Where this player is, in the terms the host thinks in: still in the
                 // lobby, on their way into the battle, or in it.
@@ -469,9 +468,9 @@ namespace SeapowerMultiplayer.UI
                            : loaded           ? "in mission"
                                               : "in lobby";
 
-                // Slot 0 is the host and is pinned to Blue - the authoritative sim runs
-                // on its own unswapped save, so it has nowhere else to sit. `loaded`
-                // means this player has already taken a side-swapped save; see
+                // Slot 0 is the host and is pinned to its own side - the authoritative
+                // sim runs on its own unchanged save, so it has nowhere else to sit.
+                // `loaded` means this player has already taken a side-reseated save; see
                 // RefreshRoster for why it is not PlayerInfo.Ready.
                 HostControlsVisibility = Vis(hostControls && p.Slot != 0 && !loaded);
 
@@ -481,8 +480,12 @@ namespace SeapowerMultiplayer.UI
                 SendEnabled    = !sendBusy;
 
                 byte slot = p.Slot;
-                SetBlueCommand = new DelegateCommand(_ => HostMove(slot, Team.Blue));
-                SetRedCommand  = new DelegateCommand(_ => HostMove(slot, Team.Red));
+                foreach (var team in SideTable.All)
+                {
+                    var t = team;
+                    Sides.Add(new SideButtonVm(Teams.Name(t), t != p.Team,
+                                               new DelegateCommand(_ => HostMove(slot, t))));
+                }
                 SendCommand    = new DelegateCommand(_ => SessionManager.HostSendTo(slot));
             }
 
@@ -494,10 +497,42 @@ namespace SeapowerMultiplayer.UI
             }
         }
 
-        private static readonly Brush TeamBlue = Frozen(0.45f, 0.70f, 1.00f);
-        private static readonly Brush TeamRed  = Frozen(1.00f, 0.45f, 0.45f);
+        /// <summary>A button naming one side: a roster row's seat picker, or an
+        /// invite.</summary>
+        public sealed class SideButtonVm
+        {
+            public string Label { get; }
+            public bool Enabled { get; }
+            public DelegateCommand Command { get; }
+
+            public SideButtonVm(string label, bool enabled, DelegateCommand command)
+            {
+                Label = label;
+                Enabled = enabled;
+                Command = command;
+            }
+        }
+
+        // The host's side keeps the old Blue, the enemy side the old Red; further
+        // sides cycle through colours that read apart from both.
+        private static readonly Brush[] TeamBrushes =
+        {
+            Frozen(0.45f, 0.70f, 1.00f),   // host's side
+            Frozen(1.00f, 0.45f, 0.45f),   // enemy side
+            Frozen(0.45f, 0.90f, 0.50f),
+            Frozen(1.00f, 0.85f, 0.35f),
+            Frozen(0.80f, 0.55f, 1.00f),
+            Frozen(1.00f, 0.65f, 0.30f),
+        };
+
+        private static Brush BrushFor(Team team) => TeamBrushes[(int)team % TeamBrushes.Length];
 
         public ObservableCollection<PlayerRowVm> Roster { get; } = new();
+
+        /// <summary>"Invite player to ..." - one per side of the mission. Rebuilt only
+        /// when the side table changes, for the same live-Button reason as the roster.</summary>
+        public ObservableCollection<SideButtonVm> InviteOptions { get; } = new();
+        private int _inviteSidesVersion = -1;
 
         /// <summary>Roster version the rows were built from. The rows carry live
         /// Buttons, and rebuilding those on the 10 Hz refresh would swallow clicks
@@ -513,6 +548,7 @@ namespace SeapowerMultiplayer.UI
         private bool _rosterHadTeamButtons;
         private bool _rosterHadSendButtons;
         private byte _rosterAwaitingSlot = PlayerRegistry.NoSender;
+        private int  _rosterSidesVersion = -1;
 
         public Visibility HostTeamControlsVisibility { get; private set; } = Visibility.Collapsed;
         public Visibility RosterVisibility { get; private set; } = Visibility.Collapsed;
@@ -958,6 +994,7 @@ namespace SeapowerMultiplayer.UI
 
                 ConnectedButtonsVisibility  = Vis(connected);
                 LobbyOwnerButtonsVisibility = Vis(!connected && inLobby && isOwner);
+                RefreshInviteOptions();
                 LobbyGuestButtonsVisibility = Vis(!connected && inLobby && !isOwner);
                 NoLobbyButtonsVisibility    = Vis(!connected && !inLobby);
                 SendStateHintVisibility     = Vis(connected && nm.IsHost && !canSend);
@@ -1126,14 +1163,18 @@ namespace SeapowerMultiplayer.UI
             byte awaiting = SessionManager.AwaitingSlot;
             bool sendBusy = awaiting != PlayerRegistry.NoSender;
 
+            // The side table too: a new mission brings different sides to pick from.
+            int sidesVersion = SideTable.Version;
             if (PlayerRegistry.Version == _rosterVersion
                 && canAssignTeams == _rosterHadTeamButtons
                 && canSend == _rosterHadSendButtons
-                && awaiting == _rosterAwaitingSlot) return;
+                && awaiting == _rosterAwaitingSlot
+                && sidesVersion == _rosterSidesVersion) return;
             _rosterVersion = PlayerRegistry.Version;
             _rosterHadTeamButtons = canAssignTeams;
             _rosterHadSendButtons = canSend;
             _rosterAwaitingSlot = awaiting;
+            _rosterSidesVersion = sidesVersion;
 
             Roster.Clear();
             byte localSlot = PlayerRegistry.LocalSlot;
@@ -1143,6 +1184,21 @@ namespace SeapowerMultiplayer.UI
                                            sendBusy, sendBusy && p.Slot == awaiting));
 
             Raise(nameof(MyTeamText));
+        }
+
+        private void RefreshInviteOptions()
+        {
+            int version = SideTable.Version;
+            if (version == _inviteSidesVersion) return;
+            _inviteSidesVersion = version;
+
+            InviteOptions.Clear();
+            foreach (var team in SideTable.All)
+            {
+                var t = team;
+                InviteOptions.Add(new SideButtonVm($"Invite player to {Teams.Name(t)}", true,
+                                                   new DelegateCommand(_ => SteamLobbyManager.InviteToTeam(t))));
+            }
         }
 
         private void RefreshSettingsLock(NetworkManager nm)

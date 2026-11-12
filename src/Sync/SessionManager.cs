@@ -523,7 +523,7 @@ namespace SeapowerMultiplayer
             if (match.Success)
             {
                 string relPath = match.Groups[1].Value.Trim();
-                string fullPath = Singleton<FileManager>.Instance.GetFile(relPath, null);
+                string fullPath = Singleton<FileManager>.Instance.GetFile(relPath);
                 if (fullPath != null && File.Exists(fullPath))
                 {
                     missionFileName    = Path.GetFileName(fullPath);
@@ -565,6 +565,11 @@ namespace SeapowerMultiplayer
             }
 
             float gameSeconds = Singleton<SeaPower.Environment>.Instance.Seconds;
+
+            // Side table (and any seat it clamps) ahead of the save, on the same reliable
+            // ordered stream: a guest reseats its save by the name of its side, so it
+            // must hold this mission's table before the save lands.
+            PlayerRegistry.HostBroadcastRoster();
 
             var msg = new SessionSyncMessage
             {
@@ -618,10 +623,10 @@ namespace SeapowerMultiplayer
             _retryCount = 0;
             SimSyncManager.ClearIssue();
 
-            // The host is the first player on Blue, so it takes Blue's formations under
-            // the same rule as anyone else. Idempotent - only ever claims units nobody
-            // holds - so running it on every capture is safe.
-            FormationOwnership.HostGrantTeamTo(Team.Blue, 0);
+            // The host is the first player on its own side, so it takes that side's
+            // formations under the same rule as anyone else. Idempotent - only ever
+            // claims units nobody holds - so running it on every capture is safe.
+            FormationOwnership.HostGrantTeamTo(Team.Host, 0);
 
             if (_pendingSessionBoundary)
             {
@@ -712,7 +717,7 @@ namespace SeapowerMultiplayer
             {
                 string fileName = Path.GetFileName(missionPath);
                 string resolved = Singleton<FileManager>.Instance?.GetFile(
-                    "missions/" + fileName, null) ?? "";
+                    "missions/" + fileName) ?? "";
                 if (!string.IsNullOrEmpty(resolved) && File.Exists(resolved))
                     missionPath = resolved;
                 else
@@ -725,7 +730,9 @@ namespace SeapowerMultiplayer
                 }
             }
 
-            Globals.currentMissionFilePath = missionPath;
+            // OpenMission, not a bare path: it also mounts the mission's own data and
+            // briefing folders (and unpacks a bundle), which loading now relies on.
+            Globals.OpenMission(missionPath);
             SceneLoading = true;
             DoUnloadAndLoad();
             Log.LogInfo($"[Session] Loading mission by name: {Path.GetFileName(missionPath)}");
@@ -797,27 +804,38 @@ namespace SeapowerMultiplayer
                 patchedSave = standalone;
             }
 
-            // A RED guest swaps PlayerTaskforce ↔ EnemyTaskforce so it commands the
-            // opposing side. A BLUE guest is on the host's own side and loads the save
-            // exactly as the host wrote it - which is what makes two Blue guests
-            // co-operate with no extra machinery.
+            // A guest seated on any side but the host's rewrites PlayerTaskforce to the
+            // side it commands. A guest on the host's own side loads the save exactly as
+            // the host wrote it - which is what makes two such guests co-operate with no
+            // extra machinery.
             if (Teams.LocalSaveSwapped)
             {
-                patchedSave = SwapTaskforceSides(patchedSave, "save");
+                // The host published the side table before this save (same reliable
+                // ordered stream), so the seat's stable name is known. Without one -
+                // a host that never loaded a mission with sides - only the old
+                // two-side swap is expressible.
+                string? side = SideTable.StableName(PlayerRegistry.LocalTeam);
+                if (side == null && PlayerRegistry.LocalTeam != Team.Enemy)
+                    Log.LogError($"[Session] No mission side for seat {(byte)PlayerRegistry.LocalTeam} - loading on the enemy side");
+
+                patchedSave = ReseatTaskforceSides(patchedSave, side, "save", out bool tookEnemySide);
 
                 // Saves now carry [Mission] MissionStatus (LoadMetadata restores it),
-                // written from the host's side - its Victory is this guest's Defeat.
-                patchedSave = Regex.Replace(
-                    patchedSave,
-                    @"(?im)^(\s*MissionStatus\s*=\s*)(Victory|Defeat)\s*$",
-                    m => m.Groups[1].Value
-                         + (m.Groups[2].Value.Equals("Victory", System.StringComparison.OrdinalIgnoreCase) ? "Defeat" : "Victory"));
+                // written from the host's side. Taking the host's enemy side makes its
+                // Victory this guest's Defeat; any other side's outcome is not the
+                // inverse of the host's, so it is left as written.
+                if (tookEnemySide)
+                    patchedSave = Regex.Replace(
+                        patchedSave,
+                        @"(?im)^(\s*MissionStatus\s*=\s*)(Victory|Defeat)\s*$",
+                        m => m.Groups[1].Value
+                             + (m.Groups[2].Value.Equals("Victory", System.StringComparison.OrdinalIgnoreCase) ? "Defeat" : "Victory"));
 
-                // Also swap in the mission file so BaseFile reads are consistent
+                // Also reseat in the mission file so BaseFile reads are consistent
                 if (!string.IsNullOrEmpty(msg.MissionFileContent) && File.Exists(missionPath))
                 {
-                    string swappedMission = SwapTaskforceSides(File.ReadAllText(missionPath), "mission");
-                    File.WriteAllText(missionPath, swappedMission);
+                    string reseatedMission = ReseatTaskforceSides(File.ReadAllText(missionPath), side, "mission", out _);
+                    File.WriteAllText(missionPath, reseatedMission);
                 }
             }
 
@@ -829,8 +847,10 @@ namespace SeapowerMultiplayer
             // instead of returning stale cached data from a previous load.
             IniHandler.invalidateCache();
 
-            Globals.currentMissionFilePath = savePath;
-            Log.LogInfo($"[Session] Set Globals.currentMissionFilePath = {savePath}");
+            // The game's own save-load entry (MainMenuViewModel): mounts the base
+            // mission's folders as well as making the save current.
+            Globals.OpenMission(savePath);
+            Log.LogInfo($"[Session] Opened mission {Globals.currentMissionFilePath}");
             SceneLoading = true;
             Log.LogInfo("[Session] SceneLoading=true, calling MissionManager.DoLoad...");
             DoUnloadAndLoad();
@@ -838,30 +858,44 @@ namespace SeapowerMultiplayer
         }
 
         /// <summary>
-        /// Swap PlayerTaskforce ↔ EnemyTaskforce values in an INI-format string.
+        /// Make <paramref name="side"/> this machine's PlayerTaskforce in an INI-format
+        /// string (null = the file's own EnemyTaskforce, i.e. the classic swap).
+        ///
+        /// When that side was the EnemyTaskforce, the host's side takes its place, so
+        /// the two-side case is exactly the old swap. Any other side leaves
+        /// EnemyTaskforce alone: SceneCreator only needs it to name some side with the
+        /// Enemy role, and the host's side has that role on this machine anyway.
+        /// Relations are unaffected either way - the save lists every pair by name.
         /// </summary>
-        private static string SwapTaskforceSides(string content, string label)
+        private static string ReseatTaskforceSides(string content, string? side, string label, out bool tookEnemySide)
         {
+            tookEnemySide = false;
             var playerMatch = Regex.Match(content, @"(?im)^(\s*PlayerTaskforce\s*=\s*)(.+?)\s*$");
             var enemyMatch  = Regex.Match(content, @"(?im)^(\s*EnemyTaskforce\s*=\s*)(.+?)\s*$");
 
             if (!playerMatch.Success || !enemyMatch.Success)
             {
-                Log.LogWarning($"[Session] PvP: could not find PlayerTaskforce/EnemyTaskforce in {label}");
+                Log.LogWarning($"[Session] Could not find PlayerTaskforce/EnemyTaskforce in {label}");
                 return content;
             }
 
             string playerVal = playerMatch.Groups[2].Value;
             string enemyVal  = enemyMatch.Groups[2].Value;
+            string target = side ?? enemyVal;
+            if (target == playerVal) return content;
 
             content = Regex.Replace(content,
                 @"(?im)^(\s*PlayerTaskforce\s*=\s*).+$",
-                m => m.Groups[1].Value + enemyVal);
-            content = Regex.Replace(content,
-                @"(?im)^(\s*EnemyTaskforce\s*=\s*).+$",
-                m => m.Groups[1].Value + playerVal);
+                m => m.Groups[1].Value + target);
+            if (target == enemyVal)
+            {
+                tookEnemySide = true;
+                content = Regex.Replace(content,
+                    @"(?im)^(\s*EnemyTaskforce\s*=\s*).+$",
+                    m => m.Groups[1].Value + playerVal);
+            }
 
-            Log.LogInfo($"[Session] PvP: swapped sides in {label} — Player={enemyVal}, Enemy={playerVal}");
+            Log.LogInfo($"[Session] Reseated {label} — Player={target}, Enemy={(tookEnemySide ? playerVal : enemyVal)}");
             return content;
         }
 
@@ -896,7 +930,7 @@ namespace SeapowerMultiplayer
                 Log.LogInfo("[Session] In-game reload: unloading old scene first");
                 MissionManager.DoLoad(new List<LoadAction>
                 {
-                    new LoadAction(99999, "UnloadOldMission", MissionManager.DoUnload(), 1),
+                    new LoadAction(99999, "UnloadOldMission", MissionManager.DoUnload(keepMissionMount: true), 1),
                     new LoadAction(99998, "ClearAudioManager", ClearAudioManagerCoroutine(), 1),
                 });
             }
@@ -1102,6 +1136,8 @@ namespace SeapowerMultiplayer
             {
                 if (obj == null) continue;
                 if (obj._taskforce == Globals._playerTaskforce) continue;
+                // Only sides a person commands: an AI side's restored tasks are its own.
+                if (!Teams.IsHumanControlled(obj._taskforce)) continue;
                 if (obj.IsDestroyed) continue;
 
                 // CeaseFire clears all active engage tasks and weapon system queues.
